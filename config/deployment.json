@@ -1,0 +1,12 @@
+{
+  "health_timeout_seconds": 90,
+  "health_timeout_seconds说明": "切换后等待健康检查成功的最长秒数",
+  "health_interval_seconds": 3,
+  "health_interval_seconds说明": "健康检查重试间隔秒数",
+  "request_timeout_seconds": 5,
+  "request_timeout_seconds说明": "每次健康请求超时秒数",
+  "docker_timeout_seconds": 15,
+  "docker_timeout_seconds说明": "Docker 状态查询及候选配置校验超时秒数",
+  "switch_timeout_seconds": 180,
+  "switch_timeout_seconds说明": "服务切换或回滚超时秒数，须覆盖容器正常停止等待时间"
+}

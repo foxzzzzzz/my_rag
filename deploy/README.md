@@ -1,5 +1,23 @@
 # PersonalKB Linux deployment
 
+## Deploy from a Git checkout
+
+On the prepared Ubuntu server, clone the repository into a directory alongside the existing runtime directories. For example, use `~/my_rag/personalkb/repo` as the checkout and keep `config`, `state`, `backups`, and `secrets/personalkb.env` under `~/my_rag/personalkb`. The server needs Docker Compose, Python 3, and the configured HTTPS reverse proxy.
+
+From the checkout, run:
+
+```bash
+git pull --ff-only
+sudo sh deploy/deploy.sh --check
+sudo sh deploy/deploy.sh
+```
+
+The script uses the checkout's parent as the installation root. Use `--install-root /absolute/path` for a different prepared root. Use one installation root per Docker daemon for the `personalkb` project and its image tags. `--check` validates the installation without initializing data. Use the setup instructions below to prepare a new host's production configuration and secret file before the first deployment. On an empty installation the deploy command initializes the workflow database and an empty budget ledger before starting services. Existing installations and migrated data must supply both databases. A missing database or budget ledger in an existing installation needs investigation before deployment.
+
+The deploy command streams the candidate build output while the current services are running. It checks the candidate's RAG configuration offline, saves the existing image as `personalkb:deploy-rollback`, switches the project's Web and worker, and verifies the local and HTTPS health endpoints. A failed switch or an interrupt during the switch from Ctrl+C, `SIGHUP`, or `SIGTERM` triggers rollback. The script checks health after restoring a running installation. For a stopped installation it recreates both containers with the old image in a stopped state and checks their image and status. The rollback tag covers the container image. Keep a verified cold backup for recovery of the database and files.
+
+Health timing defaults are documented in `config/deployment.json`. Use `deployment.json` in the installation's external `config` directory to override them. Schedule a brief interruption for an upgrade and finish any running processing tasks beforehand. Review the reported rollback result before retrying a failed deployment.
+
 Unpack the deployment kit on Ubuntu 24.04 x86-64. Install Docker Compose and configure a separate HTTPS vhost using nginx.conf.template; replace all placeholders, including __APP_PORT__ with the port passed to configure.py (default 8768). Existing sites and services must be preserved.
 
 Run `python3 deploy/configure.py --hostname kb.yuanzhll.top --output /absolute/config-dir` and create private state, state/tmp and backup directories. Create a private secret file containing PERSONALKB_PASSWORD_HASH generated with the project password setup tooling; model keys are optional and must never be included in a report. Set STATE_DIR, CONFIG_DIR, SECRET_FILE and BACKUP_DIR in your shell or a private Compose environment file. Run `sh deploy/operate.sh report --config /absolute/config-dir/web.json --state /absolute/state --secret /absolute/secret-file` and address failures. Configure TLS and DNS separately; the report does not verify them.
