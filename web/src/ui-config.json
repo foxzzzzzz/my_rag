@@ -1,0 +1,13 @@
+{
+  "default_reviewer": "本人",
+  "default_reviewer说明": "新建审核草稿默认审核人，每份可修改",
+  "review_score_step": 0.1,
+  "review_score_step说明": "评分输入步长；批准门槛读取session.config.quality_target",
+  "frame_preview_width": 120,
+  "frame_preview_width说明": "关键帧缩略图宽度px，窄屏受CSS最大宽度约束",
+  "navigation": [
+    {"id":"library","label":"资料库"}, {"id":"ask","label":"问答"},
+    {"id":"import","label":"导入"}, {"id":"tasks","label":"任务"}, {"id":"catalog","label":"分类"}
+  ],
+  "navigation说明": "正式侧栏顺序与中文名称，页面内部ID由App识别"
+}

@@ -1,0 +1,7 @@
+[Unit]
+Description=PersonalKB daily cold backup
+[Service]
+Type=oneshot
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__ENVIRONMENT_FILE__
+ExecStart=/bin/sh __PROJECT_DIR__/deploy/operate.sh daily

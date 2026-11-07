@@ -1,0 +1,39 @@
+{
+  "说明": {
+    "backend": "仅手动选择temporary或managed_oss，默认temporary；不根据密钥存在或故障自动切换",
+    "max_upload_bytes": "单音频上传大小上限64MiB，超限显式失败不截断；调大后评估资源",
+    "temporary": "已验证百炼临时上传路径，只需百炼Key；有效48小时、受账号/模型绑定，官方不建议生产",
+    "managed_oss": "后续手动配置的独立私有OSS；默认不启用、不创建Bucket，不影响临时开发模式",
+    "allowed_api_hosts": "Bearer仅允许发送到这些官方API域名；改Workspace域名须显式加入",
+    "allowed_upload_suffix": "临时政策上传HTTPS主机限定后缀，绝不发送百炼Bearer",
+    "credential_env": "只写密钥环境变量名，实际值在本地.env或服务器私密环境配置",
+    "url_ttl_seconds": "正式签名URL有效期，默认1小时为待联调初始值；还受凭证有效期约束",
+    "prefix": "专用对象前缀，不得为空或包含路径回退，避免清理越界",
+    "response_max_bytes": "HTTP响应读取字节上限，超限拒绝"
+  },
+  "backend": "temporary",
+  "max_upload_bytes": 67108864,
+  "request_timeout_seconds": 60,
+  "temporary": {
+    "api_base_url": "https://dashscope.aliyuncs.com/api/v1",
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "allowed_api_hosts": [
+      "dashscope.aliyuncs.com"
+    ],
+    "allowed_upload_suffix": ".oss-cn-beijing.aliyuncs.com",
+    "lifetime_seconds": 172800
+  },
+  "managed_oss": {
+    "endpoint": "https://oss-cn-beijing.aliyuncs.com",
+    "region": "cn-beijing",
+    "bucket": "",
+    "prefix": "personalkb/asr/",
+    "url_ttl_seconds": 3600,
+    "credential_env": {
+      "access_key_id": "PERSONALKB_OSS_ACCESS_KEY_ID",
+      "access_key_secret": "PERSONALKB_OSS_ACCESS_KEY_SECRET",
+      "security_token": "PERSONALKB_OSS_SECURITY_TOKEN"
+    }
+  },
+  "response_max_bytes": 4194304
+}

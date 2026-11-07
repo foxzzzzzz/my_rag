@@ -1,0 +1,16 @@
+{
+  "allowed_origin": "https://kb.yuanzhll.top",
+  "allowed_origin说明": "唯一允许接收登录口令的 HTTPS 源，包含协议和域名，不含路径",
+  "request_timeout_seconds": 10,
+  "request_timeout_seconds说明": "单次 HTTP 请求超时秒数",
+  "max_response_bytes": 1048576,
+  "max_response_bytes说明": "单次 HTTP 响应最大字节数",
+  "max_sample_seconds": 300,
+  "max_sample_seconds说明": "可选资源采样最大持续秒数",
+  "sample_interval_seconds": 1,
+  "sample_interval_seconds说明": "可选资源采样间隔秒数",
+  "disk_path": "/state",
+  "disk_path说明": "服务器持久化存储路径，用于统计空间",
+  "protected_historical_path": null,
+  "protected_historical_path说明": "已知历史路径，明确配置后仅在未登录时检查；留空不猜测"
+}

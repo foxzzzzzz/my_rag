@@ -1,0 +1,16 @@
+{
+  "min_paragraph_chars": 48,
+  "semicolon_break_chars": 160,
+  "transition_min_chars": 16,
+  "sentence_endings": "。！？!?",
+  "semicolon_endings": "；;",
+  "transition_starts": ["它可以", "因此", "所以", "此外", "另外", "另一方面", "对比而言", "裁剪方式", "可能破坏", "作为", "二是", "三是", "记忆对象", "总体设计", "另一份材料", "材料同时", "第五种", "口播"],
+  "说明": {
+    "min_paragraph_chars": "普通句末前累计可见字符达到此值时分段；完整引用ID不计入可见长度。只在安全标点处切，不截断句子",
+    "semicolon_break_chars": "较长并列分句允许在分号处分段的可见字符门槛，不在引号或代码内切分",
+    "transition_min_chars": "句末后明确话题转换时允许短段的最小可见字符数，避免一两字独立成段",
+    "sentence_endings": "可作为句末的标点；不按英文点号切，保护小数、文件名及路径",
+    "semicolon_endings": "可作为长并列分句边界的分号",
+    "transition_starts": "句末后提示话题转换的通用开头；只影响段落边界，不插入或改写任何文字"
+  }
+}

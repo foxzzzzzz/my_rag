@@ -1,0 +1,34 @@
+{
+  "_说明": "抖音导入默认关闭；用户已授权 authorized_playback 播放地址策略，当前样本已完成一次真实下载和统一导入闭环；Cookie 通过指定环境变量提供。",
+  "enabled": false,
+  "resolver_python": "",
+  "cookie_env": "PERSONALKB_DOUYIN_COOKIE",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 QuarkPC/7.4.5.1027",
+  "resolve_timeout_seconds": 30,
+  "api_timeout_seconds": 15,
+  "max_resolver_output_bytes": 65536,
+  "share_hosts": [
+    "www.douyin.com",
+    "douyin.com",
+    "v.douyin.com"
+  ],
+  "media_hosts": [
+    "douyinvod.com",
+    "bytecdn.cn"
+  ],
+  "max_redirects": 5,
+  "max_download_bytes": 524288000,
+  "min_free_bytes": 8589934592,
+  "download_timeout_seconds": 300,
+  "request_timeout_seconds": 15,
+  "_参数说明": "enabled 启用开关；resolver_python 独立 Python 路径；cookie_env Cookie 环境变量名；user_agent 请求标识；resolve_timeout_seconds 子进程总时限；api_timeout_seconds API 超时；max_resolver_output_bytes 子进程输出上限；share_hosts 分享域名；media_hosts 媒体域名后缀；max_redirects 重定向次数；max_download_bytes 下载字节上限；min_free_bytes 最低空闲字节；download_timeout_seconds 下载总时限；request_timeout_seconds 单次请求超时。 download_chunk_bytes 每次读取字节数。 resolver_mode 解析模式 minimal_detail 或 f2；detail_aid 和 detail_version_code 为数字字符串；max_detail_response_bytes 同时限制原始压缩及解压后的详情响应字节。 download_policy 可选 strict 或 authorized_playback（用户已授权播放地址策略）；media_referer 媒体请求使用的固定 HTTPS 来源。",
+  "download_chunk_bytes": 65536,
+  "dns_timeout_seconds": 5,
+  "dns_timeout_seconds说明": "每次DNS解析最大等待秒数，且不超过剩余阶段总时限；解析后连接固定已核验IP并保留原域名TLS验证",
+  "resolver_mode": "minimal_detail",
+  "detail_aid": "6383",
+  "detail_version_code": "190500",
+  "max_detail_response_bytes": 1048576,
+  "download_policy": "authorized_playback",
+  "media_referer": "https://www.douyin.com/"
+}

@@ -1,0 +1,8 @@
+{
+  "说明": {"dependencies":"仅本机临时依赖，不修改全局Python","rows":"合成扩充总块数，只验证性能不验证语义质量","dimensions":"既有v4索引维度","timed_queries":"每种检索的暖缓存请求数","warmups":"预热轮数","cold_queries":"每种检索重新连接的测量次数，不清操作系统缓存","jitter":"合成向量每维均匀扰动幅度，非新模型输出","p95_limit_ms":"本地检索门槛，不含外部模型调用","cache_kib":"SQLite页缓存建议上限","seed":"合成样本的可复现种子","rrf_constant":"词法与向量排名融合常量","output":"仅研究产物目录，不覆盖原索引"},
+  "dependencies":"tmp/benchmark-deps",
+  "base_directory":"reports/retrieval-trial-v1-20261104",
+  "output":"reports/index-benchmark-20261104",
+  "rows":10000,"dimensions":1024,"top_k":10,"timed_queries":100,"warmups":5,"cold_queries":10,
+  "jitter":0.002,"seed":20261104,"p95_limit_ms":1000,"cache_kib":32768,"rrf_constant":60,"rss_interval_seconds":0.01
+}

@@ -1,0 +1,123 @@
+{
+  "说明": {
+    "scope": "只执行离线媒体负载，不调用模型或操作既有业务",
+    "sources": "原有三条已获批视频和SHA256；秒数用于音频完整性核对，帧时间沿用真实demo",
+    "limits": "资源保护：整机total-available采样代理值不超过3,000,000,000字节（3.0GB，约2.79GiB），可用内存≥512MiB、可用磁盘≥8GiB；不是硬隔离/业务响应验收",
+    "ffmpeg": "限制单任务解码/滤镜线程；完整解码、音频提取和59张独立关键帧，不代表新质量选型",
+    "interruption_seconds": "另外启动循环解码并主动中断，仅终止本测试的进程组",
+    "cleanup": "清理本次独占work里生成的WAV/JPEG，保留输入、日志与报告",
+    "output_base": "每轮新建时间戳/随机run目录，禁止覆盖",
+    "dependencies": "仅本目录依赖，无需Key"
+  },
+  "sources": [
+    {
+      "id": "V01",
+      "path": "inputs/V01.mp4",
+      "sha256": "239a0c23467d1fafc257edd15beea5ecd5a0433345323dcd5d4254e64d13e0da",
+      "duration_seconds": 20.48,
+      "frame_seconds": [
+        0.25,
+        1.25,
+        2.25,
+        3.25,
+        4.25,
+        5.25,
+        6.25,
+        7.25,
+        8.25,
+        9.25,
+        10.25,
+        11.25,
+        12.25,
+        13.25,
+        14.25,
+        15.25,
+        16.25,
+        17.25,
+        18.25,
+        19.25,
+        20.25
+      ]
+    },
+    {
+      "id": "V02",
+      "path": "inputs/V02.mp4",
+      "sha256": "077e630756548ad1699d63575b6fd3db96670ca0e33707cb9964c327ba80dabe",
+      "duration_seconds": 414.93,
+      "frame_seconds": [
+        0.1,
+        0.666,
+        21.838,
+        43.677,
+        65.515,
+        85.1,
+        87.354,
+        109.192,
+        131.031,
+        152.869,
+        174.707,
+        196.546,
+        218.384,
+        240.223,
+        262.061,
+        283.899,
+        305.738,
+        327.576,
+        349.415,
+        371.253,
+        393.092,
+        414.83
+      ]
+    },
+    {
+      "id": "V03",
+      "path": "inputs/V03.mp4",
+      "sha256": "35569d84754c69470d627ca726db8a6bbcd57c5f45d6f6d7ed41382e8fbbca12",
+      "duration_seconds": 640.8,
+      "frame_seconds": [
+        0.1,
+        2.4,
+        49.567,
+        54.4,
+        58.255,
+        86.5,
+        116.509,
+        174.764,
+        233.018,
+        291.273,
+        349.527,
+        407.782,
+        466.036,
+        524.291,
+        582.545,
+        639.8
+      ]
+    }
+  ],
+  "dependencies": "tmp/media-deps",
+  "output_base": "reports/media-resource-runs",
+  "limits": {
+    "interval_seconds": 0.2,
+    "timeout_seconds": 900,
+    "min_available_memory_bytes": 536870912,
+    "min_free_disk_bytes": 8589934592,
+    "max_host_used_bytes": 3000000000,
+    "terminate_grace_seconds": 3
+  },
+  "ffmpeg": {
+    "threads": 2,
+    "filter_threads": 1,
+    "filter_complex_threads": 1,
+    "audio_sample_rate": 16000,
+    "audio_channels": 1,
+    "frame_width": 2560,
+    "jpeg_quality": 2,
+    "pixel_format": "yuvj420p",
+    "color_range": "pc",
+    "compliance": "-2"
+  },
+  "audio_duration_tolerance_seconds": 1.5,
+  "interruption_seconds": 2,
+  "cleanup": true,
+  "decode_duration_tolerance_seconds": 1.5
+}

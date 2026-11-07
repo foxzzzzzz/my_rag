@@ -1,0 +1,7 @@
+{
+  "max_name_length": 100,
+  "max_aliases": 20,
+  "max_labels_per_kind": 100,
+  "max_bulk_items": 100,
+  "_description": "max_name_length: 名称长度；max_aliases: 单分类别名数；max_labels_per_kind: 每来源每类分类数；max_bulk_items: 单批来源数"
+}

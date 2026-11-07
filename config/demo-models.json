@@ -1,0 +1,79 @@
+{
+  "说明": {
+    "scheme_id": "本轮demo方案标识，不等于生产选型冻结",
+    "verified_date": "官方文档核对日期",
+    "region": "百炼账号与API Key对应地域，当前只配北京",
+    "providers": "各服务地址和密钥环境变量名，禁止放真实密钥；百炼API与兼容路径不可混用",
+    "models": "本轮各能力模型和协议；仅ASR、视觉、文本，无embedding",
+    "limits": "预算为人民币上界；探测和demo均受累计研究预算约束，缺价格/超限不调用",
+    "source_root": "相对项目根目录的真实样本位置",
+    "ffmpeg_env": "可选FFmpeg可执行文件路径环境变量；为空时由doctor寻找PATH或tmp临时工具",
+    "initial_run": "先小额真实探测，再完整处理5份素材；失败不自动切换模型或重复收费",
+    "doctor": "本地诊断的素材扩展名、占位符及FFmpeg版本检查超时（秒），不请求网络"
+  },
+  "scheme_id": "demo-baseline-v1",
+  "verified_date": "2026-11-03",
+  "region": "cn-beijing",
+  "providers": {
+    "dashscope": {
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "api_base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "compatible_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "deepseek": {
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "compatible_base_url": "https://api.deepseek.com"
+    }
+  },
+  "models": {
+    "asr": {
+      "provider": "dashscope",
+      "model": "paraformer-v2",
+      "protocol": "dashscope_async_rest",
+      "upload": "temporary_policy",
+      "timestamp_alignment_enabled": true
+    },
+    "vision": {
+      "provider": "dashscope",
+      "model": "qwen3-vl-plus",
+      "protocol": "openai_chat_images"
+    },
+    "text": {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "protocol": "openai_chat"
+    }
+  },
+  "limits": {
+    "research_budget_cny": "100",
+    "smoke_budget_cny": "2",
+    "initial_demo_budget_cny": "20"
+  },
+  "source_root": "sources",
+  "ffmpeg_env": "FFMPEG_PATH",
+  "initial_run": "smoke_then_five_sources",
+  "doctor": {
+    "video_extensions": [
+      ".mp4",
+      ".mov",
+      ".mkv",
+      ".webm"
+    ],
+    "html_extensions": [
+      ".html",
+      ".htm"
+    ],
+    "placeholder_values": [
+      "your_api_key",
+      "your_key_here",
+      "replace_me",
+      "changeme",
+      "placeholder",
+      "sk-xxx",
+      "sk-your-key",
+      "填百炼北京的真实Key",
+      "填DeepSeek的真实Key"
+    ],
+    "ffmpeg_timeout_seconds": 5
+  }
+}

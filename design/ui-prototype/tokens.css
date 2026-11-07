@@ -1,0 +1,6 @@
+/* 色彩、排版与布局令牌：调整这些值可改变样稿的整体视觉。 */
+:root{--ink:#283733;--muted:#5f7066;--accent:#426f61;--accent-soft:#e8f0ea;--paper:#fffefa;--canvas:#f5f5ef;--line:#e4e8df;--side:#20332d;--space:24px;--reading:68ch;--radius:12px;
+/* 正文、辅助文字、主标题字号与阅读行高。 */
+--font-body:16px;--font-meta:13px;--font-title:36px;--line-reading:1.8;
+/* 桌面主区、侧栏、内边距、双列间距及审核栏宽度。 */
+--main-max:1350px;--sidebar-width:220px;--content-padding:52px 6% 100px;--column-gap:60px;--review-width:280px;font-family:"Microsoft YaHei", "PingFang SC",sans-serif;color:var(--ink);background:var(--canvas)}

@@ -1,0 +1,2 @@
+{"name":"personalkb-web","version":"0.1.0","type":"module","scripts":{"build":"vite build","test":"node --test src/auth-client.test.js src/helpers.test.js src/management-helpers.test.js src/rag-helpers.test.js src/citation-display.test.js src/answer-layout.test.js src/document-layout.test.js src/review-drafts.test.js src/rag-state.test.js"},"dependencies":{"react":"19.3.1","react-dom":"19.3.1"},"devDependencies":{"vite":"8.3.5"}}
+

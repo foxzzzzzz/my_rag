@@ -1,0 +1,10 @@
+/* 色彩、字号和布局参数：对应已批准的第二版样稿。 */
+:root {
+ --surface:#fff; --app-bg:#f7f8fa; --sidebar:#f1f3f5; --text:#24282e; --muted:#59616d; --accent:#345ca8; --border:#d9dee5; --danger:#a02e2e;
+ --sidebar-width:200px; /* 侧栏宽度 */
+ --review-width:280px; --column-gap:36px; /* 阅读和审核列 */
+ --radius:5px; --ui-size:14px; --body-size:16px; --heading-size:23px;
+ --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+ --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
+ --topbar-height:36px; --ask-width:850px; --list-side-width:150px;
+}

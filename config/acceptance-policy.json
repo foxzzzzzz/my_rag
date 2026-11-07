@@ -1,0 +1,5 @@
+{
+  "说明": {"video_count":"正式验收视频总数下限", "dev_count":"正式验收开发集视频数下限", "acceptance_count":"正式验收集视频数下限", "html_count":"正式验收 HTML 数量下限", "fact_count":"正式验收视频事实数下限", "accuracy":"正式验收准确率下限", "coverage":"正式验收覆盖率下限", "budget":"正式预研预算上界，人民币元", "extensions":"允许的文件扩展名", "required_tags":"必须覆盖的类别标签"},
+  "video_count":50, "dev_count":30, "acceptance_count":20, "html_count":10, "fact_count":500,
+  "accuracy":"0.98", "coverage":"0.98", "budget":"100", "extensions":{"video":[".mp4",".mov",".mkv",".webm"],"html":[".html",".htm"]}, "required_tags":[]
+}

@@ -1,0 +1,13 @@
+body{font:16px sans-serif;max-width:900px;margin:auto;padding:2em;line-height:1.6}section{border-top:1px solid #bbb;padding:1em 0}label{display:block;margin:.5em 0}input,select,textarea{margin-left:1em}textarea{vertical-align:top}#status{font-weight:bold}
+.source-card { margin: .8em 0; } .source-card blockquote { white-space: pre-wrap; overflow-wrap: anywhere; } .source-card pre { white-space: pre-wrap; overflow-wrap: anywhere; } sup a { font-size: .8em; }
+
+.answer-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-card blockquote { background: #f5f6f8; border-left: 3px solid #aab4c2; padding: .75em 1em; }
+
+body { overflow-wrap: anywhere; }
+textarea, input, select { max-width: 100%; box-sizing: border-box; }
+#fallback { width: 100%; }
+section > ol { list-style: none; padding-left: 0; }
+
+.answer-paragraph { margin: 0 0 1em; line-height: 1.8; }
+.answer-paragraph:last-child { margin-bottom: 0; }

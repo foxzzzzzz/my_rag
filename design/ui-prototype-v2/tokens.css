@@ -1,0 +1,2 @@
+/* 色彩、字号和布局参数：用于统一日常知识管理界面。 */
+:root { --surface:#fff; --app:#f7f8fa; --sidebar:#f1f3f5; --text:#24282e; --muted:#59616d; --blue:#345ca8; --border:#d9dee5; --side-width:200px; --review-width:280px; --radius:5px; --body-size:16px; /* 正文大小 */ --body-line-height:1.8; /* 阅读行高 */ --title-size:23px; /* 页面标题 */ --content-width:1400px; /* 主区最大宽度 */ --column-gap:36px; /* 阅读与审核列间距 */ --content-padding:28px 36px; /* 桌面主区内边距 */ --mobile-padding:22px 16px; /* 手机主区内边距 */ }

@@ -1,0 +1,12 @@
+{
+  "max_input_bytes": 52428800,
+  "max_uncompressed_bytes": 104857600,
+  "max_members": 512,
+  "max_note_bytes": 4194304,
+  "preview_ttl_seconds": 86400,
+  "max_input_bytes说明": "上传文件最大字节数",
+  "max_uncompressed_bytes说明": "ZIP解压总字节数上限",
+  "max_members说明": "ZIP成员数上限",
+  "max_note_bytes说明": "可编辑笔记最大字节数",
+  "preview_ttl_seconds说明": "预览有效期（秒）"
+}

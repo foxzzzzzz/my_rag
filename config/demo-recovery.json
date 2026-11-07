@@ -1,0 +1,15 @@
+{
+  "说明": {
+    "run_id": "只适用于本轮run，不修改已完成视频产物或评分身份",
+    "steps": "针对HTML文本生成的受控调整；保留原失败请求上界，不自动循环重试",
+    "suffix": "付费阶段新身份，避免覆盖/复用旧未完成请求",
+    "max_tokens": "提高JSON完整输出上限；材料正文仍完整保留",
+    "output_version": "本项输出版本",
+    "system_suffix": "约束笔记篇幅，避免复述全部源代码；原始提取可在评审页展开"
+  },
+  "run_id":"demo-baseline-v1-20261104",
+  "steps": {
+    "H01-text": {"suffix":"recovery-2","max_tokens":16384,"output_version":"2","system_suffix":"本项为长篇HTML代码分析。summary控制在300至600个中文字符，notes控制在4000至6000个中文字符；不要逐段复述全部源码或SVG XML，以标题和原始提取材料作为细节定位依据。优先保留架构、主循环、关键调用关系、工具/执行器约束、适用边界；避免反复解释同一概念。必须完整闭合JSON对象。"},
+    "H02-text": {"suffix":"bounded-1","max_tokens":16384,"output_version":"1","system_suffix":"本项为长篇HTML代码分析。summary控制在300至600个中文字符，notes控制在4000至6000个中文字符；不要逐段复述全部源码或SVG XML，以标题和原始提取材料作为细节定位依据。优先保留架构、主循环、关键调用关系、工具/执行器约束、适用边界；避免反复解释同一概念。必须完整闭合JSON对象。"}
+  }
+}

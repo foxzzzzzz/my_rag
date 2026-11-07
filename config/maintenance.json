@@ -1,0 +1,34 @@
+{
+  "workflow_config": "config/workflow.json",
+  "workflow_config说明": "工作流配置路径，相对于项目根目录或绝对路径",
+  "ledger_paths": [
+    "/state/budget.sqlite"
+  ],
+  "ledger_paths说明": "外置预算账本路径；当前支持一个账本",
+  "backup_root": "/backups",
+  "backup_root说明": "冷备份对象仓库，必须位于工作流数据目录之外；同盘不构成异地灾备",
+  "keep_snapshots": 7,
+  "keep_snapshots说明": "保留最近成功发布的快照数量",
+  "min_free_bytes": 8589934592,
+  "min_free_bytes说明": "备份和导出后保留的最小空闲字节数",
+  "video_retention_days": 7,
+  "video_retention_days说明": "成功视频原件最短保留天数",
+  "storage_mode": "manual",
+  "storage_mode说明": "传输模式 manual 或 oss；OSS 需显式配置私有桶",
+  "oss": {
+    "private": false,
+    "endpoint": "",
+    "region": "",
+    "bucket": "",
+    "prefix": "personalkb-backups/",
+    "access_key_id_env": "PERSONALKB_BACKUP_OSS_ACCESS_KEY_ID",
+    "access_key_secret_env": "PERSONALKB_BACKUP_OSS_ACCESS_KEY_SECRET",
+    "说明": "仅阿里云私有桶和 HTTPS；凭据从指定环境变量读取，不存入本配置"
+  },
+  "max_manifest_bytes": 4194304,
+  "max_manifest_bytes说明": "导入离线包时清单最大字节数",
+  "env_file": ".env",
+  "env_file说明": "外置秘密文件路径；环境变量覆盖文件中的同名值",
+  "auto_retention_enabled": false,
+  "auto_retention_enabled说明": "每日冷备成功并校验后自动执行已满足保留条件的视频清理；默认关闭"
+}

@@ -1,0 +1,27 @@
+{
+  "说明": {
+    "load":"用户日常规模，按月30天；平均视频5分钟是预算边界，不是现有样本均长",
+    "prices":"人民币公开北京价，不抵优惠或缓存；2026-11-04复核官方价格，token按百万计",
+    "classification":"尚未实现独立分类调用的预算假设，不能标为实测；每素材单独分类一调用",
+    "retry_fraction":"所有正常模型费的等价重试比例假设，未从极小样本估计",
+    "human_reprocess_fraction":"人工复核后整篇重处理比例假设，仅乘导入/分类/新文档索引",
+    "full_reindex":"每月额外全量重建一次1万块向量索引；按实测每块token均值外推",
+    "scenarios":"按条与按时长是两种外推假设，非等价保证；视频笔记和其embedding按同一时长/帧工作量系数伸缩，HTML与其embedding按同一长度系数伸缩；分类固定采用假设输入token预算，已有全库重建块数固定。视觉翻倍同时放大视频笔记/embedding，是材料增量保守假设，非实测线性定律",
+    "unknown_failure_stress":"额外12个文本失败请求各保留0.75元上界的压力情景，非预计实付；与重试余量可能重叠，作为保守敏感性单列"
+  },
+  "measurement":"reports/monthly-cost-20261104/measurements.json",
+  "output":"reports/monthly-cost-20261104",
+  "load":{"days":30,"videos_per_day":10,"video_mean_seconds":300,"html_per_day":10,"questions_per_day":10},
+  "prices":{"asr_per_second":"0.00008","vision_input":"1","vision_output":"10","text_input":"2","text_output":"8","embedding_input":"0.5"},
+  "classification":{"input_tokens":2000,"output_tokens":150},
+  "retry_fraction":"0.10","human_reprocess_fraction":"0.05",
+  "full_reindex":{"chunks":10000,"times_per_month":1},
+  "monthly_target_cny":"100",
+  "unknown_failure_stress":{"calls":12,"upper_per_call_cny":"0.75"},
+  "scenarios":[
+    {"id":"per_video_sample_mix","video_scaling":"per_video","html_multiplier":"1","vision_multiplier":"1"},
+    {"id":"per_minute_sample_mix","video_scaling":"per_minute","html_multiplier":"1","vision_multiplier":"1"},
+    {"id":"html_length_doubled","video_scaling":"per_video","html_multiplier":"2","vision_multiplier":"1"},
+    {"id":"vision_work_doubled","video_scaling":"per_video","html_multiplier":"1","vision_multiplier":"2"}
+  ]
+}

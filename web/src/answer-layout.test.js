@@ -1,0 +1,11 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {splitParagraphs} from './answer-layout.js';
+import {displayAnswer} from './citation-display.js';
+const id='a'.repeat(64), cite=`[${id}]`;
+test('paragraphs preserve input and citations belong to preceding sentence',()=>{const s='甲'.repeat(48)+'。'+cite+cite+'乙'.repeat(50)+'。';const p=splitParagraphs(s);assert.equal(p.join(''),s);assert.equal(p.length,2);assert.ok(p[0].endsWith(cite+cite));});
+test('global numbering across paragraphs',()=>{const s='甲'.repeat(48)+'。'+cite+'乙'.repeat(48)+'。'+cite;const d=displayAnswer(s,[{chunk_id:id}]);assert.equal(d.paragraphs.length,2);assert.equal(d.paragraphs[0].find(x=>x.id).marker,d.paragraphs[1].find(x=>x.id).marker);});
+test('protected text and precise slices',()=>{for(const s of ['', '证据不足。', '😀'.repeat(49)+'。后文', '"'+ '甲'.repeat(50)+'。乙"结束', '`'+ '甲'.repeat(50)+'。乙`结束', '路径 a.b/1.23', '第一段\n\n第二段', '甲'.repeat(160)+'；乙']){const p=splitParagraphs(s);assert.equal(p.join(''),s)}assert.equal(splitParagraphs('证据不足。').length,1);assert.equal(splitParagraphs('第一段\n\n第二段').length,2);assert.equal(splitParagraphs('甲'.repeat(160)+'；乙').length,2);});
+test('spaced citations and punctuation stay with previous paragraph',()=>{for(const sep of [' ', '\n\n']){const s='甲'.repeat(48)+'。！？'+sep+cite+' 后句';const p=splitParagraphs(s);assert.ok(p[0].endsWith(cite));assert.equal(p.join(''),s)}});
+test('nested quotes and code delimiters protect punctuation',()=>{for(const x of ['“外“内。仍内”外。仍外”', "'"+'甲'.repeat(48)+'。乙' + "'", '``'+'甲'.repeat(48)+'。乙``', '~~~'+'甲'.repeat(48)+'。乙~~~']){assert.equal(splitParagraphs(x).length,1)}});
+test('apostrophes inside quoted contractions do not close quotes',()=>{for(const s of ["'don't "+'甲'.repeat(48)+'。乙' + "'", '‘don’t '+'甲'.repeat(48)+'。乙’']){assert.equal(splitParagraphs(s).length,1);assert.equal(splitParagraphs(s).join(''),s)}});

@@ -1,0 +1,8 @@
+[Unit]
+Description=PersonalKB daily backup schedule
+[Timer]
+OnCalendar=__DAILY_TIME__
+Persistent=true
+Unit=personalkb-backup.service
+[Install]
+WantedBy=timers.target

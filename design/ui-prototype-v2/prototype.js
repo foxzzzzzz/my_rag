@@ -1,0 +1,192 @@
+import {
+  items,
+  examples,
+  approvalThreshold
+} from './demo-config.js';
+const view = document.querySelector('#view'),
+  modal = document.querySelector('#modal');
+let opener, tab = '正文',
+  scores = {},
+  drafts = {},
+  savedOpinions = {},
+  selectedTopic = '全部主题';
+const button = (text, cls = 'secondary', attrs = '') => `<button class="${cls}" ${attrs}>${text}</button>`;
+
+function dialog(title, body) {
+  opener = document.activeElement;
+  document.querySelector('#modal-title').textContent = title;
+  document.querySelector('#modal-body').textContent = body;
+  modal.showModal()
+}
+
+function close() {
+  modal.close();
+  opener?.focus()
+}
+document.querySelector('#close').onclick = close;
+document.querySelector('#close-bottom').onclick = close;
+modal.addEventListener('close', () => opener?.focus());
+
+function nav(name) {
+  document.querySelectorAll('[data-nav]').forEach(a => (a.classList.toggle('active', a.dataset.nav === name), a.dataset.nav === name ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')))
+}
+
+function library() {
+  nav('library');
+  view.innerHTML = `<div class="page-head"><div><h1 tabindex="-1">资料库</h1></div>${button('＋ 导入资料','primary','id="import"')}</div><div class="filters"><label class="search">搜索资料<input id="search" type="search" placeholder="搜索标题、摘要或主题"></label><label>来源类型<select id="type"><option>全部类型</option><option>视频</option><option>HTML</option></select></label><label>审核状态<select id="status"><option>全部状态</option><option>已批准</option><option>待审核</option></select></label><label>主题<select id="topic"></select></label></div><div class="list-head"><strong>全部资料</strong><span class="meta" id="count"></span></div><div class="list" id="list"></div>`;
+  document.querySelector('#import').onclick = () => dialog('导入资料', '这是设计样稿。正式流程将在接入后支持选择资料并查看导入进度；此处不会上传或写入数据。');
+  document.querySelector('#topic').innerHTML = topics.map(topic => '<option>' + topic + '</option>').join('');
+  document.querySelector('#topic').value = selectedTopic;
+  const update = () => {
+    selectedTopic = document.querySelector('#topic').value;
+    document.querySelectorAll('[data-topic]').forEach(a => a.classList.toggle('active', a.dataset.topic === selectedTopic));
+    let q = document.querySelector('#search').value.trim().toLowerCase(),
+      type = document.querySelector('#type').value,
+      status = document.querySelector('#status').value;
+    let found = items.filter(x => (x.title + x.summary + x.topic).toLowerCase().includes(q) && (type === '全部类型' || x.type === type) && (status === '全部状态' || x.status === status) && (selectedTopic === '全部主题' || x.topic === selectedTopic));
+    document.querySelector('#count').textContent = `${found.length} 份资料`;
+    document.querySelector('#list').innerHTML = found.length ? found.map(x => `<a class="item" href="#detail/${x.id}"><span class="source-icon" aria-hidden="true">${x.type==='视频'?'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM10 9l5 3-5 3z"/></svg>':'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5zM15 3v5h4M8 12h8M8 16h8"/></svg>'}</span><span><h3>${x.title}</h3><p>${x.summary}</p><span class="tags"><span class="tag">${x.type}</span><span class="tag">${x.topic}</span></span></span><span class="item-side"><span class="tag ${x.status==='待审核'?'pending':'status'}">${x.status}</span><span class="meta">更新于 ${x.date}</span></span></a>`).join('') : `<div class="empty"><p>没有找到符合条件的资料</p>${button('清除筛选','secondary','id="clear"')}</div>`;
+    document.querySelector('#clear')?.addEventListener('click', () => {
+      document.querySelector('#search').value = '';
+      document.querySelector('#type').selectedIndex = 0;
+      document.querySelector('#status').selectedIndex = 0;
+      document.querySelector('#topic').selectedIndex = 0;
+      update()
+    })
+  };
+  document.querySelectorAll('#search,#type,#status,#topic').forEach(e => e.addEventListener('input', update));
+  update()
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  } [c]))
+}
+
+function detail(id) {
+  nav('library');
+  let x = items.find(i => i.id === id) || items[0],
+    score = scores[id] ?? x.score;
+  view.innerHTML = `<a class="crumb" id="detail-back" href="#library">← 返回资料库</a><div class="detail-head"><h1 tabindex="-1">${x.title}</h1><div class="tags"><span class="tag">${x.type}</span><span class="tag">${x.topic}</span><span class="tag ${x.status==='待审核'?'pending':'status'}">${x.status}</span><span class="meta">更新于 ${x.date}</span></div></div><div class="layout"><article class="article"><div class="tabs" aria-label="阅读内容"><button aria-pressed="${tab==='正文'}" id="body-tab" class="${tab==='正文'?'active':''}">整理正文</button><button aria-pressed="${tab==='证据'}" id="evidence-tab" class="${tab==='证据'?'active':''}">${x.type==='视频'?'语音与画面证据':'原文证据'}</button></div><div id="article-content">${tab==='正文'?`<h2>整理摘要</h2>${x.body.map(p=>`<p>${p}</p>`).join('')}${x.type==='HTML'?'<h2>阅读对照</h2><table><thead><tr><th>核对项目</th><th>阅读提示</th></tr></thead><tbody><tr><td>整理正文</td><td>检查表述是否清晰</td></tr><tr><td>原文证据</td><td>核对上下文与适用范围</td></tr></tbody></table>':''}`:`<h2>${x.type==='视频'?'语音与画面证据':'原文证据'}</h2><p>${x.evidence}</p><p class="notice">示例内容，不代表可验证的真实来源。</p>`}</div><details><summary>资料管理与技术信息</summary><p>重新生成可能产生新版本，新版本需要重新审核；实际操作可能产生费用。</p>${button('管理、导出与删除说明','text-button','id="manage"')}<details><summary>版本与标识</summary><p>演示 ID：${x.id} · 版本：v1（演示）</p></details></details></article><section class="review" aria-label="审核"><h2>审核记录</h2><p class="meta">版本 v1 · 演示状态</p><p><span class="tag ${x.status==='待审核'?'pending':'status'}">${x.status}</span></p>${x.status==='已批准'?`<p>演示评分 <strong>${score} / 100</strong></p><p>审核意见：${escapeHtml(savedOpinions[id] || '无')}</p><p class="hint">内容修改或生成新版本后，需要重新审核。</p>`:`<p class="hint">先核对整理内容和证据，再保存评分并批准。批准门槛为 ${approvalThreshold} 分。</p><label>评分（0–100）<input id="score" type="number" min="0" max="100" value="${score??''}"></label><label>审核意见<textarea id="opinion" rows="3" placeholder="记录核对意见（可选）"></textarea></label>${button('保存评分','secondary','id="save"')}${button('批准资料','primary','id="approve"')}<p class="hint" id="message" role="status">${score!==null?'评分已保存（演示）':''}</p>`}</section></div>`;
+  const keepDraft = () => {
+    let v = document.querySelector('#score'),
+      o = document.querySelector('#opinion');
+    if (v) drafts[id] = {
+      score: v.value,
+      opinion: o.value
+    }
+  };
+  if (drafts[id] && document.querySelector('#score')) {
+    document.querySelector('#score').value = drafts[id].score;
+    document.querySelector('#opinion').value = drafts[id].opinion
+  }
+  const updateMessage = () => {
+    let m = document.querySelector('#message'),
+      v = document.querySelector('#score');
+    if (!m || !v) return;
+    if (scores[id] === undefined) m.textContent = '评分尚未保存。';
+    else if (v.value.trim() === '' || Number(v.value) !== scores[id] || document.querySelector('#opinion').value !== (savedOpinions[id] || '')) m.textContent = '有未保存的更改，请重新保存评分和意见。';
+    else m.textContent = scores[id] < approvalThreshold ? `评分已保存，未达到 ${approvalThreshold} 分批准门槛。` : '评分和意见已保存（仅演示）。'
+  };
+  document.querySelectorAll('#score,#opinion').forEach(el => el.addEventListener('input', () => {
+    keepDraft();
+    updateMessage()
+  }));
+  updateMessage();
+  document.querySelector('#body-tab').onclick = () => {
+    keepDraft();
+    tab = '正文';
+    detail(id);
+    document.querySelector('#body-tab').focus()
+  };
+  document.querySelector('#evidence-tab').onclick = () => {
+    keepDraft();
+    tab = '证据';
+    detail(id);
+    document.querySelector('#evidence-tab').focus()
+  };
+  document.querySelector('#manage').onclick = () => dialog('资料管理', '导出、重新生成与删除仅为设计说明，本样稿不会执行操作。重新生成可能产生费用，新的内容版本需重新审核。');
+  document.querySelector('#save')?.addEventListener('click', () => {
+    let input = document.querySelector('#score'),
+      n = Number(input.value),
+      msg = document.querySelector('#message');
+    if (input.value.trim() === '' || !Number.isFinite(n) || n < 0 || n > 100) {
+      msg.textContent = '请输入 0 到 100 之间的评分。';
+      return
+    }
+    scores[id] = n;
+    savedOpinions[id] = document.querySelector('#opinion').value;
+    keepDraft();
+    msg.textContent = n < approvalThreshold ? `评分已保存（仅演示），未达到 ${approvalThreshold} 分批准门槛。` : '评分已保存（仅演示），请单独批准。'
+  });
+  document.querySelector('#approve')?.addEventListener('click', () => {
+    let msg = document.querySelector('#message');
+    if (scores[id] === undefined || document.querySelector('#score').value.trim() === '' || Number(document.querySelector('#score').value) !== scores[id] || document.querySelector('#opinion').value !== (savedOpinions[id] || '')) {
+      msg.textContent = '请先保存当前有效评分，再批准。';
+      return
+    }
+    if (scores[id] < approvalThreshold) {
+      msg.textContent = `未达到 ${approvalThreshold} 分批准门槛。`;
+      return
+    }
+    x.status = '已批准';
+    x.score = scores[id];
+    detail(id);
+    document.querySelector('#detail-back').focus();
+    dialog('已批准（演示）', '状态仅保留在当前页面内，不会写入正式资料库。')
+  })
+}
+
+function ask() {
+  nav('ask');
+  view.innerHTML = `<div class="ask-wrap"><h1 tabindex="-1">问答</h1><div class="ask-box"><label for="question">你的问题</label><textarea id="question" rows="3" placeholder="输入你想了解的问题…"></textarea><div class="ask-bottom"><label>资料范围<select id="scope" disabled><option>${examples.scope}</option></select><span>样稿范围固定为已批准演示资料</span></label>${button('生成演示回答','primary','id="submit"')}</div></div><div class="chips"><span class="meta">示例问题</span><button class="chip" data-question="answered">${examples.answered}</button><button class="chip" data-question="unanswered">${examples.unanswered}</button></div><p class="notice">样稿仅展示预设回答。正式发送将调用付费模型，需在发送前确认。</p><details><summary>高级设置与索引状态</summary><p>索引状态：演示就绪。正式功能中的索引诊断与设置将在接入后提供。</p></details><div id="answer" aria-live="polite"></div></div>`;
+  document.querySelectorAll('[data-question]').forEach(b => b.onclick = () => {
+    document.querySelector('#question').value = examples[b.dataset.question]
+  });
+  document.querySelector('#submit').onclick = () => {
+    let q = document.querySelector('#question').value.trim(),
+      a = document.querySelector('#answer');
+    if (!q) {
+      a.innerHTML = '<p class="notice">请输入问题。</p>';
+      return
+    }
+    if (q === examples.answered) {
+      a.innerHTML = `<article class="answer"><h2>从资料中寻找依据</h2><p>可以先检索相关资料，再结合证据组织回答。<button class="citation" id="citation" aria-label="查看引用证据 1" aria-controls="evidence" aria-expanded="false">①</button></p><p>阅读引用有助于检查回答与资料的对应关系。</p><p>如果证据不足，应保留不确定性并补充资料，而不是推断不存在的结论。</p><ul><li>查看引用，核对上下文。</li><li>资料发生变化后，重新核对相关内容。</li></ul><div class="evidence" id="evidence" hidden><strong>① V01：知识库问答实践</strong><p>${items[0].evidence}</p><a class="crumb" href="#detail/attention">查看资料</a><details><summary>技术信息</summary><p>演示 ID：attention · 版本 v1</p></details></div></article>`;
+      document.querySelector('#citation').onclick = () => {
+        let e = document.querySelector('#evidence');
+        e.hidden = !e.hidden;
+        document.querySelector('#citation').setAttribute('aria-expanded', String(!e.hidden));
+        if (!e.hidden) e.scrollIntoView({
+          block: 'nearest'
+        })
+      }
+    } else if (q === examples.unanswered) {
+      a.innerHTML = `<article class="answer"><h2>暂无足够依据</h2><p>预设演示资料不足以回答这个问题。请尝试示例问题，或在正式接入后补充相关资料。</p></article>`
+    } else {
+      a.innerHTML = '<p class="notice">演示仅支持上方两个预设问题，请选择一个示例。</p>'
+    }
+  }
+}
+
+function route() {
+  tab = '正文';
+  let hash = location.hash.slice(1) || 'library';
+  if (hash.startsWith('detail/')) detail(hash.slice(7));
+  else if (hash === 'ask') ask();
+  else library();
+  window.scrollTo(0, 0);
+  view.querySelector('h1')?.focus({ preventScroll: true });
+}
+window.addEventListener('hashchange', route);
+const topics = ['全部主题', ...new Set(items.map(item => item.topic))];
+document.querySelector('#topics').innerHTML = '<strong>主题</strong>' + topics.map(topic => `<a href="#library" data-topic="${topic}">${topic}</a>`).join('');
+document.querySelectorAll('[data-topic]').forEach(a => a.addEventListener('click', () => {
+  selectedTopic = a.dataset.topic;
+  if (location.hash === '#library' || !location.hash) library();
+}));
+route();

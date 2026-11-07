@@ -1,0 +1,7 @@
+import config from '../../config/citation-display.json' with {type:'json'};
+import {splitParagraphs} from './answer-layout.js';
+export {config};
+export function displayAnswer(answer,citations){const known=new Map((citations||[]).map(x=>[x.chunk_id,x])),items=[],seen=new Map(),parts=[],paragraphs=[];for(const paragraph of splitParagraphs(answer||'')){let last=0, current=[];for(const m of paragraph.matchAll(/\[([a-fA-F0-9]{64})\]/g)){if(!known.has(m[1]))continue;current.push({text:paragraph.slice(last,m.index)});let item=seen.get(m[1]);if(!item){let n=items.length+1;item={id:m[1],marker:config.markers[n-1]||config.overflow_template.replace('{n}',n),citation:known.get(m[1])};items.push(item);seen.set(m[1],item)}current.push(item);last=m.index+m[0].length}current.push({text:paragraph.slice(last)});paragraphs.push(current);parts.push(...current)}return {parts,items,paragraphs}}
+
+export function locationText(citation,isVideo){let l=citation?.locator||{},human=l.origin==='human_edit'||String(citation?.type||l.type||'').startsWith('human_')||String(l.locator||'').startsWith('human-edit:');let s=l.seconds??l.start_seconds??l.start;let text=human?'人工修订文本':'';if(l.offset!=null&&l.end_offset!=null)text+=` 字符范围：${l.offset}–${l.end_offset}`;if(isVideo&&!human&&typeof s==='number'&&Number.isFinite(s)&&s>=0)text+=` 时间：${s} 秒${typeof (l.end_seconds??l.end)==='number'&&Number.isFinite(l.end_seconds??l.end)&&(l.end_seconds??l.end)>=s?' 至 '+(l.end_seconds??l.end)+' 秒':''}`;else if(isVideo)text+=' '+config.no_video_time_label;return text.trim()}
+

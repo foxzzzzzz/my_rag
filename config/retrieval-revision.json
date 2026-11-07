@@ -1,0 +1,25 @@
+{
+  "说明": {
+    "run_id": "四项独立复评，旧版结果及评分保留",
+    "base_run": "首轮已完成的查询、文档向量和反馈快照；不重复建库",
+    "revisions": "两道替换场景题与两项仅展示修正；保留原题关联",
+    "context_per_source": "场景题每个预期来源最多提供的片段数；是本轮实验范围选择而不是无关过滤器",
+    "presentation": "仅显示实际引用证据；完整召回排名保留在JSON诊断，不展示在用户结果页",
+    "run_limit": "本轮调用保守预留上限人民币2元，仍受累计100元限制"
+  },
+  "run_id": "retrieval-revision-2-20261104",
+  "base_run": "reports/retrieval-trial-v1-20261104",
+  "output": "reports/retrieval-revision-2-20261104",
+  "run_limit": "2",
+  "answer_max_tokens": 4096,
+  "top_k": 10,
+  "context_per_source": 3,
+  "presentation": {"cited_only":true,"show_comparisons":false,"feedback_filename":"reviews-revision-2.json"},
+  "review_notice": "本页仅含Q04、Q13、Q14、Q15新版复评，原11项已通过结果保持不变。Q04/Q15为重新生成的场景题；Q13/Q14仅修正证据展示，回答原文保留。请逐项评分并导出独立反馈。",
+  "revisions": [
+    {"id":"Q04","question":"我想让个人知识库利用每次问答评分逐渐改善检索，材料中的两种反馈机制各适合什么场景？如何避免把不相关反馈用于新问题？","expected_source_ids":["V02"],"mode":"regenerate","revision_note":"将抽象算术题替换为个人知识库反馈机制的实际使用场景；答案重新生成。"},
+    {"id":"Q13","mode":"presentation_only","revision_note":"回答原文保持不变；拒答不再展示无关候选或检索对比。原始排名仍保留在研究诊断中。"},
+    {"id":"Q14","mode":"presentation_only","revision_note":"回答原文保持不变；拒答不再展示无关候选或检索对比。原始排名仍保留在研究诊断中。"},
+    {"id":"Q15","question":"我想做一个会分析代码、调用工具的小型Agent，OpenManus和smolagents各有哪些值得复用的机制？哪些执行安全问题需要优先补齐？","expected_source_ids":["H01","H02"],"mode":"regenerate","revision_note":"将资料缺项题替换为小型Agent实现与安全取舍的场景题，基于两份源码拆解重新回答。"}
+  ]
+}

@@ -1,0 +1,56 @@
+name: ${PERSONALKB_COMPOSE_PROJECT:-personalkb}
+services:
+  web:
+    build: {context: .., dockerfile: deploy/Dockerfile}
+    image: personalkb:local
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    stop_grace_period: ${STOP_GRACE_PERIOD:-60s}
+    read_only: true
+    mem_limit: ${WEB_MEMORY:-512m}
+    cpus: ${WEB_CPUS:-1}
+    pids_limit: ${PIDS_LIMIT:-128}
+    volumes: &volumes
+      - ${STATE_DIR:?set STATE_DIR}:/state
+      - ${STATE_DIR}/tmp:/app/tmp
+      - ${STATE_DIR}/tmp:/tmp
+      - ${CONFIG_DIR:?set CONFIG_DIR}:/app/config:ro
+      - ${SECRET_FILE:?set SECRET_FILE}:/run/secrets/personalkb.env:ro
+      - ${BACKUP_DIR:?set BACKUP_DIR}:/backups
+    logging: &logging
+      driver: json-file
+      options: {max-size: "${LOG_SIZE:-10m}", max-file: "${LOG_FILES:-3}"}
+  worker:
+    image: personalkb:local
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    stop_grace_period: ${STOP_GRACE_PERIOD:-60s}
+    read_only: true
+    mem_limit: ${WORKER_MEMORY:-1g}
+    cpus: ${WORKER_CPUS:-2}
+    pids_limit: ${PIDS_LIMIT:-128}
+    volumes: *volumes
+    logging: *logging
+    command: ["python", "-m", "tools.worker", "--config", "/app/config/web.json"]
+  maintenance:
+    image: personalkb:local
+    profiles: [maintenance]
+    network_mode: none
+    init: true
+    mem_limit: ${MAINTENANCE_MEMORY:-1g}
+    cpus: ${MAINTENANCE_CPUS:-2}
+    pids_limit: ${PIDS_LIMIT:-128}
+    read_only: true
+    volumes: *volumes
+    logging: *logging
+
+  push:
+    image: personalkb:local
+    profiles: [push]
+    read_only: true
+    mem_limit: ${WORKER_MEMORY:-1g}
+    pids_limit: ${PIDS_LIMIT:-128}
+    volumes: *volumes
+    logging: *logging

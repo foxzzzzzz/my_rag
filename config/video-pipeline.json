@@ -1,0 +1,58 @@
+{
+  "说明": {
+    "strategy_file": "抽帧及提示策略配置",
+    "models_file": "服务及模型配置",
+    "storage_file": "音频存储配置",
+    "budget": "同一研究账本及单任务和累计人民币上限",
+    "transport": "网络请求的主机和资源限制",
+    "prices": "人民币价格：文本与视觉输入/输出每百万 token，ASR 每秒；核对日期 2026-11-03",
+    "resources": "ffmpeg_threads：编解码线程；filter_threads：滤镜线程；min_free_bytes：最小剩余磁盘；min_available_bytes：最小可用内存；max_host_used_bytes：宿主机内存使用上限；sample_interval_seconds：资源采样间隔秒；terminate_grace_seconds：进程终止宽限秒",
+    "poll_seconds": "ASR轮询间隔秒",
+    "poll_timeout": "ASR轮询最大秒数",
+    "default_profile": "未知视频的默认抽帧策略",
+    "vision_input_token_bound": "单帧视觉输入 token 保守上界，用于预算预留",
+    "heartbeat_seconds": "模型或上传调用期间续租间隔秒"
+  },
+  "strategy_file": "config/demo-run.json",
+  "models_file": "config/demo-models.json",
+  "storage_file": "config/asr-storage.json",
+  "budget": {
+    "ledger": "reports/research-budget.sqlite",
+    "run_limit": "5",
+    "research_limit": "100"
+  },
+  "transport": {
+    "allowed_api_hosts": [
+      "dashscope.aliyuncs.com",
+      "api.deepseek.com"
+    ],
+    "allowed_oss_suffix": "oss-cn-beijing.aliyuncs.com",
+    "request_timeout_seconds": 60,
+    "response_max_bytes": 4194304
+  },
+  "prices": {
+    "text": [
+      2,
+      8
+    ],
+    "vision": [
+      1,
+      10
+    ],
+    "asr_per_second": "0.00008"
+  },
+  "resources": {
+    "ffmpeg_threads": 2,
+    "filter_threads": 1,
+    "min_free_bytes": 8589934592,
+    "min_available_bytes": 536870912,
+    "max_host_used_bytes": 3000000000,
+    "sample_interval_seconds": 1,
+    "terminate_grace_seconds": 3
+  },
+  "heartbeat_seconds": 5,
+  "poll_seconds": 5,
+  "poll_timeout": 3600,
+  "default_profile": "screen_tutorial",
+  "vision_input_token_bound": 65536
+}

@@ -1,0 +1,10 @@
+{
+  "_description": "Environment thresholds in bytes; disk total uses decimal nominal GB, memory allows 3.5 GiB for a nominal 4 GB machine.",
+  "min_cpu_cores": 4,
+  "min_memory_bytes": 3758096384,
+  "min_disk_total_bytes": 40000000000,
+  "min_disk_available_bytes": 8589934592,
+  "data_path": ".",
+  "network_timeout_seconds": 5,
+  "network_urls": ["https://dashscope.aliyuncs.com/compatible-mode/v1/models", "https://api.deepseek.com/models", "https://pypi.org/simple/sqlite-vec/"]
+}

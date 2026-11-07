@@ -1,0 +1,147 @@
+import base64
+import json
+import math
+import re
+import socket
+import ipaddress
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.error import HTTPError
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise RuntimeError('redirect_forbidden')
+
+
+class _Transport:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def request(self, url, key=None, payload=None, headers=None):
+        try:
+            addresses = socket.getaddrinfo(urlsplit(url).hostname, 443, type=socket.SOCK_STREAM)
+            if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+                raise ValueError()
+        except Exception:
+            raise RuntimeError('provider_dns_forbidden') from None
+        hdr = dict(headers or {})
+        if key:
+            hdr['Authorization'] = 'Bearer ' + key
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            hdr['Content-Type'] = 'application/json'
+        try:
+            with build_opener(_NoRedirect()).open(Request(url, data=data, headers=hdr), timeout=self.cfg['request_timeout_seconds']) as response:
+                raw = response.read(self.cfg['response_max_bytes'] + 1)
+                if len(raw) > self.cfg['response_max_bytes']:
+                    raise RuntimeError('response_too_large')
+                return response.status, json.loads(raw)
+        except HTTPError as exc:
+            exc.close()
+            raise RuntimeError('provider_request_failed') from None
+        except Exception:
+            raise RuntimeError('provider_request_failed') from None
+
+
+class ProviderClient:
+    def __init__(self, model_config, pipeline_config, secrets, transport=None):
+        self.models = model_config
+        self.config = pipeline_config
+        self._secrets = secrets
+        self.transport = transport or _Transport(pipeline_config['transport'])
+
+    def _request(self, url, key=None, payload=None, headers=None, download=False):
+        u = urlsplit(url)
+        host = (u.hostname or '').lower()
+        cfg = self.config['transport']
+        suffix = cfg['allowed_oss_suffix'].lower().lstrip('.')
+        allowed = host in cfg['allowed_api_hosts'] if not download else host.endswith('.' + suffix)
+        if u.scheme != 'https' or not allowed or u.username or u.password or u.port not in (None, 443):
+            raise RuntimeError('provider_url_forbidden')
+        try:
+            status, data = self.transport.request(url, key=key, payload=payload, headers=headers)
+        except Exception:
+            raise RuntimeError('provider_request_failed') from None
+        if not 200 <= status < 300 or not isinstance(data, dict):
+            raise RuntimeError('provider_response_invalid')
+        return data
+
+    def _provider(self, kind):
+        model = self.models['models'][kind]
+        provider = self.models['providers'][model['provider']]
+        return model, provider, self._secrets[provider['api_key_env']]
+
+    def submit_asr(self, asset):
+        model, provider, key = self._provider('asr')
+        payload = {'model': model['model'], 'input': {'file_urls': [asset.file_url]}, 'parameters': {'channel_id': [0], 'language_hints': ['zh', 'en'], 'timestamp_alignment_enabled': True}}
+        data = self._request(provider['api_base_url'].rstrip('/') + '/services/audio/asr/transcription', key, payload, asset.asr_headers())
+        task = data.get('output', {}).get('task_id')
+        if not isinstance(task, str) or not re.fullmatch(r'[A-Za-z0-9-]+', task):
+            raise RuntimeError('missing_task_id')
+        return task
+
+    def query_asr(self, task_id):
+        if not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9-]+', task_id):
+            raise RuntimeError('invalid_task_id')
+        _, provider, key = self._provider('asr')
+        return self._request(provider['api_base_url'].rstrip('/') + '/tasks/' + task_id, key).get('output', {})
+
+    def download_asr(self, url, audio_seconds):
+        data = self._request(url, download=True)
+        segments = []
+        for transcript in data.get('transcripts', []):
+            for s in transcript.get('sentences', []):
+                if not isinstance(s.get('text'), str) or not s['text'].strip():
+                    continue
+                a, b = s.get('begin_time'), s.get('end_time')
+                if any(type(x) not in (int, float) or not math.isfinite(x) for x in (a, b)) or not 0 <= a < b <= (audio_seconds + self.config['strategy']['audio_duration_tolerance_seconds']) * 1000:
+                    raise RuntimeError('invalid_native_timestamps')
+                segments.append({'start_seconds': a / 1000, 'end_seconds': b / 1000, 'text': s['text']})
+        if not segments:
+            raise RuntimeError('asr_empty')
+        def tc(value):
+            ms = round(value * 1000)
+            return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02}.{ms%1000:03}'
+        return {'text': '\n'.join(f'[{tc(s["start_seconds"])}–{tc(s["end_seconds"])}] {s["text"]}' for s in segments), 'segments': segments, 'processed_audio_seconds': audio_seconds, 'estimated_cost_cny': str(Decimal(str(audio_seconds)) * Decimal(str(self.config['prices']['asr_per_second'])))}
+
+    def _chat(self, kind, messages):
+        model, provider, key = self._provider(kind)
+        strategy = self.config['strategy']
+        payload = {'model': model['model'], 'messages': messages, 'max_tokens': strategy[kind + '_max_tokens']}
+        payload.update({'thinking': {'type': 'disabled'}, 'response_format': {'type': 'json_object'}} if kind == 'text' else {'enable_thinking': False})
+        data = self._request(provider['compatible_base_url'].rstrip('/') + '/chat/completions', key, payload)
+        try:
+            choice = data['choices'][0]
+            content = choice['message']['content']
+            if not isinstance(content, str) or not content.strip() or choice.get('finish_reason') == 'length':
+                raise ValueError()
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise RuntimeError('empty_or_truncated_model_output') from None
+        usage = {k: v for k, v in data.get('usage', {}).items() if k in ('prompt_tokens', 'completion_tokens', 'total_tokens') and type(v) is int and v >= 0}
+        prices = self.config['prices'][kind]
+        cost = None
+        if 'prompt_tokens' in usage and 'completion_tokens' in usage:
+            cost = str((Decimal(usage['prompt_tokens']) * Decimal(str(prices[0])) + Decimal(usage['completion_tokens']) * Decimal(str(prices[1]))) / Decimal(1000000))
+        return {'content': content, 'model': data.get('model', model['model']), 'usage': usage, 'estimated_cost_cny': cost}
+
+    def vision(self, image_path):
+        data = base64.b64encode(Path(image_path).read_bytes()).decode('ascii')
+        return self._chat('vision', [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + data}}, {'type': 'text', 'text': self.config['strategy']['vision_prompt']}]}])
+
+    def summarize(self, body, title):
+        strategy = self.config['strategy']
+        if len(body.encode('utf-8')) > strategy['max_context_utf8_bytes']:
+            raise RuntimeError('context_too_large')
+        result = self._chat('text', [{'role': 'system', 'content': strategy['text_system_prompt']}, {'role': 'user', 'content': title + '\n\n' + body}])
+        try:
+            structured = json.loads(result['content'])
+            if not isinstance(structured, dict) or not all(isinstance(structured.get(k), str) and structured[k].strip() for k in ('summary', 'notes')):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise RuntimeError('invalid_summary_json') from None
+        result['structured'] = structured
+        return result

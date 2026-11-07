@@ -1,0 +1,24 @@
+{
+  "models_file": "config/demo-models.json",
+  "strategy_file": "config/demo-run.json",
+  "scheme_id": "html-pipeline",
+  "extractor_version": "static-structure-v1",
+  "text_max_tokens": 16384,
+  "reserve_cny": "0.75",
+  "heartbeat_seconds": 5,
+  "budget": {"ledger": "reports/research-budget.sqlite", "run_limit": "2", "research_limit": "100"},
+  "transport": {"allowed_api_hosts": ["api.deepseek.com"], "allowed_oss_suffix": "oss-cn-beijing.aliyuncs.com", "request_timeout_seconds": 180, "response_max_bytes": 4194304},
+  "prices": {"text": [2, 8]},
+  "说明": {
+    "models_file": "已确认文本服务/模型配置；仅调用text能力，不要求ASR/视觉Key",
+    "strategy_file": "已验证来源忠实JSON摘要/笔记提示及最大UTF8上下文字节限制",
+    "scheme_id": "HTML模型整理方案标识",
+    "extractor_version": "提取器版本，变更必须更换此标识并重新审核",
+    "text_max_tokens": "本次HTML摘要与笔记最大输出token，覆盖默认视频值；长度不足显式失败",
+    "reserve_cny": "单次同步文本POST保守人民币预留；未知费用不释放",
+    "heartbeat_seconds": "调用期间续租秒数",
+    "budget": "共享研究账本、单任务及累计模型调用额度；不代表日常月费限制",
+    "transport": "HTTPS服务主机允许列表、请求超时及响应字节上限；不跟随重定向",
+    "prices": "输入/输出每百万token人民币估价，沿用2026-11-03配置快照；实际账单为准"
+  }
+}

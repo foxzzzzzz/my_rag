@@ -1,0 +1,17 @@
+# Types: 二进制软件包；URIs: Debian 主仓库国内 HTTPS 镜像。
+# Suites: Bookworm 正式版及其更新；Components: 官方 main 组件。
+# Signed-By: Debian 官方归档密钥，校验仓库签名。
+Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/debian
+Suites: bookworm bookworm-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+# Types: 二进制软件包；URIs: Debian 安全仓库国内 HTTPS 镜像。
+# Suites: Bookworm 安全更新；Components: 官方 main 组件。
+# Signed-By: Debian 官方归档密钥，校验仓库签名。
+Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/debian-security
+Suites: bookworm-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

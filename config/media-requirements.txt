@@ -1,0 +1,2 @@
+# Install inside a dedicated .venv for the offline media resource trial.
+psutil==7.2.2

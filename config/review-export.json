@@ -1,0 +1,1 @@
+{"revoke_delay_ms": 60000, "revoke_delay_ms_description": "下载发起后延迟撤销 Blob URL 的毫秒数", "draft_enabled": true, "draft_enabled_description": "按运行和输出绑定自动保存本地草稿"}

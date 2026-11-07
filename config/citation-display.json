@@ -1,0 +1,18 @@
+{
+  "markers": ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳"],
+  "overflow_template": "[{n}]",
+  "source_label": "来源",
+  "technical_label": "定位详情",
+  "evidence_label": "证据原文",
+  "unknown_source_label": "来源资料",
+  "no_video_time_label": "无可验证视频时间",
+  "说明": {
+    "markers": "正文首次出现顺序使用的圈号；重复片段复用同号，纯显示映射，不更改模型ID",
+    "overflow_template": "超过圈号数量时显示的编号；{n}替换为从1开始的真实序号",
+    "source_label": "回答末尾编号来源列表标题",
+    "technical_label": "默认折叠显示完整ID、版本、SHA及原始定位的详情标题",
+    "evidence_label": "与来源标题/定位区分开的原始证据正文标题",
+    "unknown_source_label": "缺少可读标题时的中性名称，不编造材料名称",
+    "no_video_time_label": "人工修订等缺少有效时间时的说明，不能沿用旧时间"
+  }
+}
