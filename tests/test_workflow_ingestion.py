@@ -123,11 +123,43 @@ class IngestionTests(unittest.TestCase):
         with patch('personalkb.workflow.make_store', side_effect=sqlite3.OperationalError('failure')):
             with self.assertRaises(sqlite3.OperationalError): import_file(self.config, self.html, True)
         originals = list((Path(self.config['data_dir']) / 'originals').iterdir())
-        self.assertEqual(len(originals), 1)
-        self.assertFalse(originals[0].name.endswith('.tmp'))
-        self.assertEqual(originals[0].read_bytes(), self.html.read_bytes())
+        self.assertEqual(originals, [])
         self.assertEqual(make_store(self.config).list_sources(), [])
         self.assertFalse(import_file(self.config, self.html, True)['duplicate'])
+
+    def test_expired_video_reimport_preserves_missing_original(self):
+        import sqlite3
+        from contextlib import closing
+        from unittest.mock import patch, Mock
+        video = self.path / 'video.mp4'; video.write_bytes(b'0000ftypvideo')
+        with patch('personalkb.workflow.shutil.which', return_value='ffmpeg'), patch('personalkb.workflow.subprocess.run', return_value=Mock(stderr=b'Stream Video:')):
+            first = import_file(self.config, video, True)
+            store = make_store(self.config)
+            original = Path(self.config['data_dir']) / first['source']['blob_relpath']
+            original.unlink()
+            with closing(sqlite3.connect(store.db_path)) as db, db:
+                db.execute('CREATE TABLE media_retention(source_id TEXT PRIMARY KEY, sha256 TEXT, blob_relpath TEXT, status TEXT, removed_at TEXT)')
+                db.execute('INSERT INTO media_retention VALUES(?,?,?,?,NULL)', (first['source']['id'], first['source']['sha256'], first['source']['blob_relpath'], 'planned'))
+            for status in ('planned', 'removed'):
+                with closing(sqlite3.connect(store.db_path)) as db, db: db.execute('UPDATE media_retention SET status=?', (status,))
+                again = import_file(self.config, video, True)
+                self.assertTrue(again['duplicate'])
+                self.assertEqual(first['source'], again['source'])
+                self.assertEqual(first['task'], again['task'])
+                self.assertFalse(original.exists())
+            # Earlier databases also stored video sources as mp4 with a different path.
+            legacy_path = 'originals/legacy-video.mp4'
+            with closing(sqlite3.connect(store.db_path)) as db, db:
+                db.execute("UPDATE sources SET kind='mp4', blob_relpath=? WHERE id=?", (legacy_path, first['source']['id']))
+                db.execute('UPDATE media_retention SET blob_relpath=?', (legacy_path,))
+            again = import_file(self.config, video, True)
+            self.assertTrue(again['duplicate'])
+            self.assertEqual(again['source'], store.get_source(first['source']['id']))
+            self.assertEqual(again['task'], first['task'])
+            self.assertEqual(len(store.list_sources()), 1)
+            self.assertEqual(len(store.list_tasks()), 1)
+            self.assertFalse(original.exists())
+            self.assertFalse((Path(self.config['data_dir']) / legacy_path).exists())
 
     def test_reject_fake_mp4_directory_and_symlink(self):
         from unittest.mock import patch

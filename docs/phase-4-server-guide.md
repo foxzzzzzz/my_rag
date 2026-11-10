@@ -99,6 +99,8 @@ cat "$STATE_DIR/backup-status.json"
 sh deploy/operate.sh export SNAPSHOT_ID --output /backups/personalkb-manual.zip
 ```
 
+自动冷备、手动维护和一键部署通过 `$STATE_DIR/tmp/personalkb-deploy.lock` 互斥。手动执行会修改服务或维护状态的命令前，需在当前 shell 导出 `STATE_DIR`。完成恢复检查并写入报告后释放锁。冷备只在确认活动索引后排除旧代。自定义 Web 索引配置时，维护工具会读取工作流配置同目录的 `web.json`，也可在 `maintenance.json` 中显式设置 `rag_config`。
+
 用自己的SFTP/文件传输工具从服务器`$BACKUP_DIR/personalkb-manual.zip`下载到本地；导出拒绝覆盖，下一次换文件名。默认保留7份快照且复用未变对象，不每天生成7份全量ZIP。
 
 如选择OSS：maintenance.json设`storage_mode=oss`，配置真实region/HTTPS endpoint/private/bucket/专属prefix及凭据环境变量名，在统一秘密文件中填对应凭据。现支持阿里云OSS；需对专属前缀具备读写、核对Bucket/对象ACL权限，不借用官网全权限密钥。本项目不创建Bucket、不改访问策略。先运行`push SNAPSHOT_ID`，再在独立仓库/环境运行`pull SNAPSHOT_ID`和`restore`演练；上传成功不等于恢复完成。远端对象暂不自动GC，费用/生命周期需后续观察。网络上传和回读当前仍占维护窗口，资料增长后可能延长停服时间。

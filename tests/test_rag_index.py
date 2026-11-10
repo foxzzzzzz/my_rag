@@ -191,3 +191,102 @@ def test_human_revision_evidence_has_no_inherited_video_time(setup):
     assert s.get_version(old['id'])['result']==old['result']
     status=index.status()
     assert (status['eligible_sources'],status['indexed_sources'],status['indexed_chunks'])==(1,1,3)
+
+def test_rebuild_reclaims_stale_generation_and_sidecars(setup):
+    s,index,sid,v=setup
+    index.build(allow_paid=True); old=index._active()
+    (old.parent/(old.name+'-journal')).write_bytes(b'stale')
+    index.build(allow_paid=True)
+    assert not old.exists()
+    assert not (old.parent/(old.name+'-journal')).exists()
+    assert index.query('独特',mode='lexical')
+
+def test_missing_active_never_recreated(setup):
+    s,index,sid,v=setup
+    index.build(allow_paid=True); old=index._active(); old.unlink()
+    with pytest.raises(WorkflowError,match='rag_invalidated'):
+        index.query('独特',mode='lexical')
+    assert not old.exists()
+
+def test_index_lock_wait_is_bounded(setup):
+    import threading
+    from personalkb.rag_lock import index_guard
+    s,index,_,_=setup; s.busy_timeout_seconds=0.05
+    results=[]
+    with index_guard(index):
+        def reader():
+            try: index.status()
+            except WorkflowError as exc: results.append(str(exc))
+        t=threading.Thread(target=reader); t.start(); t.join(2)
+        assert not t.is_alive() and results == ['worker_busy']
+
+
+def test_rebuild_preserves_generation_held_by_another_process(setup, tmp_path):
+    import subprocess, time
+    store, index, _, _ = setup
+    index.build(allow_paid=True)
+    old = index._active()
+    class CountingProvider(Fake):
+        calls = 0
+        def embed(self, texts, **kwargs):
+            self.calls += 1
+            return super().embed(texts, **kwargs)
+    index.provider = CountingProvider()
+    marker = tmp_path / 'reader-ready'
+    script = '''import sqlite3, sys
+from pathlib import Path
+from types import SimpleNamespace
+from personalkb.rag_lock import index_guard
+index = SimpleNamespace(store=SimpleNamespace(db_path=sys.argv[1], busy_timeout_seconds=1))
+with index_guard(index):
+    db = sqlite3.connect(sys.argv[2])
+    try:
+        assert db.execute('SELECT count(*) FROM chunks').fetchone()[0] == 1
+        Path(sys.argv[3]).touch()
+        sys.stdin.readline()
+        assert db.execute('SELECT count(*) FROM chunks').fetchone()[0] == 1
+    finally:
+        db.close()
+'''
+    with subprocess.Popen([sys.executable, '-c', script, store.db_path, str(old), str(marker)], stdin=subprocess.PIPE) as reader:
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists():
+                assert reader.poll() is None and time.monotonic() < deadline
+                time.sleep(0.05)
+            store.busy_timeout_seconds = 0.1
+            with pytest.raises(WorkflowError, match='worker_busy'):
+                index.build(allow_paid=True)
+            assert index.provider.calls == 0
+            assert index._active() == old and old.exists()
+            assert list(index.root.glob('*.sqlite')) == [old]
+        finally:
+            reader.communicate(b'continue\n', timeout=10)
+    assert reader.returncode == 0
+    index.build(allow_paid=True)
+    assert index.provider.calls > 0
+    assert not old.exists() and index.query('独特', mode='lexical')
+
+
+def test_status_and_lexical_query_remain_available_during_embedding(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    store, index, _, _ = setup
+    index.build(allow_paid=True)
+    started, resume = Event(), Event()
+    class BlockingProvider(Fake):
+        def embed(self, texts, **kwargs):
+            started.set()
+            assert resume.wait(10)
+            return super().embed(texts, **kwargs)
+    index.provider = BlockingProvider()
+    store.busy_timeout_seconds = 0.1
+    with ThreadPoolExecutor() as pool:
+        hybrid = pool.submit(index.query, '独特', mode='hybrid', allow_paid=True)
+        try:
+            assert started.wait(10)
+            assert index.status()['ready']
+            assert index.query('独特', mode='lexical')
+        finally:
+            resume.set()
+        assert hybrid.result(timeout=10)

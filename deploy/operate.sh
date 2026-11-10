@@ -7,6 +7,16 @@ case "$project" in
 esac
 export PERSONALKB_COMPOSE_PROJECT="$project"
 command=${1:-}; [ "$#" -eq 0 ] || shift
+# Keep service changes and cold snapshots in the same host-wide critical section
+# as one-click deployment. The descriptor stays open through EXIT cleanup.
+case "$command" in
+  build|start|stop|restart|backup|daily|retention|export|verify|push|pull|import|restore)
+    : "${STATE_DIR:?set STATE_DIR}"
+    lock="$STATE_DIR/tmp/personalkb-deploy.lock"
+    if [ ! -f "$lock" ]; then ( : >>"$lock" ) || [ -f "$lock" ]; fi
+    exec 9<"$lock"
+    if ! flock -n 9; then echo "Deployment or maintenance already running" >&2; exit 1; fi ;;
+esac
 case "$command" in
   build) docker compose --project-name "$project" build web ;;
   start)

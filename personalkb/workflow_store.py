@@ -51,17 +51,29 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         if table=='versions': d['result']=json.loads(d['result'])
         if table=='reviews': d['tags']=json.loads(d['tags'])
         return d
-    def import_source(self,kind,sha256,original_name,blob_relpath,*,commit_guard=None):
+    def import_source(self,kind,sha256,original_name,blob_relpath,*,commit_guard=None, install_blob=None):
         if not isinstance(kind,str) or not kind or not isinstance(sha256,str) or not re.fullmatch(r'[0-9a-f]{64}',sha256) or not isinstance(original_name,str) or not original_name or not isinstance(blob_relpath,str) or not blob_relpath or PurePosixPath(blob_relpath).is_absolute() or PureWindowsPath(blob_relpath).is_absolute() or PureWindowsPath(blob_relpath).drive or '..' in PurePosixPath(blob_relpath.replace('\\','/')).parts:
             raise WorkflowError('invalid_source')
         with self._tx() as c:
             if commit_guard is not None: commit_guard(c)
-            row=c.execute('SELECT * FROM sources WHERE kind=? AND sha256=?',(kind,sha256)).fetchone()
+            if kind in ('video', 'mp4'):
+                row = c.execute("SELECT * FROM sources WHERE sha256=? AND kind IN ('video','mp4') ORDER BY CASE kind WHEN 'video' THEN 0 ELSE 1 END LIMIT 1", (sha256,)).fetchone()
+            else:
+                row = c.execute('SELECT * FROM sources WHERE kind=? AND sha256=?', (kind, sha256)).fetchone()
             if row:
                 s=dict(row)
                 if s['deleted']: raise WorkflowError('source_deleted')
+                if install_blob is not None:
+                    retiring = False
+                    if s['kind'] in ('video', 'mp4') and c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_retention'").fetchone():
+                        marker = c.execute('SELECT * FROM media_retention WHERE source_id=?', (s['id'],)).fetchone()
+                        if marker:
+                            if marker['sha256'] != s['sha256'] or marker['blob_relpath'] != s['blob_relpath']: raise WorkflowError('retention_conflict')
+                            retiring = marker['status'] in ('planned', 'removed')
+                    if not retiring and s['blob_relpath'] == blob_relpath: install_blob()
                 t=dict(c.execute('SELECT * FROM tasks WHERE source_id=? ORDER BY rowid LIMIT 1',(s['id'],)).fetchone())
                 return dict(source=s,task=t,duplicate=True)
+            if install_blob is not None: install_blob()
             sid,tid=_id(),_id()
             c.execute('INSERT INTO sources(id,kind,sha256,original_name,blob_relpath) VALUES(?,?,?,?,?)',(sid,kind,sha256,original_name,blob_relpath))
             c.execute("INSERT INTO tasks(id,source_id,status) VALUES(?,?,'queued')",(tid,sid))

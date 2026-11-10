@@ -118,12 +118,14 @@ def import_file(config, path, rights_confirmed=False, *, commit_guard=None):
             kind = 'html'
         digest = h.hexdigest()
         target = originals / digest
-        if target.exists():
-            if target.is_symlink() or not target.is_file() or _hash(target) != digest:
-                raise WorkflowError('source_integrity')
-        else:
-            os.replace(temp, target)
-        return make_store(config).import_source(kind, digest, p.name, 'originals/' + digest, commit_guard=commit_guard)
+        def install_blob():
+            if target.exists():
+                if target.is_symlink() or not target.is_file() or _hash(target) != digest:
+                    raise WorkflowError('source_integrity')
+            else:
+                os.replace(temp, target)
+        return make_store(config).import_source(kind, digest, p.name, 'originals/' + digest,
+                                                commit_guard=commit_guard, install_blob=install_blob)
     finally:
         temp.unlink(missing_ok=True)
 

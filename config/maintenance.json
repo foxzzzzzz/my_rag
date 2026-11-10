@@ -30,5 +30,7 @@
   "env_file": ".env",
   "env_file说明": "外置秘密文件路径；环境变量覆盖文件中的同名值",
   "auto_retention_enabled": false,
-  "auto_retention_enabled说明": "定时或手动运行备份流程时，在冷备成功并校验后自动执行已满足保留条件的视频清理；此基础模板默认关闭"
+  "auto_retention_enabled说明": "定时或手动运行备份流程时，在冷备成功并校验后自动执行已满足保留条件的视频清理；此基础模板默认关闭",
+  "rag_config": null,
+  "rag_config说明": "冷备识别活动索引所用的 RAG 配置路径。默认读取工作流配置同目录的 web.json，再回退到 config/rag.json。仅在 Web 使用其他配置路径时显式指定"
 }

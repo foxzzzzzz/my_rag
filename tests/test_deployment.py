@@ -327,6 +327,64 @@ def test_restore_health_rejects_restarting_worker_and_failed_https(tmp_path, mon
         h.wait_for_services(env, ['web', 'worker'])
 
 
+def test_maintenance_holds_deployment_lock_through_service_restore(tmp_path, monkeypatch):
+    import os, subprocess, sys, time
+    import pytest
+    pytest.importorskip('fcntl')
+    state = tmp_path / 'state'
+    (state / 'tmp').mkdir(parents=True)
+    commands = tmp_path / 'bin'
+    commands.mkdir()
+    docker = commands / 'docker'
+    docker.write_text('''#!/bin/sh
+echo "$*" >> "$STATE_DIR/docker.log"
+case "$*" in
+  *'ps --services'*) printf 'web\\nworker\\n';;
+esac
+''')
+    python = commands / 'python3'
+    python.write_text('''#!/bin/sh
+case "$1" in
+  daily.py) printf '%s\\n' '{"state":"success","snapshot":"verified"}' > "$STATE_DIR/backup-status.json";;
+  -m)
+    touch "$STATE_DIR/restoring"
+    while [ ! -f "$STATE_DIR/release" ]; do sleep 0.05; done
+    exit 1;;
+  *) exec "$TEST_PYTHON" "$@";;
+esac
+''')
+    docker.chmod(0o700)
+    python.chmod(0o700)
+    env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'], STATE_DIR=str(state),
+               CONFIG_DIR=str(tmp_path), TEST_PYTHON=sys.executable)
+    script = ['sh', str(ROOT / 'deploy/operate.sh')]
+    deployment = module('deploy_contention', 'deploy/deploy.py')
+    monkeypatch.setattr(deployment, 'prepare', lambda root: pytest.fail('Deploy must fail before preflight'))
+    with subprocess.Popen([*script, 'daily'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daily:
+        try:
+            deadline = time.monotonic() + 10
+            while not (state / 'restoring').exists():
+                assert daily.poll() is None and time.monotonic() < deadline
+                time.sleep(0.05)
+            docker_calls = (state / 'docker.log').read_text()
+            report = (state / 'backup-status.json').read_bytes()
+            for command in ('daily', 'verify', 'restart'):
+                contender = subprocess.run([*script, command], env=env, capture_output=True, timeout=10)
+                assert contender.returncode != 0 and b'already running' in contender.stderr
+            with pytest.raises(deployment.DeployError, match='already running'):
+                deployment.deploy(tmp_path)
+            assert (state / 'docker.log').read_text() == docker_calls
+            assert (state / 'backup-status.json').read_bytes() == report
+        finally:
+            (state / 'release').touch()
+            daily.communicate(timeout=10)
+    assert daily.returncode == 1
+    assert json.loads((state / 'backup-status.json').read_text()) == {
+        'state': 'failed', 'snapshot': 'verified', 'services_restored': False,
+    }
+    assert subprocess.run([*script, 'verify', 'verified'], env=env, timeout=10).returncode == 0
+
+
 def test_restore_health_module_entry_from_operate(tmp_path):
     import os, subprocess, sys
     import pytest

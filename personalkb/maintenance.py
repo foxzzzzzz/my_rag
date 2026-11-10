@@ -95,7 +95,42 @@ def _guard_store(config):
     return SimpleNamespace(data_root=root, db_path=str(root / 'workflow.sqlite3'))
 
 
+def _backup_index(config, data):
+    from .content_storage import safe
+    from .rag_index import active_manifest
+    try:
+        rag_config = config.get('rag_config')
+        if rag_config is None:
+            web_config = Path(config['workflow_config']).parent / 'web.json'
+            if web_config.is_file():
+                rag_config = json.loads(web_config.read_text(encoding='utf-8-sig')).get('rag_config')
+        rag = json.loads(_path(rag_config or 'config/rag.json').read_text(encoding='utf-8-sig'))
+        index_dir = rag['index_dir']
+        if not isinstance(index_dir, str) or not index_dir: return None, None
+        root = safe(data, index_dir)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, WorkflowError):
+        return None, None  # Preserve files when the derived index cannot be identified safely.
+    try:
+        manifest = active_manifest(root)
+        if manifest and safe(root, manifest['file']).is_file(): return root, manifest['file']
+    except (OSError, WorkflowError): pass
+    return None, None
+
+
+def _check_active_index(path):
+    try:
+        with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as db:
+            if db.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise WorkflowError('invalid_database')
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
+            if not {'chunks', 'fts', 'vec'}.issubset(tables):
+                raise WorkflowError('invalid_database')
+    except sqlite3.DatabaseError:
+        raise WorkflowError('invalid_database') from None
+
+
 def create(config):
+    from .rag_index import GENERATION_FILE
     store = _guard_store(config)
     root = Path(config['backup_root']); _no_links(root); root.mkdir(parents=True, exist_ok=True)
     objects = root / 'objects'; manifests = root / 'snapshots'
@@ -104,6 +139,7 @@ def create(config):
         store = make_store(config['_workflow'])
         staging = Path(temp); files = []
         data = Path(store.data_root)
+        index_root, active = _backup_index(config, data)
         def add(path, name):
             _no_links(path); _safe_name(name)
             if not path.is_file(): raise WorkflowError('invalid_backup_file')
@@ -126,7 +162,24 @@ def create(config):
             for name in names:
                 p = base / name; _no_links(p)
                 if p == Path(store.db_path) or _secret(p): continue
-                add(p, 'workflow/' + p.relative_to(data).as_posix())
+                if base == index_root and name != active and GENERATION_FILE.fullmatch(name): continue
+                archive_name = 'workflow/' + p.relative_to(data).as_posix()
+                if base == index_root and name == active:
+                    # The main file alone can omit committed WAL data or require rollback recovery.
+                    sidecars = [p.with_name(name + suffix) for suffix in ('-wal', '-shm', '-journal')]
+                    for sidecar in sidecars: _no_links(sidecar)
+                    if any(sidecar.exists() for sidecar in sidecars):
+                        snapshot = staging / 'active-index.sqlite'
+                        size = p.stat().st_size + sum(sidecar.stat().st_size for sidecar in sidecars if sidecar.exists())
+                        _space(root, size * 2, config['min_free_bytes'])
+                        try:
+                            with closing(sqlite3.connect(p.as_uri()+'?mode=rw', uri=True)) as source, closing(sqlite3.connect(snapshot)) as target:
+                                source.backup(target)
+                        except sqlite3.DatabaseError:
+                            raise WorkflowError('invalid_database') from None
+                        p = snapshot
+                    _check_active_index(p)
+                add(p, archive_name)
         for source, name in [(Path(store.db_path), 'workflow/workflow.sqlite3'), (Path(config['ledger_paths'][0]), 'budget.sqlite')]:
             _no_links(source)
             _space(root, source.stat().st_size * 2, config['min_free_bytes'])

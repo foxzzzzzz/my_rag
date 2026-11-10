@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {sourceSignature,isCurrentRequest} from './rag-state.js';
+import {sourceSignature,isCurrentRequest,availableSources,unavailableSourceIds} from './rag-state.js';
 test('资料顺序不影响签名，版本资格分类或删除变化使签名改变',()=>{
  const a={id:'a',current_version_id:'v1',eligible:true,classification:{revision:1}},b={id:'b'};
  const sig=sourceSignature([a,b]); assert.equal(sig,sourceSignature([b,a]));
@@ -17,4 +17,11 @@ test('同版本审核提交周期变化使旧结果失效',()=>{
  const sources=[{id:'a',current_version_id:'v1',eligible:true}];
  assert.notEqual(sourceSignature(sources,0),sourceSignature(sources,1));
  assert.notEqual(sourceSignature(sources,1),sourceSignature(sources,2));
+});
+
+test('撤审、删除及缺失的已选来源仍可识别为不可用',()=>{
+ const sources=[{id:'eligible',eligible:true},{id:'reworked',eligible:false},{id:'deleted',eligible:true,deleted:true}];
+ const available=availableSources(sources);
+ assert.deepEqual(available.map(source=>source.id),['eligible']);
+ assert.deepEqual(unavailableSourceIds(['eligible','reworked','deleted','missing'],available),['reworked','deleted','missing']);
 });

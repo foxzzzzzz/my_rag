@@ -1,12 +1,33 @@
-import hashlib, json, math, os, re, sqlite3, struct, uuid
+import hashlib, json, math, re, sqlite3, struct, uuid
+from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 from .workflow_store import WorkflowError
-from .content_storage import verify, safe
+from .content_storage import encoded, safe, verify, write
 from .classification import ClassificationStore, snapshot_from_connection
 from .execution_guard import execution_guard
+from .rag_lock import index_guard, guarded
 
+GENERATION_DB = re.compile(r'[0-9a-f]{32}\.sqlite')
+GENERATION_FILE = re.compile(r'([0-9a-f]{32}\.sqlite)(?:-wal|-shm|-journal)?|\.?[0-9a-f]{32}\.tmp')
+
+
+def active_manifest(root):
+    try:
+        manifest = json.loads(safe(root, 'active.json').read_text(encoding='utf8'))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise WorkflowError('rag_index_invalid') from None
+    if not isinstance(manifest, dict):
+        raise WorkflowError('rag_index_invalid')
+    name, space, models = (manifest.get(key) for key in ('file', 'space_id', 'returned_models'))
+    if (not isinstance(name, str) or not GENERATION_DB.fullmatch(name)
+            or not isinstance(space, str) or not re.fullmatch(r'[0-9a-f]{64}', space)
+            or not isinstance(models, list) or any(not isinstance(model, str) or not model for model in models)):
+        raise WorkflowError('rag_index_invalid')
+    return manifest
 
 def load_rag_config(path=None):
     try:
@@ -73,24 +94,30 @@ class RagIndex:
             from .rag_provider import RagProvider
             self.provider=RagProvider(self.store,self.config)
         return self.provider
-    def _db(self,path):
+    def _db(self,path, *, create=False):
         import sqlite_vec
-        c=sqlite3.connect(path); c.row_factory=sqlite3.Row
-        c.enable_load_extension(True)
-        try: sqlite_vec.load(c)
-        finally: c.enable_load_extension(False)
+        c=sqlite3.connect(path) if create else self._open_existing(path)
+        c.row_factory=sqlite3.Row
+        try:
+            c.enable_load_extension(True)
+            sqlite_vec.load(c)
+            c.enable_load_extension(False)
+        except Exception:
+            c.close()
+            raise
         return c
+    @staticmethod
+    def _open_existing(path):
+        try: return sqlite3.connect(path.resolve().as_uri()+'?mode=rw', uri=True)
+        except sqlite3.OperationalError: raise WorkflowError('rag_invalidated') from None
     def _active(self, *, check_space=True):
-        try: m=json.loads(safe(self.store.data_root,self.config['index_dir'],'active.json').read_text(encoding='utf8'))
-        except FileNotFoundError: return None
+        m=active_manifest(self.root)
+        if m is None: return None
         if check_space and m['space_id']!=self.space_id: raise WorkflowError('rag_rebuild_required')
-        if not re.fullmatch(r'[0-9a-f]{32}\.sqlite',m['file']): raise WorkflowError('rag_index_invalid')
         path=safe(self.store.data_root,self.config['index_dir'],m['file'])
         if check_space and path.exists():
-            c=sqlite3.connect(path)
-            try:
+            with closing(self._open_existing(path)) as c:
                 if 'vector' not in {r[1] for r in c.execute('PRAGMA table_info(chunks)')}: raise WorkflowError('rag_rebuild_required')
-            finally: c.close()
         return path
     def _snapshot(self,c,sid):
         s=c.execute('SELECT s.current_version_id,v.content_sha256,r.seq,r.decision,r.score,v.result FROM sources s JOIN versions v ON v.id=s.current_version_id JOIN reviews r ON r.seq=(SELECT MAX(seq) FROM reviews WHERE version_id=s.current_version_id) WHERE s.id=? AND s.deleted=0',(sid,)).fetchone()
@@ -142,35 +169,47 @@ class RagIndex:
                     s=self._snapshot(c,source['id']); snapshots[source['id']]=s; chunks.extend(self._chunks(source['id'],s))
             if len(chunks)>self.config['limits']['max_chunks']: raise WorkflowError('rag_too_many_chunks')
             if chunks and allow_paid is not True: raise WorkflowError('paid_consent_required')
-            vectors=[]; returned_models=[]; batch=self.config['limits']['embedding_batch_size']
-            for start in range(0,len(chunks),batch):
-                part=chunks[start:start+batch]; response=self._provider().embed([x['text'] for x in part],allow_paid=allow_paid,request_id=f'{run_id}:embedding:{start}',run_id=run_id)
-                model=response.get('model')
-                if model != self.config['embedding']['model']: raise WorkflowError('embedding_model_mismatch')
-                returned_models.append(model)
-                vs=response['vectors']
-                if len(vs)!=len(part): raise WorkflowError('invalid_embedding')
-                vectors.extend(_pack(v,self.config['embedding']['dimensions']) for v in vs)
-            self.root.mkdir(parents=True,exist_ok=True); safe(self.store.data_root,self.config['index_dir']); name=uuid.uuid4().hex+'.sqlite'; path=safe(self.store.data_root,self.config['index_dir'],name)
-            try:
-                c=self._db(path)
+            with index_guard(self):
+                vectors=[]; returned_models=[]; batch=self.config['limits']['embedding_batch_size']
+                for start in range(0,len(chunks),batch):
+                    part=chunks[start:start+batch]; response=self._provider().embed([x['text'] for x in part],allow_paid=allow_paid,request_id=f'{run_id}:embedding:{start}',run_id=run_id)
+                    model=response.get('model')
+                    if model != self.config['embedding']['model']: raise WorkflowError('embedding_model_mismatch')
+                    returned_models.append(model)
+                    vs=response['vectors']
+                    if len(vs)!=len(part): raise WorkflowError('invalid_embedding')
+                    vectors.extend(_pack(v,self.config['embedding']['dimensions']) for v in vs)
+                self.root.mkdir(parents=True,exist_ok=True); safe(self.store.data_root,self.config['index_dir']); name=uuid.uuid4().hex+'.sqlite'; path=safe(self.store.data_root,self.config['index_dir'],name)
+                published=False
                 try:
-                    n=self.config['embedding']['dimensions']; c.execute('CREATE TABLE chunks(id INTEGER PRIMARY KEY, chunk_id TEXT UNIQUE, source_id TEXT, payload TEXT, vector BLOB)'); c.execute('CREATE VIRTUAL TABLE fts USING fts5(text)'); c.execute(f'CREATE VIRTUAL TABLE vec USING vec0(id INTEGER PRIMARY KEY, embedding float[{n}] distance_metric=cosine)')
-                    for i,(chunk,v) in enumerate(zip(chunks,vectors),1):
-                        c.execute('INSERT INTO chunks VALUES(?,?,?,?,?)',(i,chunk['chunk_id'],chunk['source_id'],json.dumps(chunk,ensure_ascii=False),v)); c.execute('INSERT INTO fts(rowid,text) VALUES (?,?)',(i,' '.join(_tokens(chunk['text'])))); c.execute('INSERT INTO vec VALUES (?,?)',(i,v))
-                    c.commit()
-                finally: c.close()
-                with self.store._tx() as c:
-                    for sid,old in snapshots.items():
-                        if self._snapshot(c,sid)!=old: raise WorkflowError('rag_invalidated')
-                    tmp=safe(self.store.data_root,self.config['index_dir'],uuid.uuid4().hex+'.tmp'); safe(self.store.data_root,self.config['index_dir'],'active.json'); tmp.write_text(json.dumps({'space_id':self.space_id,'file':name,'returned_models':sorted(set(returned_models))}),encoding='utf8'); os.replace(tmp,self.root/'active.json')
-            except BaseException:
-                path.unlink(missing_ok=True); raise
-            return {'space_id':self.space_id,'chunks':len(chunks),'sources':len(snapshots)}
+                    c=self._db(path,create=True)
+                    try:
+                        n=self.config['embedding']['dimensions']; c.execute('CREATE TABLE chunks(id INTEGER PRIMARY KEY, chunk_id TEXT UNIQUE, source_id TEXT, payload TEXT, vector BLOB)'); c.execute('CREATE VIRTUAL TABLE fts USING fts5(text)'); c.execute(f'CREATE VIRTUAL TABLE vec USING vec0(id INTEGER PRIMARY KEY, embedding float[{n}] distance_metric=cosine)')
+                        for i,(chunk,v) in enumerate(zip(chunks,vectors),1):
+                            c.execute('INSERT INTO chunks VALUES(?,?,?,?,?)',(i,chunk['chunk_id'],chunk['source_id'],json.dumps(chunk,ensure_ascii=False),v)); c.execute('INSERT INTO fts(rowid,text) VALUES (?,?)',(i,' '.join(_tokens(chunk['text'])))); c.execute('INSERT INTO vec VALUES (?,?)',(i,v))
+                        c.commit()
+                    finally: c.close()
+                    with self.store._tx() as c:
+                        for sid,old in snapshots.items():
+                            if self._snapshot(c,sid)!=old: raise WorkflowError('rag_invalidated')
+                        write(self.root, 'active.json', encoded({'space_id':self.space_id,'file':name,'returned_models':sorted(set(returned_models))}))
+                        published=True
+                    try:
+                        for stale in self.root.iterdir():
+                            match=GENERATION_FILE.fullmatch(stale.name)
+                            if match and match[1]!=name:
+                                try: stale.unlink()
+                                except OSError: pass
+                    except OSError: pass  # A later rebuild can retry inaccessible files.
+                except BaseException:
+                    if not published: path.unlink(missing_ok=True)
+                    raise
+                return {'space_id':self.space_id,'chunks':len(chunks),'sources':len(snapshots)}
+    @guarded
     def status(self):
         path=self._active(check_space=False); mismatch=False; count=0; sources=0
         if path and path.exists():
-            manifest=json.loads(safe(self.store.data_root,self.config['index_dir'],'active.json').read_text(encoding='utf8')); mismatch=manifest['space_id']!=self.space_id
+            mismatch=active_manifest(self.root)['space_id']!=self.space_id
             db=self._db(path)
             try:
                 count,sources=db.execute('SELECT count(*),count(distinct source_id) FROM chunks').fetchone()
@@ -203,46 +242,68 @@ class RagIndex:
         if filters is not None and (not isinstance(filters,dict) or set(filters)-{'sources','topics','tags'} or any(not isinstance(v,list) or any(not isinstance(x,str) or not x for x in v) for v in filters.values())): raise WorkflowError('invalid_filters')
         mode=mode or self.config['retrieval']['mode']
         if mode not in ('lexical','hybrid'): raise WorkflowError('invalid_mode')
-        path=self._active()
-        if not path: return []
-        db=self._db(path)
-        try:
-            rows=db.execute('SELECT id,payload FROM chunks').fetchall(); valid=[]; invalid=[]; refreshed=[]
-            with self.store._tx() as c:
-                cache={}
-                for row in rows:
-                    item=json.loads(row['payload'])
-                    if not self._valid(c,item,None,cache,require_metadata=False): invalid.append(row['id']); continue
-                    item['metadata']=cache[item['source_id']]['metadata']
-                    refreshed.append((json.dumps(item,ensure_ascii=False),row['id']))
-                    if self._valid(c,item,filters,cache): valid.append(row['id'])
-            db.executemany('UPDATE chunks SET payload=? WHERE id=?',refreshed)
-            for i in invalid:
-                db.execute('DELETE FROM fts WHERE rowid=?',(i,)); db.execute('DELETE FROM vec WHERE id=?',(i,)); db.execute('DELETE FROM chunks WHERE id=?',(i,))
-            db.commit()
-            if not valid: return []
-            db.execute('CREATE TEMP TABLE allowed_ids(id INTEGER PRIMARY KEY)')
-            db.executemany('INSERT INTO allowed_ids VALUES (?)',((i,) for i in valid))
-            k=self.config['retrieval']['top_k']; hits=[]; terms=_tokens(question)
-            if terms:
-                expr=' OR '.join('"'+x+'"' for x in terms)
-                hits.append([r[0] for r in db.execute('SELECT fts.rowid FROM fts JOIN allowed_ids ON allowed_ids.id=fts.rowid WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT ?', (expr,k))])
-            if mode=='hybrid':
-                if allow_paid is not True: raise WorkflowError('paid_consent_required')
-                with execution_guard(self.store): result=self._provider().embed([question],allow_paid=allow_paid,request_id=request_id,run_id=run_id or request_id)
-                manifest=json.loads(safe(self.store.data_root,self.config['index_dir'],'active.json').read_text(encoding='utf8'))
-                if result.get('model') != self.config['embedding']['model'] or manifest.get('returned_models') != [result.get('model')]: raise WorkflowError('embedding_model_mismatch')
-                if len(result['vectors'])!=1: raise WorkflowError('invalid_embedding')
-                v=_pack(result['vectors'][0],self.config['embedding']['dimensions'])
-                hits.append([r[0] for r in db.execute('SELECT chunks.id FROM chunks JOIN allowed_ids ON allowed_ids.id=chunks.id ORDER BY vec_distance_cosine(chunks.vector, ?) LIMIT ?', (v,k))])
-            scores={}
-            for group in hits:
-                for rank,i in enumerate(group,1): scores[i]=scores.get(i,0)+1/(self.config['retrieval']['rrf_constant']+rank)
-            order=sorted(scores,key=lambda i:(-scores[i],i))[:k]
-            items=[json.loads(db.execute('SELECT payload FROM chunks WHERE id=?',(i,)).fetchone()[0]) for i in order]
-            self.validate_citations(items,filters=filters)
-            return items
-        finally: db.close()
+        k=self.config['retrieval']['top_k']; hits=[]; terms=_tokens(question)
+        with index_guard(self):
+            path=self._active()
+            if not path: return []
+            with closing(self._db(path)) as db:
+                valid=self._refresh_chunks(db, filters)
+                if not valid: return []
+                if terms:
+                    self._allow_rows(db, valid)
+                    expr=' OR '.join('"'+x+'"' for x in terms)
+                    hits.append([r[0] for r in db.execute('SELECT fts.rowid FROM fts JOIN allowed_ids ON allowed_ids.id=fts.rowid WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT ?', (expr,k))])
+                if mode=='lexical': return self._rank(db, hits, filters)
+
+        if allow_paid is not True: raise WorkflowError('paid_consent_required')
+        # A rebuild cannot publish while this paid operation holds the execution guard.
+        with execution_guard(self.store):
+            with index_guard(self):
+                if self._active()!=path: raise WorkflowError('rag_invalidated')
+                manifest=active_manifest(self.root)
+            result=self._provider().embed([question],allow_paid=allow_paid,request_id=request_id,run_id=run_id or request_id)
+            if result.get('model') != self.config['embedding']['model'] or manifest.get('returned_models') != [result.get('model')]: raise WorkflowError('embedding_model_mismatch')
+            if len(result['vectors'])!=1: raise WorkflowError('invalid_embedding')
+            vector=_pack(result['vectors'][0],self.config['embedding']['dimensions'])
+            with index_guard(self), closing(self._db(path)) as db:
+                self._allow_rows(db, valid)
+                hits.append([r[0] for r in db.execute('SELECT chunks.id FROM chunks JOIN allowed_ids ON allowed_ids.id=chunks.id ORDER BY vec_distance_cosine(chunks.vector, ?) LIMIT ?', (vector,k))])
+                return self._rank(db, hits, filters)
+
+    def _refresh_chunks(self, db, filters):
+        rows=db.execute('SELECT id,payload FROM chunks').fetchall(); valid=[]; invalid=[]; refreshed=[]
+        with self.store._tx() as c:
+            cache={}
+            for row in rows:
+                item=json.loads(row['payload'])
+                if not self._valid(c,item,None,cache,require_metadata=False): invalid.append(row['id']); continue
+                item['metadata']=cache[item['source_id']]['metadata']
+                refreshed.append((json.dumps(item,ensure_ascii=False),row['id']))
+                if self._valid(c,item,filters,cache): valid.append(row['id'])
+        db.executemany('UPDATE chunks SET payload=? WHERE id=?',refreshed)
+        for i in invalid:
+            db.execute('DELETE FROM fts WHERE rowid=?',(i,)); db.execute('DELETE FROM vec WHERE id=?',(i,)); db.execute('DELETE FROM chunks WHERE id=?',(i,))
+        db.commit()
+        return valid
+
+    @staticmethod
+    def _allow_rows(db, valid):
+        db.execute('CREATE TEMP TABLE allowed_ids(id INTEGER PRIMARY KEY)')
+        db.executemany('INSERT INTO allowed_ids VALUES (?)',((i,) for i in valid))
+
+    def _rank(self, db, hits, filters):
+        scores={}
+        for group in hits:
+            for rank,i in enumerate(group,1): scores[i]=scores.get(i,0)+1/(self.config['retrieval']['rrf_constant']+rank)
+        order=sorted(scores,key=lambda i:(-scores[i],i))[:self.config['retrieval']['top_k']]
+        items=[]
+        for i in order:
+            row=db.execute('SELECT payload FROM chunks WHERE id=?',(i,)).fetchone()
+            if not row: raise WorkflowError('rag_invalidated')
+            items.append(json.loads(row[0]))
+        self.validate_citations(items, filters=filters)
+        return items
+    @guarded
     def validate_citations(self,citations,filters=None):
         self._enabled()
         path=self._active()
@@ -257,6 +318,7 @@ class RagIndex:
         finally:
             if db: db.close()
         return True
+    @guarded
     def citation(self,chunk_id):
         self._enabled()
         path=self._active()

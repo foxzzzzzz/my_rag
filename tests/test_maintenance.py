@@ -280,3 +280,50 @@ def test_invalid_candidate_does_not_replace_last_verified_snapshot(tmp_path, mon
     assert [p.stem for p in (tmp_path / 'backups/snapshots').glob('*.json')] == [first]
     maintenance.verify(config, first)
     maintenance.restore(config, first, tmp_path / 'restored')
+
+def test_backup_excludes_old_generations_with_custom_index_dir(tmp_path):
+    import json, sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    from personalkb import maintenance
+    from personalkb.workflow import load_config, make_store
+    workflow=json.loads(Path('config/workflow.json').read_text(encoding='utf-8-sig'))
+    workflow['data_dir']=str(tmp_path/'data'); wp=tmp_path/'workflow.json'; wp.write_text(json.dumps(workflow),encoding='utf8')
+    make_store(load_config(wp))
+    ledger=tmp_path/'budget.sqlite'
+    with sqlite3.connect(ledger) as db: db.execute('CREATE TABLE budget(x)')
+    rag=json.loads(Path('config/rag.json').read_text(encoding='utf-8-sig')); rag['index_dir']='nested/custom'
+    rp=tmp_path/'rag.json'; rp.write_text(json.dumps(rag),encoding='utf8')
+    cp=tmp_path/'maintenance.json'; cp.write_text(json.dumps({'workflow_config':str(wp),'rag_config':str(rp),'backup_root':str(tmp_path/'backups'),'ledger_paths':[str(ledger)],'keep_snapshots':1,'min_free_bytes':0}),encoding='utf8')
+    index=tmp_path/'data/nested/custom'; index.mkdir(parents=True)
+    active='a'*32+'.sqlite'; stale='b'*32+'.sqlite'
+    (index/'active.json').write_text(json.dumps({'file':active,'space_id':'1'*64,'returned_models':['test']}),encoding='utf8')
+    (index/stale).write_bytes(b'stale')
+    (index/(stale+'-journal')).write_bytes(b'stale sidecar')
+    config=maintenance.load_config(cp)
+    with closing(sqlite3.connect(index/active)) as db:
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('PRAGMA wal_autocheckpoint=0')
+        db.execute('CREATE TABLE chunks(text)')
+        db.execute('CREATE VIRTUAL TABLE fts USING fts5(text)')
+        db.execute('CREATE TABLE vec(id)')
+        db.execute('INSERT INTO chunks VALUES (?)', ('active evidence',))
+        db.commit()
+        assert (index/(active+'-wal')).stat().st_size > 0
+        snap=maintenance.create(config)
+    paths={item['path'] for item in maintenance.verify(config,snap)['files']}
+    assert 'workflow/nested/custom/'+active in paths
+    assert 'workflow/nested/custom/'+stale not in paths
+    assert 'workflow/nested/custom/'+stale+'-journal' not in paths
+    (index/active).write_bytes(b'damaged database')
+    with pytest.raises(WorkflowError, match='invalid_database'):
+        maintenance.create(config)
+    assert [p.stem for p in (tmp_path/'backups/snapshots').glob('*.json')] == [snap]
+    target=tmp_path/'restored'
+    maintenance.restore(config,snap,target)
+    with closing(sqlite3.connect(target/'workflow/nested/custom'/active)) as db:
+        assert db.execute('SELECT text FROM chunks').fetchone() == ('active evidence',)
+    (index/active).write_bytes((target/'workflow/nested/custom'/active).read_bytes())
+    (index/'active.json').write_text(json.dumps({'file':active}),encoding='utf8')
+    fallback=maintenance.verify(config,maintenance.create(config))
+    assert {'workflow/nested/custom/'+name for name in (active, stale)} <= {item['path'] for item in fallback['files']}
