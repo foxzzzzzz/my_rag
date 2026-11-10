@@ -1,5 +1,5 @@
 [Unit]
-Description=PersonalKB daily cold backup
+Description=PersonalKB cold backup
 [Service]
 Type=oneshot
 WorkingDirectory=__PROJECT_DIR__

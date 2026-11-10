@@ -1,7 +1,8 @@
 [Unit]
-Description=PersonalKB daily backup schedule
+Description=PersonalKB scheduled cold backup
 [Timer]
-OnCalendar=__DAILY_TIME__
+# Adjust this systemd calendar expression to change the backup schedule.
+OnCalendar=Sun *-*-* 03:30:00 Asia/Shanghai
 Persistent=true
 Unit=personalkb-backup.service
 [Install]

@@ -92,6 +92,7 @@ def test_configuration(tmp_path):
     assert web['env_file']=='/run/secrets/personalkb.env'
     assert json.loads((tmp_path/'auth.json').read_text(encoding='utf-8'))['enabled']
     assert json.loads((tmp_path/'workflow.json').read_text(encoding='utf-8'))['data_dir']=='/state/workflow'
+    assert json.loads((tmp_path/'maintenance.json').read_text(encoding='utf-8'))['keep_snapshots'] == 4
 def test_bundle_excludes_private_files(tmp_path):
     b=module('kit','tools/build_deployment_kit.py'); dest=tmp_path/'kit.zip'; b.build(dest)
     with zipfile.ZipFile(dest) as z:
@@ -188,7 +189,10 @@ def test_daily_backup_modes(tmp_path, monkeypatch):
 
 def test_timer_and_worker_oss_dependency():
     timer=(ROOT/'deploy/systemd/personalkb-backup.timer.template').read_text(encoding='utf-8-sig')
-    assert 'OnCalendar=__DAILY_TIME__' in timer and 'Persistent=true' in timer
+    assert [line for line in timer.splitlines() if line.startswith('OnCalendar=')] == [
+        'OnCalendar=Sun *-*-* 03:30:00 Asia/Shanghai',
+    ]
+    assert 'Persistent=true' in timer and 'Unit=personalkb-backup.service' in timer
     docker=(ROOT/'deploy/Dockerfile').read_text(encoding='utf-8-sig')
     assert '-r config/oss-requirements.txt' in docker and '/opt/oss' not in docker
 

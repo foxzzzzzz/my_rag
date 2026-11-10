@@ -84,7 +84,7 @@ sh deploy/operate.sh start
 
 随后各验证1份有权处理的视频与HTML导入→启动→复核，以及问答引用/无依据拒答。云端模型、真实下载、中断恢复和网站/小程序正常情况记录后回传；不要把离线测试当成这些步骤已经完成。
 
-## 5. 每日备份、手动下载和OSS
+## 5. 定时备份、手动下载和 OSS
 
 默认manual。先手动运行：
 
@@ -103,9 +103,18 @@ sh deploy/operate.sh export SNAPSHOT_ID --output /backups/personalkb-manual.zip
 
 如选择OSS：maintenance.json设`storage_mode=oss`，配置真实region/HTTPS endpoint/private/bucket/专属prefix及凭据环境变量名，在统一秘密文件中填对应凭据。现支持阿里云OSS；需对专属前缀具备读写、核对Bucket/对象ACL权限，不借用官网全权限密钥。本项目不创建Bucket、不改访问策略。先运行`push SNAPSHOT_ID`，再在独立仓库/环境运行`pull SNAPSHOT_ID`和`restore`演练；上传成功不等于恢复完成。远端对象暂不自动GC，费用/生命周期需后续观察。网络上传和回读当前仍占维护窗口，资料增长后可能延长停服时间。
 
-确认手动daily通过后，将`deploy/systemd/`两份模板复制为`.service`/`.timer`文件，替换项目绝对目录、环境文件路径、每天执行时间（服务器当地时区，须本人核对）。环境文件只需STATE_DIR/CONFIG_DIR/SECRET_FILE/BACKUP_DIR/PERSONALKB_COMPOSE_PROJECT等路径变量，不要把含`$`的密码哈希文件当shell脚本source。由本人安装至`/etc/systemd/system/`，执行daemon-reload并enable --now相应timer，检查`systemctl list-timers`及一次实际日志。模板使用Persistent=true，错过的任务会补跑，但没有自动安装。
+确认手动 `daily` 验收通过后，将 `deploy/systemd/` 两份模板复制为 `.service` 和 `.timer`，在服务文件中填入项目绝对目录和环境文件路径。环境文件只需 `STATE_DIR`、`CONFIG_DIR`、`SECRET_FILE`、`BACKUP_DIR` 和 `PERSONALKB_COMPOSE_PROJECT` 等部署变量，登录密钥仍通过 `SECRET_FILE` 引用。
 
-原视频可先运行`sh deploy/operate.sh retention`看dry-run；只处理满7日且证据安全的成功原视频，失败/待恢复素材保留并列原因。生成的生产配置`auto_retention_enabled=true`：每日备份创建并验证成功后执行安全清理，再按所选模式推送备份；报告记录清理结果。开发默认关闭，生产也可在maintenance.json明确改false后保留手动`retention --apply`。配置生效前请先查看dry-run，长期证据不会随原片删除。
+定时器默认每周日北京时间 03:30。需要调整时，替换 `.timer` 中的 `OnCalendar` 值。可先用 `systemd-analyze calendar` 核对表达式的下次触发时间。
+
+| 调度 | `OnCalendar` 值 |
+| --- | --- |
+| 每周日 03:30（默认） | `Sun *-*-* 03:30:00 Asia/Shanghai` |
+| 每天 03:30 | `*-*-* 03:30:00 Asia/Shanghai` |
+
+经确认后将单元安装到 `/etc/systemd/system/`，运行 `systemctl daemon-reload` 和 `systemctl enable --now personalkb-backup.timer`。通过 `systemctl list-timers personalkb-backup.timer` 和实际运行日志验收。调整已启用的定时器后，重新加载单元并重启该定时器。模板的 `Persistent=true` 会在错过运行时间后补跑，启用前需留出维护窗口。
+
+快照份数由 `maintenance.json` 的 `keep_snapshots` 控制，默认最近 4 份，创建快照时执行轮换。原视频保留单独由 `video_retention_days` 和 `auto_retention_enabled` 控制。生产配置生成器默认开启自动清理，冷备创建并校验成功后才执行，仅处理满 7 天且证据校验通过的成功视频。可在首次演练前关闭该开关，另选维护窗口运行 `sh deploy/operate.sh retention` 预览。预览会短暂停止本项目服务。手动 `retention --apply` 需要单独确认。
 
 ## 6. 回传报告与剩余门槛
 
