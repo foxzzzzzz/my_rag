@@ -133,10 +133,10 @@ class WebService:
             d={k:s[k] for k in ('id','kind','original_name','current_version_id','created_at','deleted')}
             with self.store._tx() as c:
                 metadata=classifications.snapshot(s['id'],connection=c)
-                review=c.execute('SELECT decision FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(s['current_version_id'],)).fetchone()
+                review=c.execute('SELECT decision,seq FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(s['current_version_id'],)).fetchone()
                 title=self.store._row(c,'versions',s['current_version_id'])['result'].get('title','') if s['current_version_id'] else ''
             status=review[0] if review else 'pending'
-            d.update(title=title,status=tasks.get(s['id'],{}).get('status'),eligible=s['id'] in eligible,content_status=self.store.content_status(s['id']),classification=metadata,review_status=status)
+            d.update(title=title,status=tasks.get(s['id'],{}).get('status'),eligible=s['id'] in eligible,content_status=self.store.content_status(s['id']),classification=metadata,review_status=status,review_revision=review['seq'] if review else None)
             if filters.get('kind') and s['kind']!=filters['kind']: continue
             if filters.get('q') and filters['q'].casefold() not in (s['original_name']+' '+title).casefold(): continue
             if filters.get('reviews') and status not in filters['reviews']: continue

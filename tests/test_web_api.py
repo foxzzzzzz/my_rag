@@ -100,6 +100,28 @@ class WebApiTests(unittest.TestCase):
         sid,v=self.make_version()
         payload=dict(version_id='stale',content_sha256=v['content_sha256'],score=100,decision='approve',reviewer='tester',review_id='r1')
         self.assertEqual(self.client.post('/api/sources/'+sid+'/reviews',json=payload,headers=self.h).status_code,409)
+
+    def test_source_review_revision_changes_on_new_review_but_not_idempotent_retry(self):
+        sid,version=self.make_version()
+        path=f'/api/sources/{sid}/reviews'
+        payload=dict(version_id=version['id'],content_sha256=version['content_sha256'],
+                     score=100,decision='approve',reviewer='tester',review_id='first')
+
+        def source():
+            return self.client.get('/api/sources').json()['items'][0]
+
+        assert source()['review_revision'] is None
+        assert self.client.post(path,json=payload,headers=self.h).status_code==200
+        first=source()
+        payload['review_id']='second'
+        assert self.client.post(path,json=payload,headers=self.h).status_code==200
+        second=source()
+        assert first['eligible'] and second['eligible']
+        assert first['current_version_id']==second['current_version_id']==version['id']
+        assert second['review_revision']>first['review_revision']
+        assert self.client.post(path,json=payload,headers=self.h).status_code==200
+        assert source()['review_revision']==second['review_revision']
+
     def test_config_rejects_nonfinite_and_fractional_integer(self):
         import json
         from personalkb.workflow_store import WorkflowError

@@ -1,0 +1,10 @@
+{
+  "startup_timeout_ms": 10000,
+  "startup_timeout_ms说明": "启动子进程后等待本服务就绪的毫秒数，单次探测按秒向上取整",
+  "health_interval_ms": 250,
+  "health_interval_ms说明": "健康检查之间的等待毫秒数",
+  "health_probe_timeout_seconds": 1,
+  "health_probe_timeout_seconds说明": "启动期间单次 HTTP 健康探测的超时秒数",
+  "cleanup_timeout_ms": 5000,
+  "cleanup_timeout_ms说明": "启动失败后等待进程退出的最大毫秒数"
+}

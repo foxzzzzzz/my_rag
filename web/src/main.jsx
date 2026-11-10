@@ -1,6 +1,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {RagPanel} from './rag';
+import {hasOlderSourceReviews} from './rag-state';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
 import {CatalogManager, ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {LibraryView} from './library-view';
@@ -29,6 +30,7 @@ function App() {
   const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [htmlMode, setHtmlMode] = useState('preview'), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
   const authEpoch=useRef(0);
+  const refreshOrder=useRef({issued:0,applied:0});
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
   draftRef.current = drafts; editRef.current = edits; detailRef.current = detail;
   const source = detail?.source, current = detail?.current, result = current?.result || {};
@@ -81,9 +83,14 @@ function App() {
   }
   async function refresh() {
     const epoch=authEpoch.current;
+    const order=++refreshOrder.current.issued;
+    const lastApplied=refreshOrder.current.applied;
     const [s,t,c] = await Promise.all([api('/sources'), api('/tasks'), api('/classifications')]);
-    if(epoch!==authEpoch.current) return;
-    setSources(s.items); setTasks(t.items); setCatalog(c.items);setDataLoaded(true);
+    if(epoch!==authEpoch.current||order<refreshOrder.current.applied) return;
+    const overlapped=lastApplied!==refreshOrder.current.applied;
+    refreshOrder.current.applied=order;
+    setSources(previous=>overlapped&&hasOlderSourceReviews(previous,s.items)?previous:s.items);
+    setTasks(t.items); setCatalog(c.items);setDataLoaded(true);
   }
   async function run(action) {
     const owner=acquireWriter(writing), epoch=authEpoch.current;
