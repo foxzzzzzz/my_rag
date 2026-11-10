@@ -21,6 +21,14 @@ def has_unknown_submission(task, stages):
     )
 
 
+def task_can_archive(status, dispatch_state):
+    return status in ('succeeded', 'failed', 'cancelled', 'needs_attention') and dispatch_state not in ('pending', 'working')
+
+
+def task_is_archived(connection, task_id):
+    return connection.execute('SELECT 1 FROM web_task_archive WHERE task_id=?', (task_id,)).fetchone() is not None
+
+
 class WebDispatcher:
     def __init__(self, service):
         self.service = service
@@ -44,6 +52,7 @@ class WebDispatcher:
             task = self.store._row(c, 'tasks', task_id)
             source = self.store._row(c, 'sources', task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
+            if task_is_archived(c, task_id): raise WorkflowError('task_archived')
             if source['kind'] == 'video':
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
@@ -57,11 +66,8 @@ class WebDispatcher:
                 return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
             expected = 'needs_attention' if mode == 'resume' else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
-            if mode == 'resume':
-                if c.execute('SELECT 1 FROM web_task_archive WHERE task_id=?', (task_id,)).fetchone():
-                    raise WorkflowError('task_archived')
-                if has_unknown_submission(task, task_stages(c, task_id)):
-                    raise WorkflowError('unknown_submission')
+            if mode == 'resume' and has_unknown_submission(task, task_stages(c, task_id)):
+                raise WorkflowError('unknown_submission')
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,claimed,owner,error_code) VALUES(?,?,'pending',?,NULL,NULL,NULL) ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL", (task_id, mode, time.time()))
             c.execute('UPDATE web_dispatch SET processing_mode=? WHERE task_id=?',(processing_mode,task_id))
             return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
@@ -71,7 +77,7 @@ class WebDispatcher:
             task = self.store._row(c, 'tasks', task_id)
             if archived:
                 dispatch = c.execute('SELECT state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
-                if task['status'] != 'needs_attention' or (dispatch and dispatch['state'] in ('pending', 'working')):
+                if not task_can_archive(task['status'], dispatch['state'] if dispatch else None):
                     raise WorkflowError('invalid_state')
                 c.execute('INSERT OR IGNORE INTO web_task_archive VALUES(?)', (task_id,))
             else:
@@ -127,6 +133,7 @@ class WebDispatcher:
             task = self.store._row(c,'tasks',task_id)
             source = self.store._row(c,'sources',task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
+            if task_is_archived(c, task_id): raise WorkflowError('task_archived')
             if source['kind']=='video':
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')

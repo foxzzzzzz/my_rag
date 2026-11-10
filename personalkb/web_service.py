@@ -102,13 +102,14 @@ class WebService:
             self._douyin_stamp=stamp
         return self._douyin
     def _task(self, t):
-        from .web_dispatch import has_unknown_submission, task_stages
+        from .web_dispatch import has_unknown_submission, task_can_archive, task_is_archived, task_stages
         d = {k:t[k] for k in ('id','source_id','status','stage','error_code','attempts','created_at','updated_at')}
         d['progress'] = dict(completed_stages=None,total_stages=None,completed_frames=None,total_frames=None)
         with self.store._tx() as c:
             dispatch=c.execute('SELECT state,error_code,processing_mode FROM web_dispatch WHERE task_id=?',(t['id'],)).fetchone()
             d['dispatch'] = dict(dispatch) if dispatch else None
-            d['archived'] = c.execute('SELECT 1 FROM web_task_archive WHERE task_id=?',(t['id'],)).fetchone() is not None
+            d['archived'] = task_is_archived(c, t['id'])
+            d['can_archive'] = not d['archived'] and task_can_archive(t['status'], dispatch['state'] if dispatch else None)
             rows = task_stages(c, t['id'])
             if t['status']=='needs_attention':
                 d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows) else None

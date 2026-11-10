@@ -187,6 +187,48 @@ class WebApiTests(unittest.TestCase):
         assert self.client.post(path+'resume', json={'allow_paid':True}, headers=self.h).status_code == 200
         assert self.client.post(path+'archive', json={}, headers=self.h).status_code == 409
 
+    def test_finished_tasks_can_archive_without_changing_task_or_source(self):
+        sid, version = self.make_version()
+        store = self.service.store
+        done = next(task for task in store.list_tasks() if task['source_id'] == sid)
+        assert done['status'] == 'succeeded'
+        source = store.get_source(sid)
+        jobs = [done]
+        with store._tx() as db:
+            for status in ('failed', 'cancelled'):
+                db.execute('INSERT INTO tasks(id,source_id,status) VALUES(?,?,?)', (status, sid, status))
+                jobs.append(store._row(db, 'tasks', status))
+
+        def task_state(task_id):
+            return next(task for task in self.client.get('/api/tasks').json()['items'] if task['id'] == task_id)
+
+        for task in jobs:
+            task_id = task['id']
+            path = f'/api/tasks/{task_id}/'
+            assert task_state(task_id)['can_archive'] is True
+            assert self.client.post(path+'archive', json={}, headers=self.h).json()['archived'] is True
+            assert task_state(task_id)['archived'] is True
+            if task['status'] != 'succeeded':
+                assert self.client.post(path+'retry', json={}, headers=self.h).json()['error'] == 'task_archived'
+            assert self.client.post(path+'unarchive', json={}, headers=self.h).json()['archived'] is False
+            assert task_state(task_id)['can_archive'] is True
+            assert store.get_task(task_id) == task
+            assert task_state(task_id)['dispatch'] is None
+        assert store.get_source(sid) == source
+        assert store.get_version(version['id'])['content_sha256'] == version['content_sha256']
+
+    def test_archive_rejects_active_tasks_and_dispatches(self):
+        store = self.service.store
+        task_id = store.import_source('html', 'd'*64, 'active.html', 'originals/active')['task']['id']
+        path = f'/api/tasks/{task_id}/archive'
+        for status, dispatch in (('queued', None), ('running', None), ('succeeded', 'working'), ('failed', 'pending')):
+            with store._tx() as db:
+                db.execute('UPDATE tasks SET status=? WHERE id=?', (status, task_id))
+                if dispatch:
+                    db.execute("INSERT OR REPLACE INTO web_dispatch(task_id,mode,state,requested) VALUES(?,'run',?,0)", (task_id, dispatch))
+            assert self.client.get('/api/tasks').json()['items'][0]['can_archive'] is False
+            assert self.client.post(path, json={}, headers=self.h).status_code == 409
+
     def make_version(self):
         response=self.client.put('/api/imports?filename=review.html&rights_confirmed=true',content=b'<html><body>Review text</body></html>',headers=self.h)
         item=response.json(); workflow.run_once(self.wc,task_id=item['task_id'])

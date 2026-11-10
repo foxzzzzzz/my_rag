@@ -265,7 +265,7 @@ function App() {
               <div className="actions">{action&&<button key={action} disabled={busy||(action!=='cancel'&&paidNeeded&&(!taskPaid||!enabled))} onClick={()=>run(async()=>{
                 await api('/tasks/'+task.id+'/'+action,{method:'POST',body:JSON.stringify(action==='cancel'?{}:{allow_paid:taskPaid,processing_mode:video?'preview':mode})});await refresh();
               })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>}
-                {(task.archived||(task.status==='needs_attention'&&!['pending','working'].includes(task.dispatch?.state)))&&<button disabled={busy} onClick={()=>run(async()=>{
+                {(task.archived||task.can_archive)&&<button disabled={busy} onClick={()=>run(async()=>{
                   await api('/tasks/'+task.id+(task.archived?'/unarchive':'/archive'),{method:'POST',body:'{}'});await refresh();
                 })}>{task.archived?'取消归档':'归档'}</button>}
                 {item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
