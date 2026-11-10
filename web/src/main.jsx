@@ -5,7 +5,7 @@ import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} fr
 import {CatalogManager, ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {LibraryView} from './library-view';
 import {DocumentView} from './document-view';
-import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate} from './helpers';
+import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate, taskControls} from './helpers';
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
 import ui from './ui-config.json';
 import './style.css';
@@ -225,13 +225,13 @@ function App() {
           {!session.config.live_video_enabled&&<p className="muted">视频处理当前未启用。</p>}{!session.config.live_html_enabled&&<p className="muted">网页模型处理未启用，离线预览不产生AI摘要。</p>}
           {!tasks.length&&<p>暂无任务，可先导入资料。</p>}{tasks.map(task=>{
             const item=sources.find(x=>x.id===task.source_id),video=isVideo(item?.kind);
-            const mode=task.status==='queued'?htmlMode:(task.dispatch?.processing_mode||htmlMode);
+            const {mode, action, queuedForProcessing}=taskControls(task, htmlMode);
             const paidNeeded=video||mode==='model',enabled=video?session.config.live_video_enabled:mode!=='model'||session.config.live_html_enabled;
-            return <article className="task-row" key={task.id}><strong>{item?.title||item?.original_name||task.source_id}</strong><p>{statusText(task.status)} · {statusText(task.stage)}</p><p>{progressText(task.progress,task.status)}</p>
+            return <article className="task-row" key={task.id}><strong>{item?.title||item?.original_name||task.source_id}</strong><p>{statusText(task.status)} · {statusText(task.stage)}</p><p>{queuedForProcessing?'已加入处理队列':progressText(task.progress,task.status)}</p>
               {!video&&<p className="muted">{mode==='model'?'模型摘要与笔记':'离线正文预览'}</p>}{task.error_code&&<p className="error">{task.error_code}</p>}
-              <div className="actions">{[['queued','start'],['needs_attention','resume'],['failed','retry'],['cancelled','retry'],['running','cancel']].filter(([state])=>state===task.status).map(([,action])=><button key={action} disabled={busy||(action!=='cancel'&&paidNeeded&&(!taskPaid||!enabled))} onClick={()=>run(async()=>{
-                await api('/tasks/'+task.id+'/'+action,{method:'POST',body:JSON.stringify({allow_paid:taskPaid,processing_mode:video?'preview':mode})});await refresh();
-              })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>)}{item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
+              <div className="actions">{action&&<button key={action} disabled={busy||(action!=='cancel'&&paidNeeded&&(!taskPaid||!enabled))} onClick={()=>run(async()=>{
+                await api('/tasks/'+task.id+'/'+action,{method:'POST',body:JSON.stringify(action==='cancel'?{}:{allow_paid:taskPaid,processing_mode:video?'preview':mode})});await refresh();
+              })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>}{item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
           })}
         </section></>}
         {page==='detail'&&detail&&<>

@@ -93,7 +93,7 @@ sh deploy/operate.sh daily
 cat "$STATE_DIR/backup-status.json"
 ```
 
-它只短暂停止本项目Web/worker，创建并校验去重快照，再恢复原先运行的服务；失败也尝试恢复，`services_restored`表示Compose恢复命令成功，仍需检查HTTPS页面。手动模式不会自动获得外部副本。读取报告的snapshot值后按需导出：
+脚本短暂停止本项目的 Web 和 worker，新快照通过对象哈希及 SQLite 完整性校验后才轮换旧快照。冷备失败也会尝试恢复原先运行的服务。报告中的 `services_restored=true` 表示原先运行的容器通过连续两次状态检查，若原先运行 Web，还须通过回环和 HTTPS 健康检查。恢复超时或检查失败时，命令返回非零，报告保留已创建的快照 ID。检查超时和间隔沿用 `deployment.json`。手动模式仍需单独保存外部副本。读取报告的 `snapshot` 值后按需导出。
 
 ```bash
 sh deploy/operate.sh export SNAPSHOT_ID --output /backups/personalkb-manual.zip

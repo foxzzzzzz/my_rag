@@ -28,7 +28,11 @@ case "$command" in
         if printf '%s\n' "$running" | grep -qx "$service"; then services="$services $service"; fi
       done
       restored=true
-      if [ -n "$services" ]; then docker compose --project-name "$project" up -d $services || { restored=false; code=1; }; fi
+      if [ -n "$services" ]; then docker compose --project-name "$project" up -d --no-deps $services || { restored=false; code=1; }; fi
+      if [ "$command" = daily ] && [ "$restored" = true ] && [ -n "$services" ]; then
+        (CONFIG_DIR=$(cd "$CONFIG_DIR" && pwd) && export CONFIG_DIR &&
+          cd .. && python3 -m deploy.restore_health $services) || { restored=false; code=1; }
+      fi
       if [ "$command" = daily ] && [ -f "$STATE_DIR/backup-status.json" ]; then
         python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); d=json.loads(p.read_text()); d["services_restored"]=(sys.argv[2]=="true"); d["state"]="failed" if not d["services_restored"] else d["state"]; t=p.with_suffix(".tmp"); t.write_text(json.dumps(d)+"\n"); t.replace(p)' "$STATE_DIR/backup-status.json" "$restored" || code=1
       fi

@@ -146,12 +146,16 @@ def create(config):
         identifier = hashlib.sha256(payload).hexdigest()
         _space(root, len(payload), config['min_free_bytes'])
         part = staging / 'manifest'; part.write_bytes(payload)
-        os.replace(part, manifests / (identifier + '.json'))
-        ordered = sorted(manifests.glob('*.json'), key=lambda p: p.stat().st_mtime_ns, reverse=True)
-        # Validate all manifests before any deletion; a damaged repository needs attention.
-        checked = [_manifest(root, x.stem) for x in ordered]
-        retained = checked[:config['keep_snapshots']]
-        for old in ordered[config['keep_snapshots']:]: old.unlink()
+        # Check the complete candidate before publishing or removing older snapshots.
+        _verify_objects(root, _validate_manifest(manifest))
+        destination = manifests / (identifier + '.json')
+        existing = sorted((p for p in manifests.glob('*.json') if p != destination),
+                          key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        checked = [_manifest(root, p.stem) for p in existing]
+        os.replace(part, destination)
+        keep_previous = config['keep_snapshots'] - 1
+        retained = [manifest, *checked[:keep_previous]]
+        for old in existing[keep_previous:]: old.unlink()
         referenced = {i['sha256'] for m in retained for i in m['files']}
         for obj in objects.iterdir():
             if len(obj.name) == 64 and all(c in '0123456789abcdef' for c in obj.name) and obj.name not in referenced:
@@ -185,6 +189,10 @@ def _manifest(root, identifier):
 
 def verify(config, identifier):
     root = Path(config['backup_root']); manifest = _manifest(root, identifier)
+    return _verify_objects(root, manifest)
+
+
+def _verify_objects(root, manifest):
     for item in manifest['files']:
         p = root / 'objects' / item['sha256']; _no_links(p)
         if not p.is_file() or p.stat().st_size != item['size'] or _sha(p) != item['sha256']: raise WorkflowError('corrupt_object')

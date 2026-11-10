@@ -15,3 +15,15 @@ test('无数值进度的终态任务不显示处理中',()=>{assert.equal(progre
 import {suggestionSelection, suggestionError} from './management-helpers.js';
 test('新分类默认不选择，已有建议可选择',()=>{const x=suggestionSelection({existing_topics:['a'],existing_tags:['b'],new_topics:['新'],new_tags:['标签']});assert.deepEqual(x,{existing_topics:['a'],existing_tags:['b'],confirmed_new_topics:[],confirmed_new_tags:[]})});
 test('建议冲突和忙碌使用可理解提示',()=>{assert.match(suggestionError('classification_conflict'),/刷新/);assert.match(suggestionError('worker_busy'),/忙/)});
+
+import {taskControls} from './helpers.js';
+test('派发队列使用持久模式并可取消，未派发任务仍可启动',()=>{
+  for (const state of ['pending', 'working']) {
+    const task = {status:'queued', dispatch:{state, processing_mode:'model'}};
+    assert.deepEqual(taskControls(task, 'preview'), {mode:'model', action:'cancel', queuedForProcessing:true});
+  }
+  assert.deepEqual(taskControls({status:'queued'}, 'model'), {mode:'model', action:'start', queuedForProcessing:false});
+  for (const [status, action] of [['running','cancel'], ['failed','retry'], ['cancelled','retry'], ['needs_attention','resume']]) {
+    assert.equal(taskControls({status}, 'preview').action, action);
+  }
+});

@@ -276,3 +276,80 @@ def test_production_enables_daily_retention(tmp_path):
     c=module('production_retention','deploy/configure.py'); c.configure('kb.yuanzhll.top',tmp_path)
     assert json.loads((ROOT/'config/maintenance.json').read_text(encoding='utf-8-sig'))['auto_retention_enabled'] is False
     assert json.loads((tmp_path/'maintenance.json').read_text(encoding='utf-8'))['auto_retention_enabled'] is True
+
+def _restore_health_fixture(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    h=module('restore_health_test','deploy/restore_health.py')
+    (tmp_path/'web.json').write_text(json.dumps({'port':8000,'trusted_origins':['https://example.org']}))
+    (tmp_path/'deployment.json').write_text(json.dumps({'health_timeout_seconds':3,'health_interval_seconds':1,'request_timeout_seconds':1,'docker_timeout_seconds':1}))
+    env = {'CONFIG_DIR': str(tmp_path), 'PERSONALKB_COMPOSE_PROJECT': 'personalkb'}
+    clock = [0]
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(h, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(h.deploy,'compose',lambda env,*args,**kw: args[-1])
+    return h, env
+
+
+def _restored_container(service, status='running', started_at='start'):
+    return json.dumps([{'Config': {'Labels': {'com.docker.compose.project': 'personalkb', 'com.docker.compose.service': service}},
+                        'State': {'Status': status, 'StartedAt': started_at}}])
+
+
+def test_restore_health_checks_selected_services_and_endpoints(tmp_path, monkeypatch):
+    h, env = _restore_health_fixture(tmp_path, monkeypatch)
+    checked = []
+    def inspect(args, **kwargs):
+        checked.append(args[-1])
+        return _restored_container(args[-1])
+    monkeypatch.setattr(h.deploy, 'run', inspect)
+    urls=[]
+    monkeypatch.setattr(h.deploy,'url_ok',lambda url,*args: urls.append((url, args[1:])) or True)
+    h.wait_for_services(env, ['web', 'worker'])
+    assert checked == ['web', 'worker', 'web', 'worker']
+    assert urls == [('http://127.0.0.1:8000/healthz', ({'Host': 'example.org', 'X-Forwarded-Proto': 'https'},)),
+                    ('https://example.org/healthz', ())]
+    checked.clear(); urls.clear()
+    h.wait_for_services(env, ['worker'])
+    assert checked == ['worker', 'worker'] and not urls
+
+
+def test_restore_health_rejects_restarting_worker_and_failed_https(tmp_path, monkeypatch):
+    import pytest
+    h, env = _restore_health_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(h.deploy, 'run', lambda args, **kwargs: _restored_container(args[-1], 'restarting' if args[-1] == 'worker' else 'running'))
+    monkeypatch.setattr(h.deploy, 'url_ok', lambda *args: pytest.fail('Unstable services must not pass health verification'))
+    with pytest.raises(h.deploy.DeployError):
+        h.wait_for_services(env, ['web', 'worker'])
+    monkeypatch.setattr(h.deploy, 'run', lambda args, **kwargs: _restored_container(args[-1]))
+    monkeypatch.setattr(h.deploy, 'url_ok', lambda url, *args: url.startswith('http:'))
+    with pytest.raises(h.deploy.DeployError):
+        h.wait_for_services(env, ['web', 'worker'])
+
+
+def test_restore_health_module_entry_from_operate(tmp_path):
+    import os, subprocess, sys
+    import pytest
+    pytest.importorskip('fcntl')
+    state = tmp_path / 'state'
+    (state / 'tmp').mkdir(parents=True)
+    config = tmp_path / 'config'
+    config.mkdir()
+    (config / 'deployment.json').write_text(json.dumps({
+        'health_timeout_seconds': 3, 'health_interval_seconds': 0.01,
+        'docker_timeout_seconds': 1, 'request_timeout_seconds': 1}))
+    commands = tmp_path / 'bin'
+    commands.mkdir()
+    docker = commands / 'docker'
+    container = _restored_container('worker')
+    docker.write_text("#!/bin/sh\ncase \"$*\" in\n  *'ps --services'*) echo worker;;\n  *'ps --all -q worker'*) echo worker;;\n  inspect*) printf '%s' '" + container + "';;\nesac\n")
+    docker.chmod(0o700)
+    python = commands / 'python3'
+    python.write_text("#!/bin/sh\nif [ \"$1\" = daily.py ]; then printf '%s' '{\"state\":\"success\"}' > \"$STATE_DIR/backup-status.json\"; else exec \"$TEST_PYTHON\" \"$@\"; fi\n")
+    python.chmod(0o700)
+    env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'],
+               STATE_DIR=str(state), CONFIG_DIR=str(config), TEST_PYTHON=sys.executable)
+    result = subprocess.run(['sh', str(ROOT / 'deploy/operate.sh'), 'daily'],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((state / 'backup-status.json').read_text())['services_restored'] is True

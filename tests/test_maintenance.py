@@ -258,3 +258,25 @@ def test_oss_reads_secret_file_with_environment_override(tmp_path, monkeypatch):
     c={'storage_mode':'oss','env_file':str(secrets),'oss':{'private':True,'region':'cn-test','endpoint':'https://oss-cn-test.aliyuncs.com','bucket':'test-bucket','prefix':'p/','access_key_id_env':'BACKUP_ID','access_key_secret_env':'BACKUP_SECRET'}}
     _bucket(c)
     assert captured == [('file-id','override')]
+
+def test_invalid_candidate_does_not_replace_last_verified_snapshot(tmp_path, monkeypatch):
+    import json, sqlite3
+    from pathlib import Path
+    from personalkb import maintenance
+    from personalkb.workflow import load_config, make_store
+    workflow = json.loads(Path('config/workflow.json').read_text(encoding='utf-8-sig'))
+    workflow['data_dir'] = str(tmp_path / 'data')
+    wp = tmp_path / 'workflow.json'; wp.write_text(json.dumps(workflow)); make_store(load_config(wp))
+    ledger = tmp_path / 'budget.sqlite'
+    with sqlite3.connect(ledger) as db: db.execute('CREATE TABLE ledger(x)')
+    cp = tmp_path / 'maintenance.json'; cp.write_text(json.dumps({'workflow_config': str(wp), 'backup_root': str(tmp_path / 'backups'), 'ledger_paths': [str(ledger)], 'keep_snapshots': 1, 'min_free_bytes': 0}))
+    config = maintenance.load_config(cp); first = maintenance.create(config)
+    original_copy = maintenance._sqlite_copy
+    def bad_copy(source, target):
+        if source == ledger: target.write_bytes(b'invalid sqlite')
+        else: original_copy(source, target)
+    monkeypatch.setattr(maintenance, '_sqlite_copy', bad_copy)
+    with pytest.raises(WorkflowError, match='invalid_database'): maintenance.create(config)
+    assert [p.stem for p in (tmp_path / 'backups/snapshots').glob('*.json')] == [first]
+    maintenance.verify(config, first)
+    maintenance.restore(config, first, tmp_path / 'restored')

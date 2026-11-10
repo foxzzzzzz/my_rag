@@ -46,6 +46,16 @@ class HtmlDispatchTests(unittest.TestCase):
         with patch('personalkb.html_pipeline.run_html') as call:
             result = self.s.process_next(); call.assert_not_called()
         self.assertEqual(result['error'], 'html_model_disabled')
+    def test_cancel_persisted_pending_model_prevents_execution(self):
+        self.cfg['live_html_enabled'] = True; self.enqueue_model()
+        restarted = WebService(self.wc, {}, self.cfg)
+        restarted.dispatcher.cancel(self.tid)
+        with patch('personalkb.html_pipeline.run_html') as call:
+            self.assertIsNone(restarted.process_next())
+            call.assert_not_called()
+        self.assertEqual(restarted.store.get_task(self.tid)['status'], 'cancelled')
+        self.assertEqual(restarted.tasks()['items'][0]['dispatch']['state'], 'cancelled')
+
     def test_retry_without_consent_is_atomic(self):
         self.cfg['live_html_enabled'] = True; self.enqueue_model()
         self.s.dispatcher.cancel(self.tid)

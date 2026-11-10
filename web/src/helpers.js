@@ -8,3 +8,11 @@ export function statusText(s) { if (/^vision-\d+$/.test(s || '')) return `视觉
 export function formatDate(value, timeZone) { if (!value) return ''; const date = new Date(value); if (Number.isNaN(date.getTime())) return value; try { return new Intl.DateTimeFormat('zh-CN', {timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(date); } catch { return value; } }
 
 export function connectionText(state) { return ({connecting:'正在连接服务…',connected:'服务已连接',disconnected:'服务未连接'})[state]; }
+
+export function taskControls(task, selectedMode) {
+  const actions = {queued:'start', needs_attention:'resume', failed:'retry', cancelled:'retry', running:'cancel'};
+  const queuedForProcessing = task.status === 'queued' && ['pending', 'working'].includes(task.dispatch?.state);
+  const mode = actions[task.status] === 'start' && !queuedForProcessing
+    ? selectedMode : task.dispatch?.processing_mode || selectedMode;
+  return {mode, action: queuedForProcessing ? 'cancel' : actions[task.status], queuedForProcessing};
+}
