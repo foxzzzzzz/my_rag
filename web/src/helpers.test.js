@@ -16,6 +16,67 @@ import {suggestionSelection, suggestionError} from './management-helpers.js';
 test('新分类默认不选择，已有建议可选择',()=>{const x=suggestionSelection({existing_topics:['a'],existing_tags:['b'],new_topics:['新'],new_tags:['标签']});assert.deepEqual(x,{existing_topics:['a'],existing_tags:['b'],confirmed_new_topics:[],confirmed_new_tags:[]})});
 test('建议冲突和忙碌使用可理解提示',()=>{assert.match(suggestionError('classification_conflict'),/刷新/);assert.match(suggestionError('worker_busy'),/忙/)});
 
+import {htmlBodyPreview} from './helpers.js';
+
+test('离线 HTML 优先在完整句末截取，保留闭合引号',()=>{
+  const body = '第一句。她说：“第二句。” Third sentence. More text follows.';
+  for (const [extract, expected] of [
+    ['第一句。她说：“第二句。” Third', '第一句。她说：“第二句。”'],
+    ['第一句。她说：“第二句。” Third sentence. More', '第一句。她说：“第二句。” Third sentence.'],
+    ['第一句。', '第一句。'],
+  ]) {
+    const result = {body, summary:'正文预览：'+extract, provenance:'local_extraction'};
+    assert.deepEqual(htmlBodyPreview('html', result), {text:expected, omitted:true});
+  }
+});
+
+test('完整正文不标省略，无句末则沿用原提取长度且不误断小数',()=>{
+  const result = {body:'浓度为3.14毫克每升', summary:'正文预览：浓度为3.14', provenance:'local_extraction'};
+  assert.deepEqual(htmlBodyPreview('html', result), {text:'浓度为3.14', omitted:true});
+  assert.deepEqual(htmlBodyPreview('html', {...result, summary:'正文预览：'+result.body}), {text:result.body, omitted:false});
+});
+
+test('仅离线 HTML 摘录或原样继承的摘录是正文预览',()=>{
+  const result = {body:'第一句。第二句。', summary:'正文预览：第一句。第', provenance:'human_edited'};
+  assert.deepEqual(htmlBodyPreview('html', result), {text:'第一句。', omitted:true});
+  assert.equal(htmlBodyPreview('html', {...result, summary:'本人另写摘要'}), null);
+  assert.equal(htmlBodyPreview('html', {...result, summary:'正文预览：自行撰写'}), null);
+  assert.equal(htmlBodyPreview('html', {...result, provenance:'provider'}), null);
+  assert.equal(htmlBodyPreview('video', result), null);
+});
+
+test('正文预览保留以 iPhone 开头的下一句之前的句末',()=>{
+  const extract = 'First sentence. The old phone still works. iPhone users can switch';
+  const result = {body:extract+' networks when traveling.', summary:'正文预览：'+extract, provenance:'local_extraction'};
+  assert.deepEqual(htmlBodyPreview('html', result), {text:'First sentence. The old phone still works.', omitted:true});
+});
+
+test('浏览器无 Intl.Segmenter 时仍保留句末及闭合引号',async()=>{
+  const segmenter = Intl.Segmenter;
+  let preview;
+  try {
+    Intl.Segmenter = undefined;
+    ({htmlBodyPreview:preview} = await import('./helpers.js?without-segmenter'));
+  } finally {
+    Intl.Segmenter = segmenter;
+  }
+  for (const [extract, expected] of [
+    ['她说：“第一句。” 第二', '她说：“第一句。”'],
+    ['The old phone still works. iPhone users', 'The old phone still works.'],
+    ['Dr. Smith measured 3.14', 'Dr. Smith measured 3.14'],
+    ['For example, e.g. A quick comparison', 'For example, e.g. A quick comparison'],
+  ]) {
+    const result = {body:extract+' millimeters.', summary:'正文预览：'+extract, provenance:'local_extraction'};
+    assert.deepEqual(preview('html', result), {text:expected, omitted:true});
+  }
+});
+
+test('缩写不会被误认为句末',()=>{
+  for (const extract of ['Dr. Smith measured 3.14', 'For example, e.g. A quick comparison']) {
+    assert.deepEqual(htmlBodyPreview('html', {body:extract+' units.', summary:'正文预览：'+extract, provenance:'local_extraction'}), {text:extract, omitted:true});
+  }
+});
+
 import {taskControls} from './helpers.js';
 test('派发队列使用持久模式并可取消，未派发任务仍可启动',()=>{
   for (const state of ['pending', 'working']) {

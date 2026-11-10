@@ -9,6 +9,46 @@ export function formatDate(value, timeZone) { if (!value) return ''; const date 
 
 export function connectionText(state) { return ({connecting:'正在连接服务…',connected:'服务已连接',disconnected:'服务未连接'})[state]; }
 
+const bodyPreviewPrefix = '正文预览：';
+const sentenceSegmenter = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('zh', {granularity:'sentence'}) : null;
+const sentenceEnd = /[。！？.!?]["'”’」』）】》)\]]*$/u;
+const fallbackSentenceEnd = /[。！？]+["'”’」』）】》)\]]*|[.!?]+["'”’」』）】》)\]]*(?=\s|$)/gu;
+const abbreviation = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|e\.g|i\.e)|\b[A-Z])$/u;
+
+function endsWithAbbreviation(body, punctuation, mark) {
+  return mark === '.' && abbreviation.test(body.slice(0, punctuation));
+}
+
+export function htmlBodyPreview(kind, {body, summary, provenance}) {
+  if (kind !== 'html' || !['local_extraction', 'human_edited'].includes(provenance)
+      || typeof body !== 'string' || typeof summary !== 'string'
+      || !summary.startsWith(bodyPreviewPrefix)) return null;
+  // The stored extract carries the length used when this version was created.
+  const extract = summary.slice(bodyPreviewPrefix.length);
+  if (!extract || !body.startsWith(extract)) return null;
+  if (extract === body) return {text:body, omitted:false};
+
+  let boundary = 0;
+  for (const {segment, index} of sentenceSegmenter?.segment(body) ?? []) {
+    const sentence = segment.trimEnd();
+    const end = index + sentence.length;
+    if (end > extract.length) break;
+    const ending = sentence.match(sentenceEnd);
+    if (ending && !endsWithAbbreviation(body, index + ending.index, ending[0][0])) boundary = end;
+  }
+  // ICU can join sentences when the next word begins with a lower-case letter, as in iPhone.
+  for (const match of body.matchAll(fallbackSentenceEnd)) {
+    const end = match.index + match[0].length;
+    if (end > extract.length) break;
+    if (end <= boundary) continue;
+    if (sentenceSegmenter && !/^\s+["'“‘「『]*[a-z][A-Z]/u.test(body.slice(end))) continue;
+    if (endsWithAbbreviation(body, match.index, match[0][0])) continue;
+    boundary = end;
+  }
+  return {text:boundary ? body.slice(0, boundary) : extract.trimEnd(), omitted:true};
+}
+
 export function taskControls(task, selectedMode) {
   const actions = {queued:'start', needs_attention:'resume', failed:'retry', cancelled:'retry', running:'cancel'};
   const queuedForProcessing = task.status === 'queued' && ['pending', 'working'].includes(task.dispatch?.state);

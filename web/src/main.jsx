@@ -1,11 +1,11 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {RagPanel} from './rag';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
 import {CatalogManager, ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {LibraryView} from './library-view';
 import {DocumentView} from './document-view';
-import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate, taskControls} from './helpers';
+import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate, htmlBodyPreview, taskControls} from './helpers';
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
 import ui from './ui-config.json';
 import './style.css';
@@ -194,7 +194,12 @@ function App() {
   },[confirmation]);
 
   const titleProps={'data-page-title':true,tabIndex:-1};
-  const availableTabs=Object.keys(fields).filter(name=>name!=='title'&&(isVideo(source?.kind)||!['transcript','visual'].includes(name)));
+  const preview=useMemo(()=>htmlBodyPreview(source?.kind,result),[source?.kind,result]);
+  const offlineHtml=source?.kind==='html'&&result.provenance==='local_extraction';
+  const duplicateNotes=offlineHtml&&!!result.body&&result.notes===result.body;
+  const availableTabs=Object.keys(fields).filter(name=>name!=='title'
+    &&(isVideo(source?.kind)||!['transcript','visual'].includes(name))
+    &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
   return <div className="shell">
     <aside className="app-nav"><div className="app-brand"><span className="brand-mark" aria-hidden="true">知</span>个人知识库</div><nav aria-label="主导航">
@@ -242,9 +247,11 @@ function App() {
           {!current?<section><p>尚未生成可审核内容。</p><button onClick={()=>navigate('tasks')}>到任务页处理</button></section>:<>
             {(stale||source.content_status&&source.content_status!=='synced')&&<p className="error" role="alert">{stale?'版本或连接状态已变化，旧草稿不会提交到新版本。':'长期内容尚未同步或校验失败，不能用于正式知识库。'} <button onClick={reloadDetail}>重新加载详情</button></p>}
             <div className="source-layout"><div className="source-reading">
-              {result.provenance==='local_extraction'&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
-              <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{fields[name]}</button>)}</div>
-              <DocumentView value={textValue(result[selectedTab])||'暂无此项内容'}/>
+              {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
+              <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
+              {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
+              <DocumentView value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
+              {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
               {isVideo(source.kind)&&<details><summary>视频原片与关键帧</summary>{detail.original_url?<video ref={videoRef} controls src={detail.original_url}/>:<p>原片已不可用；长期证据和关键帧仍可查看。</p>}
                 <div className="frame-list">{detail.frames?.map((frame,i)=><button key={i} onClick={()=>{if(videoRef.current)videoRef.current.currentTime=frame.seconds??0;}}><img width={ui.frame_preview_width} alt={'关键帧 '+(i+1)} src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??i))}/><span>{frame.seconds??0} 秒</span></button>)}</div>
