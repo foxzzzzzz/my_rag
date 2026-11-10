@@ -28,6 +28,8 @@ def load_config(path=None):
         for k in ('max_upload_bytes', 'max_html_bytes', 'max_attempts', 'preview_chars'):
             if not isinstance(c[k], int) or isinstance(c[k], bool) or c[k] <= 0: raise ValueError()
         if c['quality_target'] > 100 or c['lease_seconds'] <= 0 or c['probe_timeout_seconds'] <= 0: raise ValueError()
+        c.setdefault('source_trash_days', 7)
+        if type(c['source_trash_days']) is not int or not 1 <= c['source_trash_days'] <= 3650: raise ValueError()
         if not codecs.lookup(c['html_encoding'])._is_text_encoding: raise ValueError()
         content=c.get('content', {'enabled': False, 'directory': 'knowledge'})
         if not isinstance(content, dict) or type(content.get('enabled')) is not bool or not isinstance(content.get('directory'), str): raise ValueError()
@@ -64,7 +66,7 @@ def make_store(config):
     root.mkdir(parents=True, exist_ok=True)
     return WorkflowStore(root / 'workflow.sqlite3', quality_target=config['quality_target'],
                          lease_seconds=config['lease_seconds'], max_attempts=config['max_attempts'],
-                         busy_timeout_seconds=config['busy_timeout_seconds'],
+                         busy_timeout_seconds=config['busy_timeout_seconds'], source_trash_days=config.get('source_trash_days', 7),
                          content_root=(root / config.get('content', {}).get('directory', 'knowledge')) if config.get('content', {}).get('enabled', False) else None, data_root=root)
 
 

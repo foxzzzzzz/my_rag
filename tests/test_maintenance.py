@@ -185,6 +185,81 @@ def test_seven_snapshots_deduplicate_and_collect_unreferenced(tmp_path):
     assert not (tmp_path/'backups/objects'/oldsha).exists()
     assert len(list((tmp_path/'backups/objects').iterdir())) < sum(len(maintenance.verify(c, i)['files']) for i in ids)
 
+
+def test_expired_trash_purge_removes_only_its_data_and_allows_reimport(tmp_path):
+    import hashlib, json, sqlite3, struct, time
+    import sqlite_vec
+    from pathlib import Path
+    from personalkb import workflow
+    from personalkb.trash_purge import purge
+
+    cfg = workflow.load_config()
+    cfg.update(data_dir=str(tmp_path/'data'), min_free_bytes=0)
+    path = tmp_path/'source.html'
+    path.write_text('<html><body>text</body></html>', encoding='utf8')
+    imported = workflow.import_file(cfg, path, True)
+    sid = imported['source']['id']
+    store = workflow.make_store(cfg)
+    source = store.get_source(sid)
+    original = Path(store.data_root)/source['blob_relpath']
+    store.delete_source(sid)
+    with store._tx() as db:
+        db.execute('UPDATE source_trash SET deleted_at=? WHERE source_id=?', (time.time()-8*86400,sid))
+    index = Path(store.data_root)/'rag-index'
+    index.mkdir()
+    (index/'active.json').write_text(json.dumps({'space_id':'c'*64, 'file':'a'*32+'.sqlite', 'returned_models':[]}))
+    with sqlite3.connect(index/('b'*32+'.sqlite')) as db:
+        db.execute('CREATE TABLE interrupted_build(id INTEGER)')
+    with sqlite3.connect(index/('a'*32+'.sqlite')) as db:
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.enable_load_extension(False)
+        db.execute('CREATE TABLE chunks(id INTEGER PRIMARY KEY,source_id TEXT)')
+        db.execute('CREATE VIRTUAL TABLE fts USING fts5(text)')
+        db.execute('CREATE VIRTUAL TABLE vec USING vec0(id INTEGER PRIMARY KEY, embedding float[2])')
+        db.executemany('INSERT INTO chunks VALUES(?,?)', [(1,sid),(2,'other')])
+        db.executemany('INSERT INTO fts(rowid,text) VALUES(?,?)', [(1,'deleted'),(2,'keep')])
+        db.executemany('INSERT INTO vec VALUES(?,?)', [(1,struct.pack('2f',1,0)),(2,struct.pack('2f',0,1))])
+    config = {'_workflow':cfg}
+    assert purge(config)['items'][0]['status'] == 'eligible' and original.exists()
+    assert purge(config, apply=True)['items'][0]['status'] == 'removed'
+    assert not original.exists()
+    with sqlite3.connect(index/('a'*32+'.sqlite')) as db:
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.enable_load_extension(False)
+        assert db.execute('SELECT source_id FROM chunks').fetchall() == [('other',)]
+        assert db.execute('SELECT text FROM fts').fetchall() == [('keep',)]
+        assert db.execute('SELECT id FROM vec').fetchall() == [(2,)]
+    assert workflow.import_file(cfg, path, True)['source']['id'] != sid
+
+
+def test_trash_purge_retries_after_interruption_and_preserves_shared_original(tmp_path, monkeypatch):
+    import time
+    from personalkb import workflow, trash_purge
+
+    cfg = workflow.load_config()
+    cfg.update(data_dir=str(tmp_path/'data'), min_free_bytes=0)
+    path = tmp_path/'source.html'
+    path.write_text('<html><body>text</body></html>', encoding='utf8')
+    first = workflow.import_file(cfg, path, True)['source']
+    store = workflow.make_store(cfg)
+    original = (tmp_path/'data'/first['blob_relpath'])
+    store.import_source('video', first['sha256'], 'shared.mp4', first['blob_relpath'])
+    store.delete_source(first['id'])
+    with store._tx() as db:
+        db.execute('UPDATE source_trash SET deleted_at=? WHERE source_id=?', (time.time()-8*86400, first['id']))
+    original_purge = trash_purge._purge_indexes
+    monkeypatch.setattr(trash_purge, '_purge_indexes', lambda *args: (_ for _ in ()).throw(OSError('interrupted')))
+    with pytest.raises(OSError): trash_purge.purge({'_workflow':cfg}, apply=True)
+    assert original.exists()
+    with store._tx() as db:
+        assert db.execute('SELECT purge_started FROM source_trash WHERE source_id=?',(first['id'],)).fetchone()[0] == 1
+    monkeypatch.setattr(trash_purge, '_purge_indexes', original_purge)
+    assert trash_purge.purge({'_workflow':cfg}, apply=True)['items'][0]['status'] == 'removed'
+    assert original.is_file()
+    assert trash_purge.purge({'_workflow':cfg}, apply=True)['items'] == []
+
 def test_oss_pull_checks_content_before_publishing(tmp_path, monkeypatch):
     import hashlib, io, json, sqlite3, sys, types
     from contextlib import nullcontext

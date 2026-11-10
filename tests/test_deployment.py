@@ -178,7 +178,7 @@ def test_daily_backup_modes(tmp_path, monkeypatch):
         return Done('{"snapshot":"abc"}' if operation=='create' else '{}')
     monkeypatch.setattr(subprocess,'run',run)
     cfg=tmp_path/'maintenance.json'; report=tmp_path/'report.json'
-    for mode,expected in [('manual',['create','verify']),('oss',['create','verify','push'])]:
+    for mode,expected in [('manual',['create','verify','purge-trash']),('oss',['create','verify','purge-trash','push'])]:
         calls.clear(); cfg.write_text(json.dumps({'storage_mode':mode,'oss':{'access_key_id_env':'TEST_ID','access_key_secret_env':'TEST_SECRET'}})); d.daily(cfg,report)
         assert calls==expected and json.loads(report.read_text())['state']=='success'
     def fail(*a,**kw): raise subprocess.CalledProcessError(1,'docker')
@@ -259,10 +259,15 @@ def test_daily_retention_opt_in_and_failure(tmp_path,monkeypatch):
         return Done('{"snapshot":"abc"}' if op=='create' else '{}')
     monkeypatch.setattr(subprocess,'run',run)
     cfg=tmp_path/'config.json'; report=tmp_path/'report.json'
-    for enabled,expected in [(False,['create','verify']),(True,['create','verify','retention'])]:
+    for enabled,expected in [(False,['create','verify','purge-trash']),(True,['create','verify','purge-trash','retention'])]:
         calls.clear(); cfg.write_text(json.dumps({'storage_mode':'manual','auto_retention_enabled':enabled}))
         d.daily(cfg,report); assert calls==expected
         assert json.loads(report.read_text())['retention']['applied'] is enabled
+    calls.clear()
+    cfg.write_text(json.dumps({'storage_mode':'manual','auto_retention_enabled':'invalid'}))
+    with pytest.raises(ValueError, match='invalid retention setting'): d.daily(cfg,report)
+    assert calls == []
+    cfg.write_text(json.dumps({'storage_mode':'manual','auto_retention_enabled':True}))
     def fail(cmd,**kwargs):
         op=cmd[cmd.index('/app/config/maintenance.json')+1]
         if op=='retention': raise subprocess.CalledProcessError(1,'docker')

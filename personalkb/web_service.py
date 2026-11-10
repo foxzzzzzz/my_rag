@@ -102,18 +102,21 @@ class WebService:
             self._douyin_stamp=stamp
         return self._douyin
     def _task(self, t):
+        from .web_dispatch import has_unknown_submission, task_stages
         d = {k:t[k] for k in ('id','source_id','status','stage','error_code','attempts','created_at','updated_at')}
         d['progress'] = dict(completed_stages=None,total_stages=None,completed_frames=None,total_frames=None)
         with self.store._tx() as c:
             dispatch=c.execute('SELECT state,error_code,processing_mode FROM web_dispatch WHERE task_id=?',(t['id'],)).fetchone()
             d['dispatch'] = dict(dispatch) if dispatch else None
-            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='video_stages'").fetchone():
-                rows=c.execute('SELECT name,status FROM video_stages WHERE task_id=?',(t['id'],)).fetchall()
-                if rows:
-                    if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
-                    d['progress']['completed_stages']=sum(r['status']=='completed' for r in rows)
-                    if any(r['name'].startswith('vision-') for r in rows):
-                        d['progress']['completed_frames']=sum(r['status']=='completed' and r['name'].startswith('vision-') for r in rows)
+            d['archived'] = c.execute('SELECT 1 FROM web_task_archive WHERE task_id=?',(t['id'],)).fetchone() is not None
+            rows = task_stages(c, t['id'])
+            if t['status']=='needs_attention':
+                d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows) else None
+            if rows:
+                if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
+                d['progress']['completed_stages']=sum(r['status']=='completed' for r in rows)
+                if any(r['name'].startswith('vision-') for r in rows):
+                    d['progress']['completed_frames']=sum(r['status']=='completed' and r['name'].startswith('vision-') for r in rows)
         manifest=_root(self.wc)/'video-work'/t['id']/'media-manifest.json'
         try:
             if manifest.is_file():
@@ -122,6 +125,14 @@ class WebService:
         except (OSError,ValueError,KeyError,TypeError): pass
         return d
     def tasks(self): return {'items':[self._task(t) for t in self.store.list_tasks()]}
+    def trash(self):
+        from datetime import datetime, timezone
+        items = self.store.list_trash()
+        for item in items:
+            for field in ('deleted_at', 'expires_at'):
+                item[field] = datetime.fromtimestamp(item[field], timezone.utc).isoformat()
+        return {'items':items, 'retention_days':self.store.trash_retention_seconds // 86400}
+
     def sources(self, filters=None):
         filters=filters or {}
         eligible = {s['id'] for s in self.store.eligible_sources()}

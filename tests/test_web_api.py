@@ -75,6 +75,58 @@ class WebApiTests(unittest.TestCase):
         client=self.client
         assert client.get('/api/sources/missing').status_code==404
 
+    def test_trash_hides_source_and_restores_existing_review(self):
+        from personalkb.execution_guard import execution_guard
+
+        sid, version = self.make_version()
+        self.service.store.review(sid, version['id'], version['content_sha256'], 99, 'approve', 'tester')
+        original = self.service.original(sid)[0]
+        restore = f'/api/trash/{sid}/restore'
+        assert self.client.delete(f'/api/sources/{sid}', headers=self.h).status_code == 200
+        assert self.client.get('/api/sources').json()['items'] == []
+        assert self.service.store.eligible_sources() == []
+        assert original.is_file()
+        trash = self.client.get('/api/trash').json()
+        assert trash['retention_days'] == 7
+        item, = trash['items']
+        assert item['id'] == sid and item['can_restore'] is True
+        assert self.client.delete(f'/api/sources/{sid}', headers=self.h).status_code == 200
+        assert self.client.get('/api/trash').json()['items'] == [item]
+        assert self.client.post(restore, json={}).status_code == 403
+        with execution_guard(self.service.store):
+            assert self.client.post(restore, json={}, headers=self.h).json()['error'] == 'worker_busy'
+        assert self.service.store.get_source(sid)['deleted'] == 1
+        assert self.client.post(restore, json={}, headers=self.h).status_code == 200
+        assert self.client.get('/api/trash').json()['items'] == []
+        assert self.service.store.eligible_sources()[0]['current_version_id'] == version['id']
+        assert self.client.get(f'/api/sources/{sid}').json()['review']['score'] == 99
+
+    def test_expired_trash_cannot_restore(self):
+        import time
+        sid, _ = self.make_version()
+        self.service.store.delete_source(sid)
+        with self.service.store._tx() as db:
+            db.execute('UPDATE source_trash SET deleted_at=? WHERE source_id=?',
+                       (time.time()-self.service.store.trash_retention_seconds, sid))
+        item, = self.client.get('/api/trash').json()['items']
+        assert item['can_restore'] is False
+        result = self.client.post(f'/api/trash/{sid}/restore', json={}, headers=self.h)
+        assert result.json()['error'] == 'trash_expired'
+        assert self.service.store.get_source(sid)['deleted']
+
+    def test_legacy_deleted_source_gets_full_grace_on_upgrade(self):
+        from datetime import datetime, timedelta
+
+        sid, _ = self.make_version()
+        with self.service.store._tx() as db:
+            db.execute('UPDATE sources SET deleted=1 WHERE id=?', (sid,))
+        workflow.make_store(self.wc)
+        item, = self.client.get('/api/trash').json()['items']
+        assert item['id'] == sid and item['can_restore'] is True
+        assert datetime.fromisoformat(item['expires_at']) - datetime.fromisoformat(item['deleted_at']) == timedelta(days=7)
+        workflow.make_store(self.wc)
+        assert self.client.get('/api/trash').json()['items'] == [item]
+
     def test_video_cancel_retry_without_consent(self):
         obj=self.service.store.import_source('video','a'*64,'video.mp4','originals/'+('a'*64))
         tid=obj['task']['id']; base='/api/tasks/'+tid+'/'
@@ -84,6 +136,56 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(self.service.store.get_task(tid)['status'],'cancelled')
         self.assertIsNone(self.service.process_next()); self.assertEqual(self.calls,[])
         with self.service.store._tx() as db: self.assertEqual(db.execute("SELECT count(*) FROM web_dispatch WHERE state='pending'").fetchone()[0],0)
+
+    def test_unknown_html_archive_preserves_task_and_blocks_resume(self):
+        from personalkb.video_journal import VideoJournal
+        from tools.api_smoke import reserve
+
+        self.service.webcfg['live_html_enabled'] = True
+        store = self.service.store
+        task_id = store.import_source('html', 'a'*64, 'drill.html', 'originals/drill')['task']['id']
+        ledger = self.tmp_path/'budget.sqlite'
+        reserve(ledger, task_id, task_id+':html-text', '0.75', '2', '100')
+        budget_before = ledger.read_bytes()
+        path = f'/api/tasks/{task_id}/'
+        assert self.client.post(path+'archive', json={}, headers=self.h).status_code == 409
+        VideoJournal(store)
+        with store._tx() as db:
+            db.execute("UPDATE tasks SET status='needs_attention',external_started=1,attempts=1 WHERE id=?", (task_id,))
+            db.execute("INSERT INTO video_stages(task_id,name,status) VALUES(?,'html-text','in_flight')", (task_id,))
+        before = store.get_task(task_id)
+
+        def visible_state():
+            return self.client.get('/api/tasks').json()['items'][0]
+
+        assert visible_state()['resume_blocked_reason'] == 'unknown_submission'
+        consent = {'processing_mode':'model', 'allow_paid':True}
+        assert self.client.post(path+'resume', json=consent, headers=self.h).json()['error'] == 'unknown_submission'
+        for _ in range(2):
+            assert self.client.post(path+'archive', json={}, headers=self.h).json()['archived'] is True
+        assert visible_state()['archived'] is True
+        assert self.client.post(path+'resume', json=consent, headers=self.h).json()['error'] == 'task_archived'
+        assert self.client.post(path+'unarchive', json={}, headers=self.h).json()['archived'] is False
+        assert visible_state()['archived'] is False
+        assert visible_state()['dispatch'] is None
+        assert store.get_task(task_id) == before
+        assert ledger.read_bytes() == budget_before
+
+    def test_video_with_queryable_asr_can_resume_after_unarchive(self):
+        from personalkb.video_journal import VideoJournal
+
+        store = self.service.store
+        task_id = store.import_source('video', 'a'*64, 'clip.mp4', 'originals/clip')['task']['id']
+        VideoJournal(store)
+        with store._tx() as db:
+            db.execute("UPDATE tasks SET status='needs_attention',external_started=1 WHERE id=?", (task_id,))
+            db.execute("INSERT INTO video_stages(task_id,name,status,remote_task_id) VALUES(?,'asr_submit','in_flight','remote-asr')", (task_id,))
+        path = f'/api/tasks/{task_id}/'
+        assert self.client.get('/api/tasks').json()['items'][0]['resume_blocked_reason'] is None
+        assert self.client.post(path+'archive', json={}, headers=self.h).status_code == 200
+        assert self.client.post(path+'unarchive', json={}, headers=self.h).status_code == 200
+        assert self.client.post(path+'resume', json={'allow_paid':True}, headers=self.h).status_code == 200
+        assert self.client.post(path+'archive', json={}, headers=self.h).status_code == 409
 
     def make_version(self):
         response=self.client.put('/api/imports?filename=review.html&rights_confirmed=true',content=b'<html><body>Review text</body></html>',headers=self.h)

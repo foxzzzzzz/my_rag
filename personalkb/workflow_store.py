@@ -15,9 +15,12 @@ def _number(x, lo, hi=None):
 _UNSET = object()
 
 class WorkflowStore:
-    def __init__(self, db_path, *, quality_target=98, lease_seconds=300, max_attempts=3, busy_timeout_seconds=5, content_root=None, data_root=None):
+    def __init__(self, db_path, *, quality_target=98, lease_seconds=300, max_attempts=3, busy_timeout_seconds=5, content_root=None, data_root=None, source_trash_days=7):
         if not _number(quality_target, 0, 100) or not _number(lease_seconds, 0.000001) or not _number(busy_timeout_seconds, 0) or not _number(max_attempts, 1) or int(max_attempts) != max_attempts:
             raise WorkflowError('invalid_config')
+        if type(source_trash_days) is not int or not 1 <= source_trash_days <= 3650:
+            raise WorkflowError('invalid_config')
+        self.trash_retention_seconds = source_trash_days * 86400
         self.db_path, self.quality_target, self.lease_seconds, self.max_attempts, self.busy_timeout_seconds = str(db_path), quality_target, lease_seconds, int(max_attempts), busy_timeout_seconds
         self.content_root = Path(content_root).absolute() if content_root else None
         self.data_root = Path(data_root).absolute() if data_root else None
@@ -32,7 +35,9 @@ CREATE TRIGGER IF NOT EXISTS content_source_update AFTER UPDATE OF current_versi
 CREATE TRIGGER IF NOT EXISTS content_version_insert AFTER INSERT ON versions BEGIN INSERT INTO content_sync(source_id,generation) VALUES(NEW.source_id,1) ON CONFLICT(source_id) DO UPDATE SET generation=generation+1; END;
 CREATE TRIGGER IF NOT EXISTS content_review_insert AFTER INSERT ON reviews BEGIN INSERT INTO content_sync(source_id,generation) VALUES(NEW.source_id,1) ON CONFLICT(source_id) DO UPDATE SET generation=generation+1; END;
 CREATE TABLE IF NOT EXISTS video_maintenance (id INTEGER PRIMARY KEY CHECK(id=1));
+CREATE TABLE IF NOT EXISTS source_trash (source_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, purge_started INTEGER NOT NULL DEFAULT 0);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
+            c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager
     def _tx(self):
         c=sqlite3.connect(self.db_path, timeout=self.busy_timeout_seconds, isolation_level=None)
@@ -242,7 +247,42 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             return eligible
     def delete_source(self,id):
         with self._tx() as c:
-            self._row(c,'sources',id); c.execute('UPDATE sources SET deleted=1 WHERE id=?',(id,)); c.execute("UPDATE tasks SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE source_id=? AND status IN ('queued','running')",(id,)); return self._row(c,'sources',id)
+            self._row(c,'sources',id)
+            c.execute('UPDATE sources SET deleted=1 WHERE id=? AND deleted=0',(id,))
+            c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) VALUES(?,?)',(id,time.time()))
+            c.execute("UPDATE tasks SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE source_id=? AND status IN ('queued','running')",(id,))
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='web_dispatch'").fetchone():
+                c.execute("UPDATE web_dispatch SET state='cancelled',owner=NULL WHERE state IN ('pending','working') AND task_id IN (SELECT id FROM tasks WHERE source_id=?)", (id,))
+            return self._row(c,'sources',id)
+
+    def list_trash(self):
+        now = time.time()
+        with self._tx() as c:
+            rows = c.execute("""SELECT s.id,s.original_name,t.deleted_at,t.purge_started,v.result
+                                FROM source_trash t JOIN sources s ON s.id=t.source_id
+                                LEFT JOIN versions v ON v.id=s.current_version_id
+                                WHERE s.deleted=1 ORDER BY t.deleted_at DESC""").fetchall()
+            items = []
+            for row in rows:
+                expires = row['deleted_at'] + self.trash_retention_seconds
+                result = json.loads(row['result']) if row['result'] else {}
+                items.append({'id':row['id'], 'original_name':row['original_name'], 'title':result.get('title',''),
+                              'deleted_at':row['deleted_at'], 'expires_at':expires,
+                              'can_restore':not row['purge_started'] and now < expires})
+            return items
+
+    def restore_source(self, source_id):
+        from .execution_guard import execution_guard
+        # Wait for any worker holding a dispatch from before deletion to exit.
+        with execution_guard(self), self._tx() as c:
+            source = self._row(c, 'sources', source_id)
+            if not source['deleted']: return source
+            marker = c.execute('SELECT deleted_at,purge_started FROM source_trash WHERE source_id=?', (source_id,)).fetchone()
+            if not marker or marker['purge_started'] or time.time() >= marker['deleted_at'] + self.trash_retention_seconds:
+                raise WorkflowError('trash_expired')
+            c.execute('DELETE FROM source_trash WHERE source_id=?', (source_id,))
+            c.execute('UPDATE sources SET deleted=0 WHERE id=?', (source_id,))
+            return self._row(c, 'sources', source_id)
 
 
 def _sync_after(method):
@@ -250,12 +290,12 @@ def _sync_after(method):
         result=method(self, *args, **kwargs)
         if self.content_root:
             sid=result.get('source_id') if isinstance(result,dict) else None
-            if method.__name__ == 'delete_source': sid=result['id']
+            if method.__name__ in ('delete_source', 'restore_source'): sid=result['id']
             if sid:
                 try: self.sync_source(sid)
                 except Exception: pass  # Committed changes remain dirty for explicit replay.
         return result
     return wrapped
 
-for _name in ('finish','revise','review','delete_source'):
+for _name in ('finish','revise','review','delete_source','restore_source'):
     setattr(WorkflowStore, _name, _sync_after(getattr(WorkflowStore, _name)))

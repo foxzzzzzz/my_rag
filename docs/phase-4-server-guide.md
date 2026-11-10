@@ -118,6 +118,8 @@ sh deploy/operate.sh export SNAPSHOT_ID --output /backups/personalkb-manual.zip
 
 快照份数由 `maintenance.json` 的 `keep_snapshots` 控制，默认最近 4 份，创建快照时执行轮换。原视频保留单独由 `video_retention_days` 和 `auto_retention_enabled` 控制。生产配置生成器默认开启自动清理，冷备创建并校验成功后才执行，仅处理满 7 天且证据校验通过的成功视频。可在首次演练前关闭该开关，另选维护窗口运行 `sh deploy/operate.sh retention` 预览。预览会短暂停止本项目服务。手动 `retention --apply` 需要单独确认。
 
+资料回收站的撤销期限由 `workflow.json` 中的 `source_trash_days` 控制，默认 7 天。到期后，在下一次冷备创建并校验成功时清理生产库中的数据，独立于仍在资料库内的成功视频原片清理开关。如果资料还有待处理的远端资产，清理报告会记录 `pending_remote_assets`，并保留该资料供后续处理。回收站资料仍可能出现在保留期内的快照中，待最后一份引用它的快照轮换后，备份库才会回收独占对象。
+
 ## 6. 回传报告与剩余门槛
 
 部署后在app目录准备宿主机报告配置：

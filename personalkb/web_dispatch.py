@@ -7,6 +7,20 @@ import uuid
 from .workflow_store import WorkflowError
 
 
+def task_stages(connection, task_id):
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='video_stages'").fetchone():
+        return []
+    return connection.execute('SELECT name,status,remote_task_id FROM video_stages WHERE task_id=?', (task_id,)).fetchall()
+
+
+def has_unknown_submission(task, stages):
+    return task['error_code'] == 'unknown_submission' or any(
+        stage['status'] == 'in_flight' and stage['name'] != 'asr_result'
+        and not (stage['name'] == 'asr_submit' and stage['remote_task_id'])
+        for stage in stages
+    )
+
+
 class WebDispatcher:
     def __init__(self, service):
         self.service = service
@@ -17,6 +31,7 @@ class WebDispatcher:
         self.active = None
         with self.store._tx() as c:
             c.execute('CREATE TABLE IF NOT EXISTS web_dispatch (task_id TEXT PRIMARY KEY, mode TEXT NOT NULL, state TEXT NOT NULL, requested REAL NOT NULL, claimed REAL, owner TEXT)')
+            c.execute('CREATE TABLE IF NOT EXISTS web_task_archive (task_id TEXT PRIMARY KEY)')
             if 'error_code' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
                 c.execute('ALTER TABLE web_dispatch ADD COLUMN error_code TEXT')
             if 'processing_mode' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
@@ -42,9 +57,26 @@ class WebDispatcher:
                 return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
             expected = 'needs_attention' if mode == 'resume' else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
+            if mode == 'resume':
+                if c.execute('SELECT 1 FROM web_task_archive WHERE task_id=?', (task_id,)).fetchone():
+                    raise WorkflowError('task_archived')
+                if has_unknown_submission(task, task_stages(c, task_id)):
+                    raise WorkflowError('unknown_submission')
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,claimed,owner,error_code) VALUES(?,?,'pending',?,NULL,NULL,NULL) ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL", (task_id, mode, time.time()))
             c.execute('UPDATE web_dispatch SET processing_mode=? WHERE task_id=?',(processing_mode,task_id))
             return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
+
+    def set_archived(self, task_id, archived):
+        with self.store._tx() as c:
+            task = self.store._row(c, 'tasks', task_id)
+            if archived:
+                dispatch = c.execute('SELECT state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
+                if task['status'] != 'needs_attention' or (dispatch and dispatch['state'] in ('pending', 'working')):
+                    raise WorkflowError('invalid_state')
+                c.execute('INSERT OR IGNORE INTO web_task_archive VALUES(?)', (task_id,))
+            else:
+                c.execute('DELETE FROM web_task_archive WHERE task_id=?', (task_id,))
+            return {'task_id': task_id, 'archived': archived}
 
     def _claim(self):
         with self.store._tx() as c:

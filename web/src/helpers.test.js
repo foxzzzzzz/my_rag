@@ -88,3 +88,10 @@ test('派发队列使用持久模式并可取消，未派发任务仍可启动',
     assert.equal(taskControls({status}, 'preview').action, action);
   }
 });
+
+test('隐藏已归档或结果未知的恢复动作，保留可查询任务的恢复',()=>{
+  const task = {status:'needs_attention', dispatch:{processing_mode:'model'}};
+  assert.equal(taskControls({...task, archived:true}, 'preview').action, undefined);
+  assert.equal(taskControls({...task, resume_blocked_reason:'unknown_submission'}, 'preview').action, undefined);
+  assert.equal(taskControls(task, 'preview').action, 'resume');
+});

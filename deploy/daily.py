@@ -20,10 +20,11 @@ def daily(config, report):
         cfg=json.loads(Path(config).read_text(encoding='utf-8-sig'))
         mode=cfg['storage_mode']
         if mode not in ('manual','oss'): raise ValueError('invalid storage mode')
-        result['snapshot']=run('maintenance','maintenance','create')['snapshot']
-        run('maintenance','maintenance','verify',result['snapshot'])
         enabled=cfg.get('auto_retention_enabled',False)
         if type(enabled) is not bool: raise ValueError('invalid retention setting')
+        result['snapshot']=run('maintenance','maintenance','create')['snapshot']
+        run('maintenance','maintenance','verify',result['snapshot'])
+        result['trash_purge'] = run('maintenance','maintenance','purge-trash','--apply')
         if enabled:
             result['retention']['result']=run('maintenance','maintenance','retention','--apply')
             result['retention']['applied']=True

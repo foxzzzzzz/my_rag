@@ -14,6 +14,7 @@ def main():
     p = sub.add_parser('push'); p.add_argument('snapshot')
     p = sub.add_parser('pull'); p.add_argument('snapshot')
     p = sub.add_parser('retention'); p.add_argument('--apply', action='store_true')
+    p = sub.add_parser('purge-trash'); p.add_argument('--apply', action='store_true')
     for command in ('verify', 'export', 'restore'):
         p = sub.add_parser(command); p.add_argument('snapshot')
         if command == 'export': p.add_argument('--output', required=True)
@@ -30,6 +31,9 @@ def main():
                 from personalkb import backup_storage
                 result = getattr(backup_storage, args.command)(config, args.snapshot)
             elif args.command == 'retention': result = maintenance.retention(config, apply=args.apply)
+            elif args.command == 'purge-trash':
+                from personalkb.trash_purge import purge
+                result = purge(config, apply=args.apply)
             elif args.command == 'create': result = {'snapshot': maintenance.create(config)}
             elif args.command == 'verify': result = maintenance.verify(config, args.snapshot)
             elif args.command == 'export': result = {'archive': maintenance.export(config, args.snapshot, args.output)}

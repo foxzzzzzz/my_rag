@@ -19,6 +19,8 @@ function App() {
   const [session, setSession] = useState(null), [connection, setConnection] = useState('connecting');
   const [loginRequired,setLoginRequired]=useState(false), [password,setPassword]=useState(''), [authEnabled,setAuthEnabled]=useState(false);
   const [page, setPage] = useState('library'), [sources, setSources] = useState([]), [tasks, setTasks] = useState([]), [catalog, setCatalog] = useState([]);
+  const [trash, setTrash] = useState({items:[], retention_days:null});
+  const [showArchivedTasks, setShowArchivedTasks] = useState(false);
   const [detail, setDetail] = useState(null), [topic, setTopic] = useState('');
   const [dataLoaded,setDataLoaded] = useState(false);
   const [reviewEpoch,setReviewEpoch] = useState(0), [reviewPending,setReviewPending] = useState(false);
@@ -42,7 +44,7 @@ function App() {
 
   function clearPrivate() {
     ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
-    setSession(null); setSources([]); setTasks([]); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
+    setSession(null); setSources([]); setTasks([]); setShowArchivedTasks(false); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
     setDataLoaded(false); setTopic(''); setPage('library'); setFiles([]); setUploads([]); setRights(false);
     setTaskPaid(false); setSourcePaid(false); setHtmlMode('preview'); setConfirmation(null); setMessage('');
     setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
@@ -201,6 +203,7 @@ function App() {
   },[confirmation]);
 
   const titleProps={'data-page-title':true,tabIndex:-1};
+  const visibleTasks = tasks.filter(task => Boolean(task.archived) === showArchivedTasks);
   const preview=useMemo(()=>htmlBodyPreview(source?.kind,result),[source?.kind,result]);
   const offlineHtml=source?.kind==='html'&&result.provenance==='local_extraction';
   const duplicateNotes=offlineHtml&&!!result.body&&result.notes===result.body;
@@ -219,7 +222,21 @@ function App() {
       {error&&<p className="error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
       {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
-        <div hidden={page!=='library'}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={topic} onTopicChange={setTopic} onImport={()=>navigate('import')} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        <div hidden={page!=='library'}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={topic} onTopicChange={setTopic} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section>
+          <button onClick={()=>navigate('library')}>返回资料库</button>
+          <p className="muted">删除的资料保留 {trash.retention_days} 天，到期后由定期维护清理。已有备份副本按快照保留策略轮换。</p>
+          {!trash.items.length&&<p>回收站为空。</p>}
+          {trash.items.map(item=><article className="task-row" key={item.id}>
+            <strong>{item.title||item.original_name}</strong>
+            <p>删除时间 {formatDate(item.deleted_at,session.config.display_timezone)}</p>
+            <p>到期时间 {formatDate(item.expires_at,session.config.display_timezone)}</p>
+            {item.can_restore?<button disabled={busy} onClick={()=>run(async()=>{
+              await api('/trash/'+item.id+'/restore',{method:'POST',body:'{}'});
+              setTrash(await api('/trash'));await refresh();setMessage('资料已恢复。');
+            })}>撤销删除</button>:<p className="muted">已到期，等待维护清理。</p>}
+          </article>)}
+        </section></>}
         {page==='catalog'&&<><div className="page-heading"><h1 {...titleProps}>分类</h1></div><CatalogManager catalog={catalog} api={api} changed={changed} disabled={busy}/></>}
         {page==='import'&&<><div className="page-heading"><h1 {...titleProps}>导入资料</h1></div><section className="import-panel">
           <p className="muted">上传HTML或视频后，到任务页明确启动处理。导入不会自动调用模型。</p>
@@ -232,18 +249,26 @@ function App() {
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></>}
         {page==='tasks'&&<><div className="page-heading"><h1 {...titleProps}>任务</h1></div><section>
+          <div className="actions"><button type="button" aria-pressed={showArchivedTasks} onClick={()=>setShowArchivedTasks(value=>!value)}>{showArchivedTasks?'返回任务':'查看已归档'}</button></div>
+          {!showArchivedTasks&&<>
           <label><input type="checkbox" checked={taskPaid} onChange={event=>setTaskPaid(event.target.checked)}/>我同意所选视频或网页模型处理产生费用</label>
           <label>HTML处理方式<select value={htmlMode} onChange={event=>setHtmlMode(event.target.value)}><option value="preview">离线正文预览（无模型费用）</option><option value="model" disabled={!session.config.live_html_enabled}>模型摘要与笔记（需本人审核）</option></select></label>
           {!session.config.live_video_enabled&&<p className="muted">视频处理当前未启用。</p>}{!session.config.live_html_enabled&&<p className="muted">网页模型处理未启用，离线预览不产生AI摘要。</p>}
-          {!tasks.length&&<p>暂无任务，可先导入资料。</p>}{tasks.map(task=>{
+          </>}
+          {!visibleTasks.length&&<p>{showArchivedTasks?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}{visibleTasks.map(task=>{
             const item=sources.find(x=>x.id===task.source_id),video=isVideo(item?.kind);
             const {mode, action, queuedForProcessing}=taskControls(task, htmlMode);
             const paidNeeded=video||mode==='model',enabled=video?session.config.live_video_enabled:mode!=='model'||session.config.live_html_enabled;
             return <article className="task-row" key={task.id}><strong>{item?.title||item?.original_name||task.source_id}</strong><p>{statusText(task.status)} · {statusText(task.stage)}</p><p>{queuedForProcessing?'已加入处理队列':progressText(task.progress,task.status)}</p>
-              {!video&&<p className="muted">{mode==='model'?'模型摘要与笔记':'离线正文预览'}</p>}{task.error_code&&<p className="error">{task.error_code}</p>}
+              {!video&&<p className="muted">{mode==='model'?'模型摘要与笔记':'离线正文预览'}</p>}
+              {task.resume_blocked_reason?<p className="muted">{errorText(400, task.resume_blocked_reason)}</p>:task.error_code&&<p className="error">{task.error_code}</p>}
               <div className="actions">{action&&<button key={action} disabled={busy||(action!=='cancel'&&paidNeeded&&(!taskPaid||!enabled))} onClick={()=>run(async()=>{
                 await api('/tasks/'+task.id+'/'+action,{method:'POST',body:JSON.stringify(action==='cancel'?{}:{allow_paid:taskPaid,processing_mode:video?'preview':mode})});await refresh();
-              })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>}{item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
+              })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>}
+                {(task.archived||(task.status==='needs_attention'&&!['pending','working'].includes(task.dispatch?.state)))&&<button disabled={busy} onClick={()=>run(async()=>{
+                  await api('/tasks/'+task.id+(task.archived?'/unarchive':'/archive'),{method:'POST',body:'{}'});await refresh();
+                })}>{task.archived?'取消归档':'归档'}</button>}
+                {item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
           })}
         </section></>}
         {page==='detail'&&detail&&<>
@@ -281,7 +306,7 @@ function App() {
                 })}>保存新版本</button>
                 <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
               </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
-              <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。',()=>run(async()=>{
+              <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。可在回收站保留期限内撤销。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。可在回收站保留期限内撤销。',()=>run(async()=>{
                 const sequence=openSequence.current,sourceId=source.id;await api('/sources/'+sourceId,{method:'DELETE'});delete cache.current[sourceId];
                 if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){detailRef.current=null;setDetail(null);navigate('library');}await refresh();
               }))}>确认删除资料</button></details>

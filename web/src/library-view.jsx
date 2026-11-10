@@ -7,7 +7,7 @@ function Choices({catalog,kind,value,onChange}) {return <fieldset>
 <label key={x.id}>
 <input type="checkbox" checked={value.includes(x.id)} onChange={e=>onChange(e.target.checked?[...value,x.id]:value.filter(y=>y!==x.id))}/>{x.name}</label>)}</div>
 </fieldset>}
-export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,onTopicChange,onImport,displayTimezone}) {
+export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,onTopicChange,onImport,onTrash,displayTimezone}) {
  const [filters,F]=useState({q:'',kind:'',review:'',tags:[]}),[selected,S]=useState([]),[revisions,SR]=useState({}),[topics,T]=useState([]),[tags,G]=useState([]),[operation,O]=useState('add'),[results,R]=useState([]),[working,W]=useState(false),[message,M]=useState('');
  useEffect(()=>{S([]);SR({});R([])},[topicId]);
  const visible=filterSources(sources,{...filters,topics:topicId?[topicId]:[]});
@@ -17,7 +17,10 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,o
  return <section className="library-view">
 <div className="page-heading">
 <h2 data-page-title tabIndex={-1}>资料库</h2>
+<div className="actions">
+<button type="button" disabled={disabled} onClick={onTrash}>回收站</button>
 <button className="primary" onClick={onImport}>导入资料</button>
+</div>
 </div>
 <div className="toolbar">
 <label className="search">查找<input value={filters.q} placeholder="标题或文件名" onChange={e=>filter('q',e.target.value)}/>

@@ -1,5 +1,11 @@
 export function validReview(score, decision, target, reviewer) { const n=Number(score); return score !== '' && Number.isFinite(n) && n>=0 && n<=100 && !!reviewer.trim() && (decision !== 'approve' || n>=target); }
-export function errorText(status, code) { return status===409 ? '内容已有更新，请刷新后重新操作。' : `操作失败：${code || status || '网络连接异常'}`; }
+export function errorText(status, code) {
+  if (code==='trash_expired') return '这份资料已过撤销期限，等待定期维护清理。';
+  if (code==='worker_busy') return '后台正在处理任务，请稍后再试。';
+  if (code==='unknown_submission') return '模型请求结果未知，系统已阻止重发。原预算预留已保留。';
+  if (code==='task_archived') return '任务已归档，请先取消归档。';
+  return status===409 ? '内容已有更新，请刷新后重新操作。' : `操作失败：${code || status || '网络连接异常'}`;
+}
 export function textValue(v) { return typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v,null,2); }
 export function uploadError(file, config) { let html=/\.html?$/i.test(file.name); if(!html&&!/\.mp4$/i.test(file.name)) return '仅支持 HTML 和 MP4 文件'; if(file.size>config.max_upload_bytes || (html&&file.size>config.max_html_bytes)) return '文件超过大小限制'; return ''; }
 export function progressText(p, status) { const terminal={succeeded:'处理完成',completed:'处理完成',failed:'处理失败',cancelled:'已取消',needs_attention:'等待确认'}; if(terminal[status]&&(!p||(p.completed_frames==null&&p.completed_stages==null)))return terminal[status]; if(status==='queued' && (!p || (p.completed_frames==null && p.completed_stages==null))) return '待开始'; if(!p)return '等待进度'; let a=[]; if(p.completed_frames!=null)a.push(`帧 ${p.completed_frames}${p.total_frames==null?'':` / ${p.total_frames}`}`); if(p.completed_stages!=null)a.push(`阶段 ${p.completed_stages}${p.total_stages==null?'':` / ${p.total_stages}`}`); return a.join(' · ')||'处理中'; }
@@ -54,5 +60,6 @@ export function taskControls(task, selectedMode) {
   const queuedForProcessing = task.status === 'queued' && ['pending', 'working'].includes(task.dispatch?.state);
   const mode = actions[task.status] === 'start' && !queuedForProcessing
     ? selectedMode : task.dispatch?.processing_mode || selectedMode;
-  return {mode, action: queuedForProcessing ? 'cancel' : actions[task.status], queuedForProcessing};
+  const action = queuedForProcessing ? 'cancel' : actions[task.status];
+  return {mode, action: task.archived || (action === 'resume' && task.resume_blocked_reason) ? undefined : action, queuedForProcessing};
 }

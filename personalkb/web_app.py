@@ -319,6 +319,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.post('/api/tasks/{task_id}/{action}')
     async def task_action(task_id:str,action:str,req:Request):
         payload=await read_object(req)
+        if action in ('archive', 'unarchive'): return service.dispatcher.set_archived(task_id, action == 'archive')
         if action=='cancel': return service.dispatcher.cancel(task_id)
         if action=='retry': return service.dispatcher.retry(task_id,allow_paid=payload.get('allow_paid',False),processing_mode=payload.get('processing_mode'))
         elif action not in ('start','resume'): raise WorkflowError('task_not_found')
@@ -333,6 +334,13 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     async def revise(source_id:str,req:Request): return service.revise(source_id,await read_object(req))
     @app.delete('/api/sources/{source_id}')
     def delete(source_id:str): service.store.delete_source(source_id); return {'deleted':True}
+    @app.get('/api/trash')
+    def trash(): return service.trash()
+    @app.post('/api/trash/{source_id}/restore')
+    async def restore_source(source_id:str,req:Request):
+        await read_object(req)
+        service.store.restore_source(source_id)
+        return {'restored':True}
     @app.get('/api/sources/{source_id}/original')
     def original(source_id:str):
         path,kind,name=service.original(source_id)
