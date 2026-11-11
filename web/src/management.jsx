@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {filterSources, labelIds, splitAliases, douyinErrorText, suggestionSelection, suggestionError} from './management-helpers';
+import {filterSources, labelIds, douyinErrorText, suggestionSelection, suggestionError} from './management-helpers';
 import {classificationTopicRequired} from './helpers';
 
 function Choices({catalog, kind, value, onChange, disabled=false, allowAdd=true}) {
@@ -43,17 +43,6 @@ function SuggestionPanel({source,catalog,api,changed,disabled}) {
     {record?.status==='ready'&&suggestions&&<div>{[['existing_topics','已有主题'],['existing_tags','已有标签'],['new_topics','建议新建主题'],['new_tags','建议新建标签']].map(([key,title])=>{const selectionKey=key.startsWith('new_')?'confirmed_'+key:key;return <fieldset key={key} disabled={working||disabled}><legend>{title}</legend>{suggestions[key].map(value=><label key={value}><input type="checkbox" checked={selection[selectionKey].includes(value)} onChange={e=>toggle(selectionKey,value,e.target.checked)}/>{key.startsWith('new_')?value:(catalog.find(x=>x.id===value)?.name||'分类已变化')}</label>)}</fieldset>})}<button disabled={working||disabled} onClick={apply}>应用所选建议</button><button disabled={working||disabled} onClick={reject}>拒绝建议</button></div>}
     {message&&<p role="status">{message}</p>}
   </div>;
-}
-
-export function CatalogManager({catalog,api,changed,disabled}) {
-  const [kind,K]=useState('topic'),[name,N]=useState(''),[aliases,A]=useState(''),[editing,E]=useState(null),[message,M]=useState(''),[working,W]=useState(false);
-  async function save(){W(true);M('');try{const payload={kind,name,aliases:splitAliases(aliases),...(editing?{expected_revision:editing.revision}:{})};await api('/classifications'+(editing?'/'+editing.id:''),{method:'POST',body:JSON.stringify(payload)});E(null);N('');A('');await changed();M('分类目录已保存。')}catch(e){M(e.message)}finally{W(false)}}
-  return <section><h3>分类目录</h3><p>名称或别名重命名后仍保留稳定 ID，不需要移动资料目录。</p>
-    <label>类型<select value={kind} disabled={!!editing} onChange={e=>K(e.target.value)}><option value="topic">主题</option><option value="tag">知识标签</option></select></label>
-    <label>名称<input value={name} onChange={e=>N(e.target.value)}/></label><label>别名（逗号或换行分隔）<textarea value={aliases} onChange={e=>A(e.target.value)}/></label>
-    <button disabled={disabled||working||!name.trim()} onClick={save}>{editing?'保存目录修改':'创建分类'}</button>{editing&&<button onClick={()=>{E(null);N('');A('')}}>取消修改</button>}{message&&<p role="status">{message}</p>}
-    {catalog.map(x=><article key={x.id}><strong>{x.kind==='topic'?'主题':'标签'}：{x.name}</strong><small>别名：{x.aliases?.join('、')||'无'}</small><button disabled={working||disabled} onClick={()=>{E(x);K(x.kind);N(x.name);A((x.aliases||[]).join('\n'));M('')}}>修改名称或别名</button></article>)}
-  </section>;
 }
 
 export function LibraryPanel({sources,catalog,api,open,changed,disabled}) {

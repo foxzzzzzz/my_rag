@@ -24,4 +24,5 @@
  --library-tag-filter-limit:18dvh; /* 展开标签筛选时的选项区高度上限 */
  --list-controls-max-height:60%; /* 顶部操作区最多占列表页高度的比例，短屏时内部滚动 */
  --task-grid-columns:minmax(0,2fr) minmax(0,1.45fr) minmax(8.5rem,1fr) minmax(0,1.55fr); /* 宽屏任务列表的四列 */
+ --catalog-width:68rem; --catalog-editor-width:28rem; /* 分类列表和编辑抽屉宽度上限 */
 }
