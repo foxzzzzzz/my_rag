@@ -32,6 +32,16 @@ def test_consent_generate_and_confirm(setup):
     applied=svc.apply(result['id'],[],[],['新主题'],[])
     assert applied['receipt']['topics'][0]['name']=='新主题'
 
+def test_tag_only_apply_rolls_back_new_label(setup):
+    svc,sid,calls,out=setup
+    out['new_topics']=[]; out['new_tags']=['新标签']
+    result=svc.generate(sid,'v1',0,True)
+    with pytest.raises(WorkflowError,match='classification_topic_required'):
+        svc.apply(result['id'],[],[],[],['新标签'])
+    assert svc.classifications.catalog()==[]
+    assert svc.latest(sid)['status']=='ready'
+    assert svc.classifications.snapshot(sid)['revision']==0
+
 def test_invalid_and_unknown_keeps_reservation(setup):
     svc,sid,calls,out=setup
     out['existing_topics']=['untrusted']
@@ -59,9 +69,9 @@ def test_budget_insufficient_no_call(setup):
 def test_version_and_metadata_conflict(setup):
     svc,sid,calls,out=setup
     result=svc.generate(sid,'v1',0,True)
-    svc.classifications.create_label('tag','manual')
+    svc.classifications.create_label('topic','manual')
     label=svc.classifications.catalog()[0]['id']
-    svc.classifications.update(sid,0,[],[label])
+    svc.classifications.update(sid,0,[label],[])
     with pytest.raises(WorkflowError,match='classification_conflict'): svc.apply(result['id'],[],[],['新主题'],[])
     assert len(svc.classifications.catalog())==1
     with svc.store._tx() as c: c.execute("UPDATE sources SET current_version_id=NULL WHERE id=?",(sid,))

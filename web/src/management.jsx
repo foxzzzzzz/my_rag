@@ -1,24 +1,27 @@
 import React, {useEffect, useState} from 'react';
 import {filterSources, labelIds, splitAliases, douyinErrorText, suggestionSelection, suggestionError} from './management-helpers';
+import {classificationTopicRequired} from './helpers';
 
-function Choices({catalog, kind, value, onChange, disabled=false}) {
+function Choices({catalog, kind, value, onChange, disabled=false, allowAdd=true}) {
   const options=catalog.filter(x=>x.kind===kind);
   return <fieldset disabled={disabled}><legend>{kind==='topic'?'主题':'知识标签'}</legend>
     {!options.length&&<small>尚无分类，可到“分类”页面创建。</small>}
-    <div className="choices">{options.map(x=><label key={x.id} title={(x.aliases||[]).join('、')}><input type="checkbox" checked={value.includes(x.id)} onChange={e=>onChange(e.target.checked?[...value,x.id]:value.filter(id=>id!==x.id))}/>{x.name}</label>)}</div>
+    <div className="choices">{options.map(x=><label key={x.id} title={(x.aliases||[]).join('、')}><input type="checkbox" checked={value.includes(x.id)} disabled={!allowAdd&&!value.includes(x.id)} onChange={e=>onChange(e.target.checked?[...value,x.id]:value.filter(id=>id!==x.id))}/>{x.name}</label>)}</div>
   </fieldset>;
 }
 
 export function ClassificationEditor({source, catalog, api, changed, disabled}) {
   const incoming=source.classification||{revision:0,topics:[],tags:[]};
   const [base,SB]=useState(incoming),[topics,T]=useState(labelIds(incoming.topics)),[tags,G]=useState(labelIds(incoming.tags)),[dirty,D]=useState(false),[message,M]=useState(''),[working,W]=useState(false);
+  const needsTopic=!topics.length&&!!tags.length;
   useEffect(()=>{if(!dirty){SB(incoming);T(labelIds(incoming.topics));G(labelIds(incoming.tags))}},[source.id,incoming.revision,dirty]);
   async function save(){W(true);M('');try{await api('/sources/'+source.id+'/classification',{method:'POST',body:JSON.stringify({expected_revision:base.revision,topics,tags})});D(false);await changed();M('分类已保存，正文版本和评分未改变。')}catch(e){M(e.message)}finally{W(false)}}
   return <div className="management"><h3>主题与知识标签</h3><p>支持多选；独立于审核问题标签。</p>
     {dirty&&base.revision!==incoming.revision&&<p className="error">分类已被其他操作更新，保存会检查冲突，请重新载入后调整。</p>}
     <Choices catalog={catalog} kind="topic" value={topics} onChange={x=>{T(x);D(true)}} disabled={working||disabled}/>
-    <Choices catalog={catalog} kind="tag" value={tags} onChange={x=>{G(x);D(true)}} disabled={working||disabled}/>
-    <button disabled={!dirty||working||disabled} onClick={save}>保存分类</button><button disabled={working} onClick={()=>{SB(incoming);T(labelIds(incoming.topics));G(labelIds(incoming.tags));D(false);M('')}}>重新载入分类</button>
+    {!topics.length&&<p className={needsTopic?'error':'muted'}>{needsTopic?classificationTopicRequired:'选择主题后可添加标签。'}</p>}
+    <Choices catalog={catalog} kind="tag" value={tags} onChange={x=>{G(x);D(true)}} disabled={working||disabled} allowAdd={!!topics.length}/>
+    <button disabled={!dirty||working||disabled||needsTopic} onClick={save}>保存分类</button><button disabled={working} onClick={()=>{SB(incoming);T(labelIds(incoming.topics));G(labelIds(incoming.tags));D(false);M('')}}>重新载入分类</button>
     {message&&<p role="status">{message}</p>}
     <SuggestionPanel source={source} catalog={catalog} api={api} changed={changed} disabled={disabled}/>
   </div>;
@@ -29,7 +32,7 @@ function SuggestionPanel({source,catalog,api,changed,disabled}) {
   const [record,R]=useState(null),[selection,S]=useState(suggestionSelection()),[paid,P]=useState(false),[working,W]=useState(false),[message,M]=useState(''),[enabled,E]=useState(false);
   const path='/sources/'+source.id+'/classification/suggestions';
   useEffect(()=>{let active=true; R(null); S(suggestionSelection()); P(false); Promise.all([api(path),api('/classification-suggestions/status')]).then(([r,status])=>{if(active){R(r);E(status.enabled);S(suggestionSelection(r?.result?.suggestions))}}).catch(e=>{if(active)M(suggestionError(e.message))}); return()=>{active=false}},[source.id]);
-  async function perform(fn){W(true);M('');try{await fn()}catch(e){M(suggestionError(e.message))}finally{W(false)}}
+  async function perform(fn){W(true);M('');try{await fn()}catch(e){M(e.message===classificationTopicRequired?e.message:suggestionError(e.message))}finally{W(false)}}
   async function generate(){await perform(async()=>{const r=await api(path,{method:'POST',body:JSON.stringify({expected_version_id:source.current_version_id,expected_revision:source.classification?.revision||0,allow_paid:true})});R(r);S(suggestionSelection(r.result?.suggestions));P(false)})}
   async function apply(){await perform(async()=>{const r=await api('/classification-suggestions/'+record.id+'/apply',{method:'POST',body:JSON.stringify(selection)});R(r);await changed();M('建议已应用，正文和评分保持不变。')})}
   async function reject(){await perform(async()=>{R(await api('/classification-suggestions/'+record.id+'/reject',{method:'POST',body:'{}'}));M('建议已拒绝。')})}

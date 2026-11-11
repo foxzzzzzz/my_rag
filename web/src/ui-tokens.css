@@ -11,5 +11,7 @@
  --ask-width:850px; --list-side-width:150px;
  --library-actions-height:36px; /* 资料列表选择栏最小高度 */
  --status-dot-size:7px; /* 侧栏连接状态指示点尺寸 */
- --mobile-library-nav-limit:40dvh; /* 手机资料库导航高度上限 */
+ --mobile-library-nav-limit:40dvh; /* 手机列表页导航高度上限 */
+ --library-tag-filter-limit:18dvh; /* 展开标签筛选时的选项区高度上限 */
+ --list-controls-max-height:60%; /* 顶部操作区最多占列表页高度的比例，短屏时内部滚动 */
 }

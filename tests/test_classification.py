@@ -22,11 +22,28 @@ class ClassificationTests(unittest.TestCase):
         with self.assertRaises(WorkflowError): self.c.update(self.s,0,[],[])
         renamed=self.c.update_label(label['id'],1,'新名',[]); self.assertEqual(renamed['id'],label['id'])
         snap=self.c.snapshot(self.s); self.assertEqual(snap['revision'],2); self.assertEqual(snap['topics'][0]['name'],'新名')
-        batch=self.c.bulk([{'source_id':self.s,'expected_revision':2},{'source_id':self.s,'expected_revision':2}], 'remove', [label['id']], [])
+        batch=self.c.bulk([{'source_id':self.s,'expected_revision':2},{'source_id':self.s,'expected_revision':2}], 'remove', [label['id']], [tag['id']])
         self.assertEqual([x['status'] for x in batch],['success','classification_conflict'])
         with self.store._tx() as c:
             self.assertEqual(c.execute('SELECT count(*) FROM reviews').fetchone()[0],0)
             self.assertEqual(c.execute('SELECT count(*) FROM versions').fetchone()[0],0)
             self.assertGreater(c.execute('SELECT generation FROM content_sync WHERE source_id=?',(self.s,)).fetchone()[0],1)
+
+    def test_topic_required_and_bulk_partial(self):
+        topic=self.c.create_label('topic','Topic')['id']
+        tag=self.c.create_label('tag','Tag')['id']
+        other=self.store.import_source('html','b'*64,'b','originals/b')['source']['id']
+        with self.assertRaisesRegex(WorkflowError,'classification_topic_required'):
+            self.c.update(self.s,0,[],[tag])
+        self.c.update(self.s,0,[topic],[])
+        result=self.c.bulk([{'source_id':self.s,'expected_revision':1},{'source_id':other,'expected_revision':0}], 'add', [], [tag])
+        self.assertEqual([x['status'] for x in result],['success','classification_topic_required'])
+        with self.assertRaisesRegex(WorkflowError,'classification_topic_required'):
+            self.c.update(self.s,2,[],[tag])
+        self.assertEqual(self.c.update(self.s,2,[],[])['revision'],3)
+        with self.store._tx() as c: c.execute('INSERT INTO source_labels VALUES(?,?)',(other,tag))
+        with self.assertRaisesRegex(WorkflowError,'classification_topic_required'):
+            self.c.update(other,0,[],[tag])
+        self.assertEqual(self.c.update(other,0,[topic],[tag])['revision'],1)
 
 if __name__=='__main__': unittest.main()

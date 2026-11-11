@@ -87,6 +87,7 @@ class ClassificationStore:
             for id in ids:
                 r=c.execute('SELECT kind FROM classification_labels WHERE id=?',(id,)).fetchone()
                 if not r or r[0]!=kind: raise WorkflowError('classification_not_found')
+        if tags and not topics: raise WorkflowError('classification_topic_required')
         if set(topics)=={x['id'] for x in current['topics']} and set(tags)=={x['id'] for x in current['tags']}: return current
         c.execute('DELETE FROM source_labels WHERE source_id=?',(sid,))
         c.executemany('INSERT INTO source_labels VALUES(?,?)',[(sid,x) for x in topics+tags])

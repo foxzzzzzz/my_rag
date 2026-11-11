@@ -5,6 +5,7 @@ import {hasOlderSourceReviews} from './rag-state';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
 import {CatalogManager, ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {LibraryView} from './library-view';
+import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {DocumentView} from './document-view';
 import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate, htmlBodyPreview, taskControls} from './helpers';
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
@@ -39,6 +40,8 @@ function App() {
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
   draftRef.current = drafts; editRef.current = edits; detailRef.current = detail;
   const source = detail?.source, current = detail?.current, result = current?.result || {};
+  const hasUnclassified=sources.some(isUnclassifiedSource);
+  const activeTopic=topic===UNCLASSIFIED_TOPIC&&!hasUnclassified?'':topic;
   const key = draftKey(source?.id, current?.id), draft = drafts[key] || inputDraft(), edit = edits[key];
   const renderNavigation = openSequence.current;
   const hasWork = k => !!editRef.current[k] || !!draftRef.current[k] && (
@@ -206,7 +209,10 @@ function App() {
   },[page,source?.id]);
   useEffect(()=>{
     if(libraryScrollRef.current)libraryScrollRef.current.scrollTop=0;
-  },[topic,libraryFilters]);
+  },[activeTopic,libraryFilters]);
+  useEffect(()=>{
+    if(topic!==activeTopic)setTopic(activeTopic);
+  },[topic,activeTopic]);
   useEffect(()=>{
     if(confirmation){if(!dialogRef.current.open)dialogRef.current.showModal();}
     else if(dialogRef.current?.open){dialogRef.current.close();if(dialogOpener.current?.isConnected)dialogOpener.current.focus();}
@@ -222,15 +228,18 @@ function App() {
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
   const libraryActive=!!session&&page==='library';
+  const tasksActive=!!session&&page==='tasks';
   const sidebarTopics=catalog.filter(item=>item.kind==='topic');
-  return <div className={libraryActive?'shell shell--library':'shell'}>
+  return <div className={libraryActive||tasksActive?'shell shell--list':'shell'}>
     <aside className="app-nav"><div className="app-brand"><span className="brand-mark" aria-hidden="true">知</span>个人知识库</div><nav aria-label="主导航">
       {ui.navigation.map(item=><button key={item.id} aria-current={(page===item.id||page==='detail'&&item.id==='library')?'page':undefined} onClick={()=>navigate(item.id)}><svg className="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={({library:"M4 5h6a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4z M20 5h-4a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h4z",ask:"M4 5h16v11H9l-5 4z",import:"M4 14v5h16v-5 M12 3v11 M8 10l4 4 4-4",tasks:"M5 5h2 M10 5h9 M5 12h2 M10 12h9 M5 19h2 M10 19h9",catalog:"M3 4h9l9 9-8 8-10-10z M7 8h.01"})[item.id]}/></svg>{item.label}</button>)}
     </nav>
     {session&&dataLoaded&&<div className="sidebar-topics" role="group" aria-label="主题筛选">
       <h2><button className="topics-heading" aria-label="主题，显示全部资料" title="显示全部资料"
         onClick={()=>{resetLibraryFilters();navigate('library');}}>主题</button></h2>
-      {sidebarTopics.map(item=><button key={item.id} aria-pressed={topic===item.id} onClick={()=>{setTopic(item.id);navigate('library');}}>{item.name}</button>)}
+      {hasUnclassified&&<button aria-pressed={activeTopic===UNCLASSIFIED_TOPIC}
+        onClick={()=>{setTopic(UNCLASSIFIED_TOPIC);navigate('library');}}>未分类</button>}
+      {sidebarTopics.map(item=><button key={item.id} aria-pressed={activeTopic===item.id} onClick={()=>{setTopic(item.id);navigate('library');}}>{item.name}</button>)}
     </div>}
     <div className="sidebar-session">
       <span className="connection-status" data-connected={connection==='connected'&&!loginRequired} role="status">{loginRequired?'请登录':connectionText(connection)}</span>
@@ -240,7 +249,7 @@ function App() {
       {error&&<p className="error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
       {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
-        <div className="library-scroll" ref={libraryScrollRef} role="region" aria-label="资料库内容" tabIndex={0} hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={topic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        <div className="list-page" hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={activeTopic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} listRef={libraryScrollRef} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
         {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section>
           <button onClick={()=>navigate('library')}>返回资料库</button>
           <p className="muted">删除的资料保留 {trash.retention_days} 天，到期后由定期维护清理。已有备份副本按快照保留策略轮换。</p>
@@ -266,13 +275,20 @@ function App() {
           <details><summary>抖音分享链接</summary><DouyinPanel api={api} opened={open} pollInterval={session.config.poll_interval_ms} disabled={busy}/></details>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></>}
-        {page==='tasks'&&<><div className="page-heading"><h1 {...titleProps}>任务</h1></div><section>
-          <div className="actions"><button type="button" aria-pressed={showArchivedTasks} onClick={()=>setShowArchivedTasks(value=>!value)}>{showArchivedTasks?'返回任务':'查看已归档'}</button></div>
+        {tasksActive&&<section className="list-page">
+          <div className="list-page-controls">
+            <div className="page-heading"><h1 {...titleProps}>任务</h1>
+              <button type="button" aria-pressed={showArchivedTasks} onClick={()=>setShowArchivedTasks(value=>!value)}>{showArchivedTasks?'返回任务':'查看已归档'}</button>
+            </div>
           {!showArchivedTasks&&<>
+          <div className="actions task-processing-options">
           <label><input type="checkbox" checked={taskPaid} onChange={event=>setTaskPaid(event.target.checked)}/>我同意所选视频或网页模型处理产生费用</label>
           <label>HTML处理方式<select value={htmlMode} onChange={event=>setHtmlMode(event.target.value)}><option value="preview">离线正文预览（无模型费用）</option><option value="model" disabled={!session.config.live_html_enabled}>模型摘要与笔记（需本人审核）</option></select></label>
+          </div>
           {!session.config.live_video_enabled&&<p className="muted">视频处理当前未启用。</p>}{!session.config.live_html_enabled&&<p className="muted">网页模型处理未启用，离线预览不产生AI摘要。</p>}
           </>}
+          </div>
+          <div className="list-scroll task-list" key={String(showArchivedTasks)} role="region" aria-label={showArchivedTasks?'已归档任务列表':'任务列表'} tabIndex={0}>
           {!visibleTasks.length&&<p>{showArchivedTasks?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}{visibleTasks.map(task=>{
             const item=sources.find(x=>x.id===task.source_id),video=isVideo(item?.kind);
             const {mode, action, queuedForProcessing}=taskControls(task, htmlMode);
@@ -288,7 +304,8 @@ function App() {
                 })}>{task.archived?'取消归档':'归档'}</button>}
                 {item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
           })}
-        </section></>}
+          </div>
+        </section>}
         {page==='detail'&&detail&&<>
           <button className="text-button" onClick={()=>navigate('library')}>返回资料库</button>
           <div className="source-heading"><h1 {...titleProps}>{result.title||source.title||source.original_name}</h1><p className="muted">

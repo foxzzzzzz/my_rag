@@ -1,11 +1,12 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {filterSources} from './management-helpers';
-import {formatDate} from './helpers';
+import {filterSources, isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
+import {classificationTopicRequired, formatDate} from './helpers';
 
 const batchStatus = {
   success:'已完成',
   classification_conflict:'分类已更新，请取消选择后重新勾选',
   classification_not_found:'所选主题或标签已不存在',
+  classification_topic_required:classificationTopicRequired,
   source_not_found:'资料已不存在',
   invalid_classification:'分类选项无效'
 };
@@ -23,13 +24,15 @@ function Choices({catalog,kind,value,onChange}) {
   </fieldset>;
 }
 
-export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,filters,setFilters,onResetFilters,onImport,onTrash,displayTimezone}) {
+export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,filters,setFilters,onResetFilters,onImport,onTrash,listRef,displayTimezone}) {
   const [selection,setSelection]=useState({});
   const [batchOpen,setBatchOpen]=useState(false);
   const [topics,setTopics]=useState([]), [tags,setTags]=useState([]), [operation,setOperation]=useState('add');
   const [results,setResults]=useState([]), [working,setWorking]=useState(false), [message,setMessage]=useState('');
   const selectionScope=useRef(0);
-  const visible=filterSources(sources,{...filters,topics:topicId?[topicId]:[]});
+  const previousScope=useRef({topicId,filters});
+  const unclassified=topicId===UNCLASSIFIED_TOPIC;
+  const visible=filterSources(sources,{...filters,unclassified,topics:topicId&&!unclassified?[topicId]:[]});
   const selected=visible.filter(source=>Object.hasOwn(selection,source.id));
   const allSelected=visible.length>0&&selected.length===visible.length;
   const hasBatchFeedback=results.length>0||!!message;
@@ -42,7 +45,16 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
     setMessage('');
     setBatchOpen(false);
   }
-  useEffect(()=>{clearSelection()},[topicId,filters]);
+  useEffect(()=>{
+    const previous=previousScope.current;
+    previousScope.current={topicId,filters};
+    if(previous.topicId===topicId&&previous.filters===filters)return;
+    if(previous.topicId===UNCLASSIFIED_TOPIC&&!topicId&&previous.filters===filters&&!sources.some(isUnclassifiedSource)){
+      setSelection({});
+    }else{
+      clearSelection();
+    }
+  },[topicId,filters,sources]);
 
   function filter(key,value) {
     setFilters(previous=>({...previous,[key]:value}));
@@ -74,7 +86,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
         setSelection(previous=>{
           const next={...previous};
           for(const item of response.items){
-            if(item.status==='success')next[item.source_id]=item.classification.revision;
+            if(item.status==='success'&&Object.hasOwn(previous,item.source_id))next[item.source_id]=item.classification.revision;
           }
           return next;
         });
@@ -87,7 +99,8 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
     }
   }
 
-  return <section className="library-view">
+  return <section className="library-view list-page">
+    <div className="list-page-controls">
     <div className="page-heading">
       <h2 data-page-title tabIndex={-1}>资料库</h2>
       <div className="actions">
@@ -111,10 +124,12 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
       </select></label>
       <button onClick={onResetFilters}>清空筛选</button>
     </div>
-    <details>
+    <details className="library-tag-filters">
       <summary>标签筛选</summary>
       <Choices catalog={catalog} kind="tag" value={filters.tags} onChange={value=>filter('tags',value)}/>
     </details>
+    </div>
+    <div className="list-scroll library-scroll" ref={listRef} role="region" aria-label="资料列表" tabIndex={0}>
     <div className="library-list-head">
       <label>
         <input type="checkbox" checked={allSelected} disabled={!visible.length||working}
@@ -150,19 +165,23 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
       </div>
     </div>
     {!visible.length&&<p>没有匹配的资料，请清空筛选或导入资料。</p>}
-    {visible.map(source=>
-      <div className="source-row" key={source.id}>
+    {visible.map(source=>{
+      const topicNames=source.classification?.topics?.map(item=>item.name)||[];
+      const tagNames=source.classification?.tags?.map(item=>item.name)||[];
+      return <div className="source-row" key={source.id}>
         <input aria-label={'选择 '+source.original_name} type="checkbox" disabled={working}
           checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
         <button className="source" onClick={()=>open(source.id)}>
           <strong>{source.title||source.original_name}</strong>
-          <small>{[...(source.classification?.topics||[]),...(source.classification?.tags||[])].map(item=>item.name).join('、')||'未分类'}</small>
+          <small>{[...(isUnclassifiedSource(source)?['未分类']:topicNames),...tagNames].join('、')}</small>
           <small>{['video','mp4'].includes(source.kind)?'视频':'网页'}</small>
         </button>
         <div className="source-side">
           <span>{({approve:'已批准',rework:'返工',reject:'拒绝',pending:'待审核'})[source.review_status]||'待审核'}</span>
           <span className="source-date">{(source.updated_at||source.created_at)?formatDate(source.updated_at||source.created_at,displayTimezone):''}</span>
         </div>
-      </div>)}
+      </div>;
+    })}
+    </div>
   </section>;
 }

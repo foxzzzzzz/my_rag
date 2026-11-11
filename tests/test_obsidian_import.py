@@ -47,7 +47,7 @@ def test_stale_and_concurrent(setup):
  error('version_conflict',lambda:s.apply(p,'use_uploaded'))
 
 def test_metadata_concurrency(setup):
- s,sid,v=setup; data,_=s.export_note(sid); p=preview(s,data); label=s.classification.create_label('tag','tag'); s.classification.update(sid,0,[],[label['id']])
+ s,sid,v=setup; data,_=s.export_note(sid); p=preview(s,data); label=s.classification.create_label('topic','topic'); s.classification.update(sid,0,[label['id']],[])
  error('classification_conflict',lambda:s.apply(p,'use_uploaded'))
 
 def test_expired_deleted(setup):
@@ -97,7 +97,16 @@ def test_plain_title_block_list_and_yaml_tags_rejected(setup):
  error('invalid_obsidian_note',lambda:s.preview(edit(data,'title: Title','title: !!python/object/apply:os.system'), 'note.md'))
 
 def test_classification_stale_separately_reported(setup):
- s,sid,v=setup; data,_=s.export_note(sid); label=s.classification.create_label('tag','tag'); s.classification.update(sid,0,[],[label['id']])
+ s,sid,v=setup; data,_=s.export_note(sid); label=s.classification.create_label('topic','topic'); s.classification.update(sid,0,[label['id']],[])
  p=s.preview(data,'note.md')
  assert p['conflict'] and not p['content_conflict'] and p['classification_conflict']
  assert p['incoming_metadata_revision']==0 and p['current_metadata_revision']==1
+
+def test_tag_only_import_rolls_back_content(setup):
+ s,sid,v=setup; tag=s.classification.create_label('tag','tag'); data,_=s.export_note(sid)
+ data=edit(edit(data,'Notes','Changed'),'tag_ids: []','tag_ids: ["'+tag['id']+'"]')
+ p=preview(s,data)
+ error('classification_topic_required',lambda:s.apply(p,'use_uploaded'))
+ assert s.store.get_source(sid)['current_version_id']==v['id']
+ assert len(s.store.list_versions(sid))==1
+ assert s.classification.snapshot(sid)['tags']==[]
