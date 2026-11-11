@@ -4,7 +4,12 @@
  --sidebar-width:200px; /* 侧栏宽度 */
  --review-width:280px; --column-gap:36px; /* 阅读和审核列 */
  --radius:5px; --ui-size:14px; --body-size:16px; --heading-size:23px;
+ --sidebar-meta-size:13px; /* 侧栏状态和主题标题字号 */
+ --connection-online:#285d46; /* 连接正常时的状态点颜色 */
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
- --topbar-height:36px; --ask-width:850px; --list-side-width:150px;
+ --ask-width:850px; --list-side-width:150px;
+ --library-actions-height:36px; /* 资料列表选择栏最小高度 */
+ --status-dot-size:7px; /* 侧栏连接状态指示点尺寸 */
+ --mobile-library-nav-limit:40dvh; /* 手机资料库导航高度上限 */
 }

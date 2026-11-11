@@ -14,6 +14,7 @@ import './style.css';
 const fields = {title:'标题', summary:'摘要', notes:'笔记', body:'正文', transcript:'语音转录', visual:'画面证据'};
 const isVideo = kind => ['video','mp4'].includes(kind);
 const inputDraft = () => emptyReviewDraft(ui.default_reviewer);
+const emptyLibraryFilters = {q:'',kind:'',review:'',tags:[]};
 
 function App() {
   const [session, setSession] = useState(null), [connection, setConnection] = useState('connecting');
@@ -22,6 +23,7 @@ function App() {
   const [trash, setTrash] = useState({items:[], retention_days:null});
   const [showArchivedTasks, setShowArchivedTasks] = useState(false);
   const [detail, setDetail] = useState(null), [topic, setTopic] = useState('');
+  const [libraryFilters,setLibraryFilters]=useState(emptyLibraryFilters);
   const [dataLoaded,setDataLoaded] = useState(false);
   const [reviewEpoch,setReviewEpoch] = useState(0), [reviewPending,setReviewPending] = useState(false);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
@@ -33,6 +35,7 @@ function App() {
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
   const authEpoch=useRef(0);
   const refreshOrder=useRef({issued:0,applied:0});
+  const libraryScrollRef=useRef(null);
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
   draftRef.current = drafts; editRef.current = edits; detailRef.current = detail;
   const source = detail?.source, current = detail?.current, result = current?.result || {};
@@ -45,7 +48,7 @@ function App() {
   function clearPrivate() {
     ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
     setSession(null); setSources([]); setTasks([]); setShowArchivedTasks(false); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
-    setDataLoaded(false); setTopic(''); setPage('library'); setFiles([]); setUploads([]); setRights(false);
+    setDataLoaded(false); resetLibraryFilters(); setPage('library'); setFiles([]); setUploads([]); setRights(false);
     setTaskPaid(false); setSourcePaid(false); setHtmlMode('preview'); setConfirmation(null); setMessage('');
     setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
   }
@@ -126,6 +129,10 @@ function App() {
     finally {if(sequence===openSequence.current)setBusy(!!writing.current);}
   }
   function navigate(next) {openSequence.current++;setBusy(!!writing.current);setPage(next);setError('');setMessage('');}
+  function resetLibraryFilters() {
+    setTopic('');
+    setLibraryFilters({...emptyLibraryFilters});
+  }
   async function changed() {await refresh();if(detailRef.current)syncDetail(await api('/sources/'+detailRef.current.source.id));}
   async function obsidianApplied(id, originNavigation) {
     await refresh();
@@ -198,6 +205,9 @@ function App() {
     [...(mainRef.current?.querySelectorAll('[data-page-title]')||[])].find(element=>!element.closest('[hidden]'))?.focus({preventScroll:true});
   },[page,source?.id]);
   useEffect(()=>{
+    if(libraryScrollRef.current)libraryScrollRef.current.scrollTop=0;
+  },[topic,libraryFilters]);
+  useEffect(()=>{
     if(confirmation){if(!dialogRef.current.open)dialogRef.current.showModal();}
     else if(dialogRef.current?.open){dialogRef.current.close();if(dialogOpener.current?.isConnected)dialogOpener.current.focus();}
   },[confirmation]);
@@ -211,18 +221,26 @@ function App() {
     &&(isVideo(source?.kind)||!['transcript','visual'].includes(name))
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
-  return <div className="shell">
+  const libraryActive=!!session&&page==='library';
+  const sidebarTopics=catalog.filter(item=>item.kind==='topic');
+  return <div className={libraryActive?'shell shell--library':'shell'}>
     <aside className="app-nav"><div className="app-brand"><span className="brand-mark" aria-hidden="true">知</span>个人知识库</div><nav aria-label="主导航">
       {ui.navigation.map(item=><button key={item.id} aria-current={(page===item.id||page==='detail'&&item.id==='library')?'page':undefined} onClick={()=>navigate(item.id)}><svg className="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={({library:"M4 5h6a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4z M20 5h-4a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h4z",ask:"M4 5h16v11H9l-5 4z",import:"M4 14v5h16v-5 M12 3v11 M8 10l4 4 4-4",tasks:"M5 5h2 M10 5h9 M5 12h2 M10 12h9 M5 19h2 M10 19h9",catalog:"M3 4h9l9 9-8 8-10-10z M7 8h.01"})[item.id]}/></svg>{item.label}</button>)}
-    </nav><div className="sidebar-topics"><h2>主题</h2><button aria-current={!topic?'true':undefined} onClick={()=>{setTopic('');navigate('library');}}>全部主题</button>
-      {catalog.filter(x=>x.kind==='topic').map(item=><button key={item.id} aria-current={topic===item.id?'true':undefined} onClick={()=>{setTopic(item.id);navigate('library');}}>{item.name}</button>)}
+    </nav>
+    {session&&dataLoaded&&<div className="sidebar-topics" role="group" aria-label="主题筛选">
+      <h2><button className="topics-heading" aria-label="主题，显示全部资料" title="显示全部资料"
+        onClick={()=>{resetLibraryFilters();navigate('library');}}>主题</button></h2>
+      {sidebarTopics.map(item=><button key={item.id} aria-pressed={topic===item.id} onClick={()=>{setTopic(item.id);navigate('library');}}>{item.name}</button>)}
+    </div>}
+    <div className="sidebar-session">
+      <span className="connection-status" data-connected={connection==='connected'&&!loginRequired} role="status">{loginRequired?'请登录':connectionText(connection)}</span>
+      {authEnabled&&session&&<button className="logout-button" onClick={logout}>退出登录</button>}
     </div></aside>
     <main className="workspace" ref={mainRef}>
-      <div className="connection-bar"><span role="status">{loginRequired?'请登录':connectionText(connection)}</span>{authEnabled&&session&&<button onClick={logout}>退出登录</button>}<button disabled={busy} onClick={()=>session?run(refresh):bootstrap()}>刷新</button></div>
       {error&&<p className="error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
       {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
-        <div hidden={page!=='library'}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={topic} onTopicChange={setTopic} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        <div className="library-scroll" ref={libraryScrollRef} role="region" aria-label="资料库内容" tabIndex={0} hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={topic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
         {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section>
           <button onClick={()=>navigate('library')}>返回资料库</button>
           <p className="muted">删除的资料保留 {trash.retention_days} 天，到期后由定期维护清理。已有备份副本按快照保留策略轮换。</p>
