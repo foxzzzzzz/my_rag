@@ -17,9 +17,11 @@
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
  --ask-width:850px; --list-side-width:150px;
+ --rag-scope-list-limit:min(16rem, 38dvh); /* 问答范围选择中的列表滚动高度上限 */
  --library-actions-height:36px; /* 资料列表选择栏最小高度 */
  --status-dot-size:7px; /* 侧栏连接状态指示点尺寸 */
  --mobile-library-nav-limit:40dvh; /* 手机列表页导航高度上限 */
  --library-tag-filter-limit:18dvh; /* 展开标签筛选时的选项区高度上限 */
  --list-controls-max-height:60%; /* 顶部操作区最多占列表页高度的比例，短屏时内部滚动 */
+ --task-grid-columns:minmax(0,2fr) minmax(0,1.45fr) minmax(8.5rem,1fr) minmax(0,1.55fr); /* 宽屏任务列表的四列 */
 }

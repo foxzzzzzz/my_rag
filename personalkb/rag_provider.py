@@ -17,13 +17,13 @@ class RagProvider:
         with store._tx() as c:
             c.execute('CREATE TABLE IF NOT EXISTS rag_requests (id TEXT PRIMARY KEY, input_sha TEXT NOT NULL, status TEXT NOT NULL, result TEXT)')
 
-    def embed(self, texts, *, allow_paid=False, request_id=None, run_id=None):
+    def embed(self, texts, *, allow_paid=False, request_id=None, run_id=None, background=False):
         cfg = self.cfg
         if not isinstance(texts,list) or not texts or len(texts)>cfg['limits']['embedding_batch_size'] or any(not isinstance(t,str) or not t for t in texts):
             raise WorkflowError('invalid_embedding_input')
         if cfg['embedding']['model'] != 'text-embedding-v4' or cfg['embedding']['dimensions'] != 1024:
             raise WorkflowError('invalid_config')
-        return self._execute('embedding', {'model':cfg['embedding']['model'],'input':texts,'dimensions':1024}, allow_paid, request_id, run_id)
+        return self._execute('embedding', {'model':cfg['embedding']['model'],'input':texts,'dimensions':1024}, allow_paid, request_id, run_id, background=background)
 
     def answer(self, messages, *, allow_paid=False, request_id=None, run_id=None):
         if not isinstance(messages,list) or not messages or any(not isinstance(m,dict) or set(m)!={'role','content'} or m['role'] not in ('system','user','assistant') or not isinstance(m['content'],str) for m in messages):
@@ -32,7 +32,7 @@ class RagProvider:
         if cfg['model'] != 'deepseek-flash': raise WorkflowError('invalid_config')
         return self._execute('answer', {'model':cfg['model'],'messages':messages,'max_tokens':cfg['max_tokens'],'thinking':{'type':'disabled'},'response_format':{'type':'json_object'}}, allow_paid, request_id, run_id)
 
-    def _execute(self, kind, payload, allow_paid, request_id, run_id):
+    def _execute(self, kind, payload, allow_paid, request_id, run_id, *, background=False):
         if self.cfg.get('enabled') is not True: raise WorkflowError('rag_disabled')
         if allow_paid is not True: raise WorkflowError('paid_consent_required')
         cfg=self.cfg; request_id=request_id or uuid.uuid4().hex; run_id=run_id or request_id
@@ -50,29 +50,38 @@ class RagProvider:
             if worst/1000000>amount: raise ValueError()
             providers=json.loads((ROOT / cfg['models_file']).read_text(encoding='utf-8'))['providers']
             provider=providers[spec['provider']]
-            fingerprint=hashlib.sha256(_json({'kind':kind,'payload':payload,'config':cfg,'provider':provider,'db':str(Path(self.store.db_path).resolve()),'content_root':str(getattr(self.store,'content_root',None))}).encode()).hexdigest()
+            receipt_config = cfg
+            if background:
+                receipt_config = {'embedding': cfg['embedding'], 'ledger': budget['ledger']}
+            fingerprint=hashlib.sha256(_json({'kind':kind,'payload':payload,'config':receipt_config,'provider':provider,'db':str(Path(self.store.db_path).resolve()),'content_root':str(getattr(self.store,'content_root',None))}).encode()).hexdigest()
         except Exception: raise WorkflowError('invalid_config_or_input') from None
+        # Validate credentials before any automatic batch can reserve funds.
+        if background:
+            keys = self._keys()
+            if not keys.get(provider['api_key_env']):
+                raise WorkflowError('missing_model_credentials')
         ledger=ROOT / budget['ledger']
-        with execution_guard(self.store):
+        with execution_guard(self.store, background_rag=background):
             with self.store._tx() as c:
                 row=c.execute('SELECT input_sha,status,result FROM rag_requests WHERE id=?',(request_id,)).fetchone()
                 if row:
                     if row[0]!=fingerprint: raise WorkflowError('request_conflict')
                     if row[1]=='completed': return json.loads(row[2])
-                    raise WorkflowError('request_needs_attention')
-                c.execute('INSERT INTO rag_requests VALUES (?,?,?,NULL)',(request_id,fingerprint,'prepared'))
+                    if not background or row[1]!='prepared':
+                        raise WorkflowError('request_needs_attention')
+                else:
+                    c.execute('INSERT INTO rag_requests VALUES (?,?,?,NULL)',(request_id,fingerprint,'prepared'))
             try:
                 ledger.parent.mkdir(parents=True,exist_ok=True)
-                reserve(ledger,run_id,request_id,amount,budget['run_limit'],budget['research_limit'])
+                reserve(ledger,run_id,request_id,amount,budget['run_limit'],budget['research_limit'],reuse_prepared=bool(background and row))
             except Exception:
-                with self.store._tx() as c: c.execute("UPDATE rag_requests SET status='needs_attention' WHERE id=?",(request_id,))
+                if not background:
+                    with self.store._tx() as c: c.execute("UPDATE rag_requests SET status='needs_attention' WHERE id=?",(request_id,))
                 raise WorkflowError('budget_invalid_or_exceeded') from None
             with self.store._tx() as c: c.execute("UPDATE rag_requests SET status='in_flight' WHERE id=?",(request_id,))
             try:
-                if self.secrets is None:
-                    from tools.demo_setup import dotenv
-                    path=ROOT / cfg['env_file']; keys=dotenv(path) if path.exists() else {}; keys.update(os.environ)
-                else: keys=self.secrets
+                if not background:
+                    keys=self._keys()
                 key=keys[provider['api_key_env']]
                 client=ProviderClient({'providers':providers,'models':{}},{'transport':cfg['transport']},keys,transport=self.transport)
                 url=provider['compatible_base_url'].rstrip('/') + ('/embeddings' if kind=='embedding' else '/chat/completions')
@@ -97,6 +106,15 @@ class RagProvider:
             except Exception:
                 with self.store._tx() as c: c.execute("UPDATE rag_requests SET status='needs_attention' WHERE id=? AND status!='completed'",(request_id,))
                 raise WorkflowError('provider_request_failed') from None
+
+    def _keys(self):
+        if self.secrets is not None:
+            return self.secrets
+        from tools.demo_setup import dotenv
+        path = ROOT / self.cfg['env_file']
+        keys = dotenv(path) if path.exists() else {}
+        keys.update(os.environ)
+        return keys
 
     def _validate(self, kind, data, payload):
         model=data.get('model')

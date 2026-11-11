@@ -21,7 +21,7 @@ if hasattr(os, 'register_at_fork'):
 
 @contextmanager
 def runtime_guard(data_dir, role):
-    if role not in ('web', 'worker'):
+    if role not in ('web', 'worker', 'rag-index-worker'):
         raise ValueError('invalid runtime role')
     root = Path(data_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -62,5 +62,7 @@ def maintenance_guard(store):
     with ExitStack() as stack:
         stack.enter_context(runtime_guard(root, 'web'))
         stack.enter_context(runtime_guard(root, 'worker'))
+        stack.enter_context(runtime_guard(root, 'rag-index-worker'))
         stack.enter_context(execution_guard(store))
+        stack.enter_context(execution_guard(store, background_rag=True))
         yield

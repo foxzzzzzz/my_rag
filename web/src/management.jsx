@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {filterSources, labelIds, splitAliases, douyinErrorText, suggestionSelection, suggestionError} from './management-helpers';
 import {classificationTopicRequired} from './helpers';
 
@@ -87,15 +87,42 @@ export function ObsidianPanel({sourceId,api,applied,disabled}) {
 
 export function DouyinPanel({api,opened,pollInterval,disabled}) {
   const [status,S]=useState(null),[jobs,J]=useState([]),[text,T]=useState(''),[rights,R]=useState(false),[message,M]=useState(''),[working,W]=useState(false);
-  async function refresh(){let [s,j]=await Promise.all([api('/douyin/status'),api('/douyin/jobs')]);S(s);J(j.items)}
+  const [checkResult,setCheckResult]=useState('');
+  const configCheck=useRef({running:false,revision:0});
+  async function refresh(){
+    const {running,revision}=configCheck.current;
+    const [s,j]=await Promise.all([running?null:api('/douyin/status'),api('/douyin/jobs')]);
+    if(s&&revision===configCheck.current.revision){
+      S(s);
+      setCheckResult(previous=>previous==='failed'?'':previous);
+    }
+    J(j.items);
+  }
+  async function checkDownloadConfig(){
+    if(configCheck.current.running)return;
+    configCheck.current={running:true,revision:configCheck.current.revision+1};
+    setCheckResult('checking');
+    try{
+      S(await api('/douyin/status'));
+      setCheckResult('checked');
+    }catch{
+      setCheckResult('failed');
+    }finally{
+      configCheck.current.running=false;
+    }
+  }
   useEffect(()=>{let alive=true;const update=async()=>{try{if(alive)await refresh()}catch(e){if(alive)M(e.message)}};update();let id=setInterval(update,pollInterval);return()=>{alive=false;clearInterval(id)}},[pollInterval]);
   async function submit(){W(true);M('');try{await api('/douyin/import',{method:'POST',body:JSON.stringify({share_text:text,rights_confirmed:rights})});T('');await refresh();M('下载任务已排队，完成后仍需在任务页明确启动模型处理。')}catch(e){M(e.message)}finally{W(false)}}
   const ready=status&&status.enabled&&status.cookie_configured&&status.resolver_configured;
+  const configStatus=!status?'检查中':!status.enabled?'尚未启用':!status.cookie_configured?'缺少私密 Cookie 配置':!status.resolver_configured?'缺少独立解析环境':'配置存在，Cookie 有效性待实际下载验证';
+  const checkMessage=checkResult==='checking'?'正在检查下载配置…'
+    :checkResult==='failed'?'下载配置检查失败，请稍后重试。'
+    :`${checkResult==='checked'?'配置检查完成':'配置检查'}：${configStatus}`;
   return <div className="management"><h3>抖音分享链接</h3><p>粘贴单条分享文本或链接。仅获取允许下载的作品；失败时可直接上传有权使用的 MP4。</p>
-    <p>配置检查：{!status?'检查中':!status.enabled?'尚未启用':!status.cookie_configured?'缺少私密 Cookie 配置':!status.resolver_configured?'缺少独立解析环境':'配置存在，尚不代表 Cookie 有效'}</p>
-    <button onClick={()=>refresh().catch(e=>M(e.message))}>重新检查下载配置</button>
+    <p role="status">{checkMessage}</p>
+    <button type="button" disabled={checkResult==='checking'} onClick={checkDownloadConfig}>重新检查下载配置</button>
     <label>抖音分享文本<textarea value={text} onChange={e=>T(e.target.value)} placeholder="https://v.douyin.com/.../"/></label><label><input type="checkbox" checked={rights} onChange={e=>R(e.target.checked)}/> 我确认有权处理此作品，并仅下载平台允许的内容</label>
-    <button disabled={disabled||working||!ready||!rights||!text.trim()} onClick={submit}>创建下载任务</button><p>Cookie 仅在本地 .env 配置，本页面不收集或显示它。下载不自动调用 ASR/视觉模型。</p>
+    <button disabled={disabled||working||!ready||!rights||!text.trim()} onClick={submit}>创建下载任务</button><p>请在运行知识库服务的机器上配置私密 Cookie。下载后需手动启动模型处理。</p>
     {message&&<p role="status">{message}</p>}{jobs.map(j=><article key={j.id}><strong>下载任务 {j.work_id||j.id}</strong><p>{({queued:'排队中',running:'下载中',succeeded:'已导入，待启动处理',failed:'下载失败',needs_attention:'需要确认恢复'})[j.status]||j.status}</p>{j.error_code&&<p>{douyinErrorText(j.error_code)}；可上传 MP4 兜底。</p>}{['failed','needs_attention'].includes(j.status)&&<button disabled={working||!ready} onClick={async()=>{try{await api('/douyin/jobs/'+j.id+'/retry',{method:'POST',body:'{}'});await refresh()}catch(e){M(e.message)}}}>重试下载</button>}{j.source_id&&<button onClick={()=>opened(j.source_id)}>查看导入资料</button>}</article>)}
   </div>;
 }

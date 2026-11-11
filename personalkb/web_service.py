@@ -1,4 +1,4 @@
-import hashlib, json, threading, time, uuid
+import hashlib, json, time, uuid
 from pathlib import Path
 from .workflow import make_store, run_once, _root, _hash, render_markdown
 from .workflow_store import WorkflowError
@@ -11,12 +11,29 @@ class WebService:
         self.suggestion_provider_factory = suggestion_provider_factory
         self.rag_provider_factory = rag_provider_factory
         self.owner = uuid.uuid4().hex
-        self._stop = threading.Event()
-        self._thread = None
         with self.store._tx() as c:
             c.execute('CREATE TABLE IF NOT EXISTS web_dispatch (task_id TEXT PRIMARY KEY, mode TEXT NOT NULL, state TEXT NOT NULL, requested REAL NOT NULL, claimed REAL, owner TEXT)')
         from .web_dispatch import WebDispatcher
         self.dispatcher = WebDispatcher(self)
+        self.stop_requested = self.dispatcher.stop_event.is_set
+        from .rag_auto_index import RagAutoIndex
+        self.rag_auto_index = RagAutoIndex(
+            self.store, lambda: self.rag,
+            enabled=web_config.get('rag_auto_index_enabled', True),
+            reconcile_seconds=web_config.get('rag_auto_index_reconcile_seconds',
+                                             web_config.get('dispatch_recovery_seconds', 300) or 300),
+        )
+
+    def rag_status(self):
+        coverage = self.rag.status()
+        automatic = self.rag_auto_index.status()
+        if coverage['enabled'] and automatic['enabled'] and automatic['state'] == 'idle':
+            missing = (set(coverage['eligible_source_ids']) - set(coverage['indexed_source_ids'])
+                       - set(coverage['unindexable_source_ids']))
+            if missing:
+                automatic['state'] = 'queued'
+        return {**coverage, 'auto_index': automatic}
+
     @property
     def rag(self):
         if not hasattr(self, '_rag'):
@@ -125,7 +142,23 @@ class WebService:
                 d['progress']['total_stages']=d['progress']['total_frames']+3
         except (OSError,ValueError,KeyError,TypeError): pass
         return d
-    def tasks(self): return {'items':[self._task(t) for t in self.store.list_tasks()]}
+    def tasks(self):
+        with self.store._tx() as c:
+            rows = c.execute("""SELECT s.id,s.kind,s.original_name,s.deleted,
+                json_extract(v.result, '$.title') AS title
+                FROM sources s LEFT JOIN versions v ON v.id=s.current_version_id""").fetchall()
+            sources = {
+                row['id']: {
+                    'id': row['id'], 'kind': row['kind'], 'original_name': row['original_name'],
+                    'title': row['title'] or '', 'deleted': bool(row['deleted']),
+                } for row in rows
+            }
+        items = []
+        for task in self.store.list_tasks():
+            item = self._task(task)
+            item['source'] = sources.get(task['source_id'])
+            items.append(item)
+        return {'items': items}
     def trash(self):
         from datetime import datetime, timezone
         items = self.store.list_trash()
@@ -180,7 +213,10 @@ class WebService:
         return dict(source=source,current=current,versions=metas,review=review,task=task,eligible=source['eligible'],frames=frames,media=media,original_url=f'/api/sources/{source_id}/original' if media['available'] else None)
     def review(self, source_id, p):
         r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
-        return {'review':r,'eligible':any(s['id']==source_id for s in self.store.eligible_sources())}
+        eligible=any(s['id']==source_id for s in self.store.eligible_sources())
+        if eligible:
+            self.rag_auto_index.schedule()
+        return {'review':r,'eligible':eligible}
     def revise(self, source_id, p):
         s=self.store.get_source(source_id)
         if not s['current_version_id']: raise WorkflowError('version_conflict')
@@ -236,6 +272,10 @@ class WebService:
         v=self.store.get_version(version_id)
         return render_markdown(self.store, v).encode('utf8'), version_id+'.md'
     def enqueue(self, task_id, mode='run', allow_paid=False): return self.dispatcher.enqueue(task_id,mode=mode,allow_paid=allow_paid)
-    def process_next(self): return self.dispatcher.process_next()
+    def process_next(self):
+        index_update = self.rag_auto_index.process_next(stop_requested=self.stop_requested)
+        if index_update is not None or self.stop_requested():
+            return index_update
+        return self.dispatcher.process_next()
     def start(self): return self.dispatcher.start()
     def stop(self): return self.dispatcher.stop()

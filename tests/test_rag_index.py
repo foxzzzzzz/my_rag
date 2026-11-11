@@ -290,3 +290,63 @@ def test_status_and_lexical_query_remain_available_during_embedding(setup):
         finally:
             resume.set()
         assert hybrid.result(timeout=10)
+
+def test_incremental_reuses_vectors_and_reports_current_coverage(setup):
+    store,index,sid,version=setup
+    index.update(allow_paid=True,request_id='stable')
+    original=index.query('独特证据',mode='lexical')[0]
+    class NoCalls:
+        def embed(self,*args,**kwargs): raise AssertionError('unchanged text should be reused')
+    index.provider=NoCalls()
+    store.review(sid,version['id'],version['content_sha256'],99,'approve','again')
+    assert index.status()['indexed_source_ids']==[]
+    assert index.query('独特证据',mode='lexical',filters={'sources':['other']})==[]
+    with pytest.raises(WorkflowError,match='rag_invalidated'):
+        index.citation(original['chunk_id'])
+    index.update(request_id='stable')
+    status=index.status()
+    assert status['eligible_source_ids']==[sid]
+    assert status['indexed_source_ids']==[sid]
+    assert status['unindexable_source_ids']==[]
+
+def test_incremental_receipts_survive_regrouping_and_block_unknown(setup):
+    import json
+    store,index,_,_=setup
+    index.config['limits']['embedding_batch_size']=2
+    class Durable:
+        def __init__(self): self.calls=[]
+        def embed(self,texts,*,request_id,**kwargs):
+            self.calls.append(list(texts))
+            result={'model':'text-embedding-v4','vectors':[[1.,0.] for _ in texts]}
+            with store._tx() as c:
+                c.execute('INSERT INTO rag_requests VALUES (?,?,?,?)',(request_id,'fake','completed',json.dumps(result)))
+            return result
+    provider=Durable(); index.provider=provider
+    index._incremental_embeddings([{'text':'a'},{'text':'b'}],{},'run',True,None)
+    cache={}; index._incremental_embeddings([{'text':'b'},{'text':'c'}],cache,'run',True,None)
+    assert provider.calls==[['a','b'],['c']]
+    with store._tx() as c:
+        c.execute("UPDATE rag_requests SET status='needs_attention' WHERE id=(SELECT batch_id FROM rag_index_batches WHERE text_hashes LIKE ? LIMIT 1)",('%'+__import__('personalkb.rag_index',fromlist=['_hash'])._hash('a')+'%',))
+    with pytest.raises(WorkflowError,match='request_needs_attention'):
+        index._incremental_embeddings([{'text':'a'},{'text':'d'}],{},'run',True,None)
+    assert len(provider.calls)==2
+
+
+def test_completed_vector_supersedes_unknown_receipt_for_same_text(setup):
+    import json
+    from personalkb.rag_index import _hash
+
+    store,index,_,_=setup
+    index._incremental_embeddings([],{},'current',False,None)
+    with store._tx() as c:
+        c.executemany('INSERT INTO rag_index_batches VALUES (?,?,?,?)',[
+            ('old',index.space_id,'unknown',json.dumps([_hash('a')])),
+            ('current',index.space_id,'finished',json.dumps([_hash('a')])),
+        ])
+        c.executemany('INSERT INTO rag_requests VALUES (?,?,?,?)',[
+            ('unknown','fingerprint','in_flight',None),
+            ('finished','fingerprint','completed',json.dumps(Fake().embed(['a']))),
+        ])
+    cache={}
+    index._incremental_embeddings([{'text':'a'}],cache,'current',False,None)
+    assert set(cache)=={'a'}

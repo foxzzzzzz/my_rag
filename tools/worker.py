@@ -14,6 +14,7 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, lambda *_: stop.set())
     with runtime_guard(wc['data_dir'],'worker'):
         service=WebService(wc,load_pipeline_config(Path(c['pipeline_config'])),c)
+        service.stop_requested=stop.is_set
         while not stop.is_set():
             try: service.process_next()
             except WorkflowError as exc:

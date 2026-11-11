@@ -130,7 +130,7 @@ def _check_active_index(path):
 
 
 def create(config):
-    from .rag_index import GENERATION_FILE
+    from .rag_index import GENERATION_FILE, STAGING_FILE
     store = _guard_store(config)
     root = Path(config['backup_root']); _no_links(root); root.mkdir(parents=True, exist_ok=True)
     objects = root / 'objects'; manifests = root / 'snapshots'
@@ -162,7 +162,7 @@ def create(config):
             for name in names:
                 p = base / name; _no_links(p)
                 if p == Path(store.db_path) or _secret(p): continue
-                if base == index_root and name != active and GENERATION_FILE.fullmatch(name): continue
+                if base == index_root and name != active and (GENERATION_FILE.fullmatch(name) or STAGING_FILE.fullmatch(name)): continue
                 archive_name = 'workflow/' + p.relative_to(data).as_posix()
                 if base == index_root and name == active:
                     # The main file alone can omit committed WAL data or require rollback recovery.

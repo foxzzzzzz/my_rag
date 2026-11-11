@@ -17,7 +17,7 @@ def test_runtime_cross_process_and_release(tmp_path):
 def test_maintenance_excludes_runtimes(tmp_path):
     store = WorkflowStore(tmp_path / 'workflow.sqlite', data_root=tmp_path)
     with maintenance_guard(store):
-        for role in ('web', 'worker'):
+        for role in ('web', 'worker', 'rag-index-worker'):
             with pytest.raises(WorkflowError, match='maintenance_busy'):
                 with runtime_guard(tmp_path, role): pass
     with runtime_guard(tmp_path, 'worker'):
@@ -208,6 +208,8 @@ def test_expired_trash_purge_removes_only_its_data_and_allows_reimport(tmp_path)
     index = Path(store.data_root)/'rag-index'
     index.mkdir()
     (index/'active.json').write_text(json.dumps({'space_id':'c'*64, 'file':'a'*32+'.sqlite', 'returned_models':[]}))
+    interrupted = index/('.building-'+'d'*32+'.sqlite')
+    interrupted.write_bytes(b'interrupted stage may contain expired evidence')
     with sqlite3.connect(index/('b'*32+'.sqlite')) as db:
         db.execute('CREATE TABLE interrupted_build(id INTEGER)')
     with sqlite3.connect(index/('a'*32+'.sqlite')) as db:
@@ -221,9 +223,10 @@ def test_expired_trash_purge_removes_only_its_data_and_allows_reimport(tmp_path)
         db.executemany('INSERT INTO fts(rowid,text) VALUES(?,?)', [(1,'deleted'),(2,'keep')])
         db.executemany('INSERT INTO vec VALUES(?,?)', [(1,struct.pack('2f',1,0)),(2,struct.pack('2f',0,1))])
     config = {'_workflow':cfg}
-    assert purge(config)['items'][0]['status'] == 'eligible' and original.exists()
+    assert purge(config)['items'][0]['status'] == 'eligible' and original.exists() and interrupted.exists()
     assert purge(config, apply=True)['items'][0]['status'] == 'removed'
     assert not original.exists()
+    assert not interrupted.exists()
     with sqlite3.connect(index/('a'*32+'.sqlite')) as db:
         db.enable_load_extension(True)
         sqlite_vec.load(db)

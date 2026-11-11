@@ -13,14 +13,16 @@ from personalkb.workflow_store import WorkflowError
 from personalkb import workflow
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_RAG_STATUS_POLL_INTERVAL_MS = 10000
 
 def load_web_config(path=None):
     try:
         c=json.loads(Path(path or ROOT/'config/web.json').read_text(encoding='utf-8-sig'))
         if c['host'] not in ('127.0.0.1','localhost'): raise ValueError()
+        c.setdefault('rag_status_poll_interval_ms', DEFAULT_RAG_STATUS_POLL_INTERVAL_MS)
         for k in ('port','session_ttl_seconds','max_sessions','poll_interval_ms','upload_chunk_bytes','dispatch_poll_seconds','dispatch_recovery_seconds','shutdown_timeout_seconds'):
             if type(c[k]) not in (int,float) or not math.isfinite(c[k]) or c[k]<=0: raise ValueError()
-        for k in ('port','max_sessions','upload_chunk_bytes','poll_interval_ms','max_json_bytes'):
+        for k in ('port','max_sessions','upload_chunk_bytes','poll_interval_ms','rag_status_poll_interval_ms','max_json_bytes'):
             if type(c[k]) is not int or c[k]<=0: raise ValueError()
         if type(c['port']) is not int or c['port']>65535: raise ValueError()
         for k in ('trusted_hosts','trusted_origins'):
@@ -29,6 +31,11 @@ def load_web_config(path=None):
         for k in ('workflow_config','pipeline_config','frontend_dist','env_file','display_timezone'):
             if not isinstance(c[k],str) or not c[k] or '\x00' in c[k]: raise ValueError()
         if type(c['live_video_enabled']) is not bool: raise ValueError()
+        c.setdefault('rag_auto_index_enabled', True)
+        c.setdefault('rag_auto_index_reconcile_seconds', c['dispatch_recovery_seconds'])
+        scan_seconds = c['rag_auto_index_reconcile_seconds']
+        if type(c['rag_auto_index_enabled']) is not bool or type(scan_seconds) not in (int, float) or not math.isfinite(scan_seconds) or scan_seconds <= 0:
+            raise ValueError()
         c.setdefault('classification_config','config/classification.json')
         c.setdefault('suggestions_config','config/classification-suggestions.json')
         if not isinstance(c['suggestions_config'],str) or not c['suggestions_config'].strip() or '\x00' in c['suggestions_config']: raise ValueError()
@@ -160,7 +167,9 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
                 while len(sessions)>=int(c['max_sessions']): sessions.pop(next(iter(sessions)))
                 sid=secrets.token_urlsafe(32); token=secrets.token_urlsafe(32)
             if not auth_enabled: sessions[sid]=(token,time.monotonic()+c['session_ttl_seconds'])
-        r=JSONResponse({'csrf_token':token,'config':{'quality_target':wc['quality_target'],'poll_interval_ms':c['poll_interval_ms'],'max_upload_bytes':wc['max_upload_bytes'],'max_html_bytes':wc['max_html_bytes'],'live_video_enabled':c['live_video_enabled'],'live_html_enabled':c.get('live_html_enabled',False),'display_timezone':c['display_timezone'],'auth_enabled':auth_enabled}})
+        r=JSONResponse({'csrf_token':token,'config':{'quality_target':wc['quality_target'],'poll_interval_ms':c['poll_interval_ms'],
+            'rag_status_poll_interval_ms':c.get('rag_status_poll_interval_ms', DEFAULT_RAG_STATUS_POLL_INTERVAL_MS),
+            'max_upload_bytes':wc['max_upload_bytes'],'max_html_bytes':wc['max_html_bytes'],'live_video_enabled':c['live_video_enabled'],'live_html_enabled':c.get('live_html_enabled',False),'display_timezone':c['display_timezone'],'auth_enabled':auth_enabled}})
         r.set_cookie('pkb_session',sid,httponly=True,secure=auth_enabled,samesite='strict',max_age=int(c['session_ttl_seconds']))
         return r
     @app.get('/api/sources')
@@ -222,7 +231,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             if not isinstance(value,dict): raise ValueError()
             return value
         except (ValueError, TypeError): raise WorkflowError('invalid_json') from None
-    def rag_args(p, question=True):
+    def rag_args(p, question=True, *, answer=False):
         if type(p.get('allow_paid')) is not bool: raise WorkflowError('invalid_request')
         rid = p.get('request_id')
         if not isinstance(rid, str) or not rid or len(rid) > 128: raise WorkflowError('invalid_request')
@@ -234,9 +243,27 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         filters = p.get('filters', {})
         if not isinstance(filters, dict) or set(filters) - {'sources', 'topics', 'tags'}: raise WorkflowError('invalid_request')
         if any(not isinstance(v, list) or any(not isinstance(x, str) or not x for x in v) for v in filters.values()): raise WorkflowError('invalid_request')
-        return {'question': q, 'filters': filters, 'allow_paid': p['allow_paid'], 'request_id': rid, 'mode': mode}
+        args = {'question': q, 'filters': filters, 'allow_paid': p['allow_paid'], 'request_id': rid, 'mode': mode}
+        if answer and 'expected_source_ids' in p:
+            ids = p['expected_source_ids']
+            if not isinstance(ids, list) or not ids or any(not isinstance(s, str) or not s for s in ids):
+                raise WorkflowError('invalid_request')
+            args['expected_source_ids'] = ids
+        return args
     @app.get('/api/rag/status')
-    def rag_status(): return service.rag.status()
+    def rag_status(): return service.rag_status()
+    @app.post('/api/rag/auto-index')
+    async def rag_auto_index(req: Request):
+        p = await read_object(req)
+        if not service.rag.config['enabled']:
+            raise WorkflowError('rag_disabled')
+        return await run_in_threadpool(service.rag_auto_index.set_enabled, p.get('enabled'), allow_paid=p.get('allow_paid'))
+    @app.post('/api/rag/index/retry')
+    async def rag_index_retry(req: Request):
+        p = await read_object(req)
+        if not service.rag.config['enabled']:
+            raise WorkflowError('rag_disabled')
+        return await run_in_threadpool(service.rag_auto_index.retry, allow_paid=p.get('allow_paid'))
     @app.get('/api/rag/citations/{chunk_id}')
     def rag_citation(chunk_id: str):
         try: return service.rag.citation(chunk_id)
@@ -251,11 +278,11 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         return {'items': await run_in_threadpool(service.rag.query, **args)}
     @app.post('/api/rag/ask')
     async def rag_ask(req: Request):
-        args = rag_args(await read_object(req))
+        args = rag_args(await read_object(req), answer=True)
         return await run_in_threadpool(service.rag_answers.ask, **args)
     @app.post('/api/rag/stream')
     async def rag_stream(req: Request):
-        args = rag_args(await read_object(req))
+        args = rag_args(await read_object(req), answer=True)
         def events():
             try:
                 for event in service.rag_answers.stream(**args):

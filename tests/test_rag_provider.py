@@ -68,6 +68,59 @@ def test_invalid_vector_and_budget_fail_before_post(setup):
     cfg['budget']['embedding_reserve']='0.1'; t.response=response(); t.response['data'][0]['embedding'][0]=True
     with pytest.raises(WorkflowError): p.embed(['a'],allow_paid=True,request_id='b')
 
+def test_automatic_embedding_retries_budget_failure_and_prepared_reservation(setup):
+    from tools.api_smoke import reserve
+    store, cfg = setup
+    t = Transport(response())
+    p = RagProvider(store, cfg, t, {'DASHSCOPE_API_KEY': 'fake'})
+    run_id = 'auto-index-test'
+    request_id = run_id + ':embedding:batch'
+    cfg['budget']['research_limit'] = '0.05'
+    with pytest.raises(WorkflowError, match='budget_invalid_or_exceeded'):
+        p.embed(['a'], allow_paid=True, request_id=request_id, run_id=run_id, background=True)
+    assert t.calls == 0
+    # Simulate termination after reserving the funds and before marking the request in flight.
+    budget = cfg['budget']
+    budget['research_limit'] = '1'
+    reserve(budget['ledger'], run_id, request_id, budget['embedding_reserve'], budget['run_limit'], budget['research_limit'])
+    p.embed(['a'], allow_paid=True, request_id=request_id, run_id=run_id, background=True)
+    assert t.calls == 1
+    with sqlite3.connect(budget['ledger']) as db:
+        assert db.execute('SELECT count(*) FROM reservations').fetchone()[0] == 1
+
+def test_background_embedding_allows_foreground_answer_during_provider_call(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from personalkb.execution_guard import execution_guard
+
+    store, cfg = setup
+    embedding_started = Event()
+    finish_embedding = Event()
+
+    class OverlappingTransport:
+        def request(self, url, **kwargs):
+            if url.endswith('/embeddings'):
+                embedding_started.set()
+                assert finish_embedding.wait(5)
+                return 200, response({'prompt_tokens': 10})
+            return 200, {'model': 'deepseek-flash', 'choices': [
+                {'message': {'content': '{}'}, 'finish_reason': 'stop'}],
+                'usage': {'prompt_tokens': 10, 'completion_tokens': 5}}
+
+    provider = RagProvider(store, cfg, OverlappingTransport(),
+                           {'DASHSCOPE_API_KEY': 'fake', 'DEEPSEEK_API_KEY': 'fake'})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        work = executor.submit(provider.embed, ['existing evidence'], allow_paid=True,
+                               request_id='automatic-batch', background=True)
+        try:
+            assert embedding_started.wait(5)
+            with execution_guard(store):
+                result = provider.answer([{'role': 'user', 'content': 'Question'}], allow_paid=True)
+            assert result['content'] == '{}'
+        finally:
+            finish_embedding.set()
+        assert work.result()['vectors']
+
 def test_known_cost_above_reserve_is_recorded(setup):
     store,cfg=setup; t=Transport(response({'prompt_tokens':1000000})); p=RagProvider(store,cfg,t,{'DASHSCOPE_API_KEY':'fake'})
     with pytest.raises(WorkflowError,match='provider_request_failed'): p.embed(['a'],allow_paid=True,request_id='expensive')

@@ -32,6 +32,19 @@ def test_answer_and_stream(setup):
     assert svc.ask('why')['citations'][0]['chunk_id']==A
     events=list(svc.stream('why')); assert [e['type'] for e in events]==['progress','answer','done']
 
+def test_coverage_rejects_narrowing_and_allows_explicit_covered_subset(setup):
+    svc, index, provider = setup
+    def status(filters):
+        scoped = filters.get('sources') or ['s', 's2']
+        return {'eligible_source_ids': scoped, 'indexed_source_ids': ['s']}
+    index.status = status
+    with pytest.raises(WorkflowError, match='rag_coverage_changed'):
+        svc.ask('why', filters={}, expected_source_ids=['s', 's2'], allow_paid=True)
+    with pytest.raises(WorkflowError, match='rag_coverage_changed'):
+        svc.ask('why', filters={'sources': ['s']}, expected_source_ids=['s', 's2'], allow_paid=True)
+    assert provider.calls == 0
+    assert svc.ask('why', filters={'sources': ['s']}, expected_source_ids=['s'], allow_paid=True)['citations']
+
 def test_empty_and_invalid_citations(setup):
     svc,index,p=setup; index.items=[]
     assert svc.ask('why')['insufficient_evidence'] and p.calls==0

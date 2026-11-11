@@ -22,9 +22,49 @@ class WebServiceTests(unittest.TestCase):
     def test_sources_and_hidden_fields(self):
         self.finish(); text=json.dumps(self.s.detail(self.sid))+json.dumps(self.s.tasks())+json.dumps(self.s.sources())
         for field in ('lease_token','blob_relpath','worker_id','remote_task_id'): self.assertNotIn(field,text)
+    def test_task_source_metadata_survives_trash(self):
+        self.finish()
+        before = self.s.tasks()['items'][0]
+        self.assertEqual(before['source']['id'], self.sid)
+        self.assertEqual(before['source']['original_name'], 'test.html')
+        self.assertEqual(before['source']['title'], 'Hello')
+        self.assertEqual(before['source']['kind'], 'html')
+        self.assertFalse(before['source']['deleted'])
+        self.s.store.delete_source(self.sid)
+        after = self.s.tasks()['items'][0]
+        self.assertEqual(after['source']['title'], 'Hello')
+        self.assertTrue(after['source']['deleted'])
+        self.assertNotIn('blob_relpath', after['source'])
     def test_review_revoke(self):
         v=self.finish(); p=dict(version_id=v['id'],content_sha256=v['content_sha256'],score=99,decision='approve',reviewer='A',review_id='1')
         self.assertTrue(self.s.review(self.sid,p)['eligible']); p.update(decision='reject',review_id='2'); self.assertFalse(self.s.review(self.sid,p)['eligible']); self.assertEqual(self.s.detail(self.sid)['review']['decision'],'reject')
+    def test_approval_queues_index_and_worker_makes_evidence_retrievable(self):
+        from personalkb.rag_index import RagIndex, load_rag_config
+
+        class Embeddings:
+            def embed(self, texts, **kwargs):
+                self.calls.append(texts)
+                return {'model': 'text-embedding-v4', 'vectors': [[1.0, 0.0] for _ in texts]}
+
+        v = self.finish()
+        provider = Embeddings()
+        provider.calls = []
+        cfg = load_rag_config()
+        cfg['embedding']['dimensions'] = 2
+        self.s._rag = RagIndex(self.s.store, cfg, provider)
+        payload = dict(version_id=v['id'], content_sha256=v['content_sha256'],
+                       score=99, decision='approve', reviewer='A')
+        self.s.review(self.sid, payload)
+        pending = self.s.rag_status()
+        self.assertEqual(pending['eligible_source_ids'], [self.sid])
+        self.assertEqual(pending['indexed_source_ids'], [])
+        self.assertEqual(pending['auto_index']['state'], 'queued')
+        self.assertEqual(provider.calls, [])
+        self.s.process_next()
+        self.assertEqual(self.s.rag_status()['indexed_source_ids'], [self.sid])
+        hit = self.s.rag.query('World', mode='lexical')[0]
+        self.assertEqual(hit['version_id'], v['id'])
+        self.assertEqual(len(provider.calls), 1)
     def test_revision_rejects_old_review(self):
         v=self.finish(); self.s.revise(self.sid,{'expected_version_id':v['id'],'body':'Edited'})
         with self.assertRaises(WorkflowError): self.s.review(self.sid,dict(version_id=v['id'],content_sha256=v['content_sha256'],score=99,decision='approve',reviewer='A'))

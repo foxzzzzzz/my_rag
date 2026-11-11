@@ -14,7 +14,7 @@ from .workflow_store import WorkflowError
 
 def _purge_indexes(root, sid, maintenance_config):
     from .maintenance import _no_links, _path, _safe_name
-    from .rag_index import GENERATION_DB, active_manifest
+    from .rag_index import GENERATION_DB, STAGING_FILE, active_manifest
     from .workflow import ROOT
     rag_path = maintenance_config.get('rag_config')
     if rag_path is None:
@@ -33,6 +33,11 @@ def _purge_indexes(root, sid, maintenance_config):
     if active and not (index / active).is_file():
         raise WorkflowError('rag_index_invalid')
     for path in index.iterdir():
+        if STAGING_FILE.fullmatch(path.name):
+            # Maintenance owns all writer locks; staging files are interrupted builds.
+            _no_links(path)
+            path.unlink()
+            continue
         if not GENERATION_DB.fullmatch(path.name):
             continue
         _no_links(path)

@@ -17,9 +17,10 @@ if hasattr(os, 'register_at_fork'):
     os.register_at_fork(after_in_child=_after_fork_child)
 
 @contextmanager
-def execution_guard(store):
+def execution_guard(store, *, background_rag=False):
     from .workflow_store import WorkflowError
-    path = str(Path(store.db_path).resolve()) + '.execution.lock'
+    suffix = '.rag-embedding.lock' if background_rag else '.execution.lock'
+    path = str(Path(store.db_path).resolve()) + suffix
     owner = threading.get_ident()
     with _registry_lock:
         entry = _owners.get(path)

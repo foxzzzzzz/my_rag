@@ -5,9 +5,10 @@ import {hasOlderSourceReviews} from './rag-state';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
 import {CatalogManager, ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {LibraryView} from './library-view';
+import {TaskList} from './task-list';
 import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {DocumentView} from './document-view';
-import {connectionText, validReview, errorText, textValue, uploadError, progressText, statusText, formatDate, htmlBodyPreview, taskControls} from './helpers';
+import {connectionText, validReview, errorText, textValue, uploadError, statusText, formatDate, htmlBodyPreview} from './helpers';
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
 import ui from './ui-config.json';
 import './style.css';
@@ -22,7 +23,6 @@ function App() {
   const [loginRequired,setLoginRequired]=useState(false), [password,setPassword]=useState(''), [authEnabled,setAuthEnabled]=useState(false);
   const [page, setPage] = useState('library'), [sources, setSources] = useState([]), [tasks, setTasks] = useState([]), [catalog, setCatalog] = useState([]);
   const [trash, setTrash] = useState({items:[], retention_days:null});
-  const [showArchivedTasks, setShowArchivedTasks] = useState(false);
   const [detail, setDetail] = useState(null), [topic, setTopic] = useState('');
   const [libraryFilters,setLibraryFilters]=useState(emptyLibraryFilters);
   const [dataLoaded,setDataLoaded] = useState(false);
@@ -31,9 +31,9 @@ function App() {
   const [confirmation,setConfirmation] = useState(null);
   const dialogRef=useRef(null), dialogOpener=useRef(null);
   const [drafts, setDrafts] = useState({}), [edits, setEdits] = useState({}), [stale, setStale] = useState(false);
-  const [tab, setTab] = useState('summary'), [taskPaid, setTaskPaid] = useState(false), [sourcePaid, setSourcePaid] = useState(false);
+  const [tab, setTab] = useState('summary'), [sourcePaid, setSourcePaid] = useState(false);
   const [sourceManagementOpen,setSourceManagementOpen]=useState(false);
-  const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [htmlMode, setHtmlMode] = useState('preview'), [uploads, setUploads] = useState([]);
+  const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
   const authEpoch=useRef(0);
   const refreshOrder=useRef({issued:0,applied:0});
@@ -51,9 +51,9 @@ function App() {
 
   function clearPrivate() {
     ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
-    setSession(null); setSources([]); setTasks([]); setShowArchivedTasks(false); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
+    setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
     setDataLoaded(false); resetLibraryFilters(); setPage('library'); setFiles([]); setUploads([]); setRights(false);
-    setTaskPaid(false); setSourcePaid(false); setHtmlMode('preview'); setConfirmation(null); setMessage('');
+    setSourcePaid(false); setConfirmation(null); setMessage('');
     setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
   }
   async function login(event) {
@@ -221,7 +221,6 @@ function App() {
   },[confirmation]);
 
   const titleProps={'data-page-title':true,tabIndex:-1};
-  const visibleTasks = tasks.filter(task => Boolean(task.archived) === showArchivedTasks);
   const preview=useMemo(()=>htmlBodyPreview(source?.kind,result),[source?.kind,result]);
   const offlineHtml=source?.kind==='html'&&result.provenance==='local_extraction';
   const duplicateNotes=offlineHtml&&!!result.body&&result.notes===result.body;
@@ -281,37 +280,11 @@ function App() {
           <details><summary>抖音分享链接</summary><DouyinPanel api={api} opened={open} pollInterval={session.config.poll_interval_ms} disabled={busy}/></details>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></>}
-        {tasksActive&&<section className="list-page">
-          <div className="list-page-controls">
-            <div className="page-heading"><h1 {...titleProps}>任务</h1>
-              <button type="button" aria-pressed={showArchivedTasks} onClick={()=>setShowArchivedTasks(value=>!value)}>{showArchivedTasks?'返回任务':'查看已归档'}</button>
-            </div>
-          {!showArchivedTasks&&<>
-          <div className="actions task-processing-options">
-          <label><input type="checkbox" checked={taskPaid} onChange={event=>setTaskPaid(event.target.checked)}/>我同意所选视频或网页模型处理产生费用</label>
-          <label>HTML处理方式<select value={htmlMode} onChange={event=>setHtmlMode(event.target.value)}><option value="preview">离线正文预览（无模型费用）</option><option value="model" disabled={!session.config.live_html_enabled}>模型摘要与笔记（需本人审核）</option></select></label>
-          </div>
-          {!session.config.live_video_enabled&&<p className="muted">视频处理当前未启用。</p>}{!session.config.live_html_enabled&&<p className="muted">网页模型处理未启用，离线预览不产生AI摘要。</p>}
-          </>}
-          </div>
-          <div className="list-scroll task-list" key={String(showArchivedTasks)} role="region" aria-label={showArchivedTasks?'已归档任务列表':'任务列表'} tabIndex={0}>
-          {!visibleTasks.length&&<p>{showArchivedTasks?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}{visibleTasks.map(task=>{
-            const item=sources.find(x=>x.id===task.source_id),video=isVideo(item?.kind);
-            const {mode, action, queuedForProcessing}=taskControls(task, htmlMode);
-            const paidNeeded=video||mode==='model',enabled=video?session.config.live_video_enabled:mode!=='model'||session.config.live_html_enabled;
-            return <article className="task-row" key={task.id}><strong>{item?.title||item?.original_name||task.source_id}</strong><p>{statusText(task.status)} · {statusText(task.stage)}</p><p>{queuedForProcessing?'已加入处理队列':progressText(task.progress,task.status)}</p>
-              {!video&&<p className="muted">{mode==='model'?'模型摘要与笔记':'离线正文预览'}</p>}
-              {task.resume_blocked_reason?<p className="muted">{errorText(400, task.resume_blocked_reason)}</p>:task.error_code&&<p className="error">{task.error_code}</p>}
-              <div className="actions">{action&&<button key={action} disabled={busy||(action!=='cancel'&&paidNeeded&&(!taskPaid||!enabled))} onClick={()=>run(async()=>{
-                await api('/tasks/'+task.id+'/'+action,{method:'POST',body:JSON.stringify(action==='cancel'?{}:{allow_paid:taskPaid,processing_mode:video?'preview':mode})});await refresh();
-              })}>{{start:'开始',resume:'恢复',retry:'重试',cancel:'取消'}[action]}</button>}
-                {(task.archived||task.can_archive)&&<button disabled={busy} onClick={()=>run(async()=>{
-                  await api('/tasks/'+task.id+(task.archived?'/unarchive':'/archive'),{method:'POST',body:'{}'});await refresh();
-                })}>{task.archived?'取消归档':'归档'}</button>}
-                {item&&!item.deleted&&<button onClick={()=>open(item.id)}>查看资料</button>}</div></article>;
-          })}
-          </div>
-        </section>}
+        <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy}
+          open={open} onAction={(id,action,body)=>run(async()=>{
+            await api('/tasks/'+id+'/'+action,{method:'POST',body:JSON.stringify(body)});
+            await refresh();
+          })}/>
         {page==='detail'&&detail&&<>
           <div className="source-heading">
             <button className="detail-back" type="button" onClick={()=>navigate('library')}><span aria-hidden="true">← </span>返回资料库</button>

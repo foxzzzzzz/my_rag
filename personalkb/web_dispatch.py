@@ -220,7 +220,7 @@ class WebDispatcher:
         self.stop_event.clear()
         def loop():
             while not self.stop_event.is_set():
-                try: self.process_next()
+                try: self.service.process_next()
                 except Exception: pass  # Persisted requests survive transient DB errors.
                 self.stop_event.wait(self.config['dispatch_poll_seconds'])
         self.thread = threading.Thread(target=loop, name='personalkb-web-worker', daemon=True)

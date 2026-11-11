@@ -11,10 +11,15 @@ class AnswerService:
     def __init__(self, store, index, config, provider=None):
         self.store, self.index, self.config, self.provider = store, index, config, provider
 
-    def _generate(self, question, filters, allow_paid, request_id, mode):
+    def _generate(self, question, filters, allow_paid, request_id, mode, expected_source_ids):
         if self.config.get('enabled') is not True:
             raise WorkflowError('rag_disabled')
         with execution_guard(self.store):
+            if expected_source_ids is not None:
+                coverage = self.index.status(filters=filters)
+                indexed = set(coverage['indexed_source_ids'])
+                if not indexed or indexed != set(coverage['eligible_source_ids']) or indexed != set(expected_source_ids):
+                    raise WorkflowError('rag_coverage_changed')
             return self._generate_locked(question, filters, allow_paid, request_id, mode)
 
     def _generate_locked(self, question, filters, allow_paid, request_id, mode):
@@ -57,17 +62,17 @@ class AnswerService:
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
             raise WorkflowError('invalid_model_response') from None
 
-    def ask(self, question, *, filters=None, allow_paid=False, request_id=None, mode=None):
-        result, contexts = self._generate(question, filters, allow_paid, request_id, mode)
+    def ask(self, question, *, filters=None, allow_paid=False, request_id=None, mode=None, expected_source_ids=None):
+        result, contexts = self._generate(question, filters, allow_paid, request_id, mode, expected_source_ids)
         if contexts:
             self.index.validate_citations(contexts, filters=filters)
         return result
 
-    def stream(self, question, *, filters=None, allow_paid=False, request_id=None, mode=None):
+    def stream(self, question, *, filters=None, allow_paid=False, request_id=None, mode=None, expected_source_ids=None):
         yield {'type': 'progress'}
         contexts = []
         try:
-            result, contexts = self._generate(question, filters, allow_paid, request_id, mode)
+            result, contexts = self._generate(question, filters, allow_paid, request_id, mode, expected_source_ids)
             if contexts:
                 self.index.validate_citations(contexts, filters=filters)
             yield {'type': 'answer', **result}

@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 
-def reserve(db_path, run_id, request_id, amount, run_limit, research_limit):
+def reserve(db_path, run_id, request_id, amount, run_limit, research_limit, *, reuse_prepared=False):
     """Reserve once before a request. Outstanding reservations remain charged."""
     try:
         amount, run_limit, research_limit = (Decimal(str(x)) for x in (amount,run_limit,research_limit))
@@ -20,6 +20,13 @@ def reserve(db_path, run_id, request_id, amount, run_limit, research_limit):
         db.execute('BEGIN IMMEDIATE')
         try:
             db.execute('CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, amount TEXT NOT NULL)')
+            if reuse_prepared:
+                prior = db.execute('SELECT run_id, amount FROM reservations WHERE request_id=?', (request_id,)).fetchone()
+                if prior:
+                    if prior[0] != run_id or Decimal(prior[1]) != amount:
+                        raise ValueError('预算预留与待发送请求不符')
+                    db.execute('COMMIT')
+                    return
             rows=db.execute('SELECT run_id, amount FROM reservations').fetchall()
             total=sum((Decimal(row[1]) for row in rows),Decimal(0))
             run_total=sum((Decimal(value) for run,value in rows if run==run_id),Decimal(0))
