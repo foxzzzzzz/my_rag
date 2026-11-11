@@ -78,8 +78,13 @@ class HtmlPipelineTests(unittest.TestCase):
         self.assertEqual(self.store().list_versions(self.sid), [])
     def test_cached_response_reused_after_finish_failure(self):
         from personalkb.workflow_store import WorkflowStore
+        strategy = self.config['strategy']
+        legacy = strategy['legacy_text_prompt']['value']
+        self.config['strategy'] = {key: value for key, value in strategy.items() if key != 'legacy_text_prompt'}
+        self.config['strategy']['text_system_prompt'] = legacy
         with patch.object(WorkflowStore, 'finish', side_effect=WorkflowError('injected_failure')):
             with self.assertRaises(WorkflowError): self.run_html()
+        self.config['strategy'] = strategy
         self.assertEqual(self.status(), 'needs_attention')
         self.run_html(True)
         self.assertEqual(self.provider.calls, 1)

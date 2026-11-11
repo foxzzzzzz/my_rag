@@ -8,8 +8,11 @@
  --connection-online:#285d46; /* 连接正常时的状态点颜色 */
  --detail-meta-size:13px; /* 详情返回文字字号 */
  --detail-heading-gap:12px; /* 详情标题与返回、管理入口间距 */
- --summary-measure:54em; /* 宽屏摘要的最大阅读行宽 */
- --summary-paragraph-gap:14px; /* 摘要段落之间的间距 */
+ --detail-reading-measure:54em; /* 宽屏摘要和笔记的最大阅读行宽 */
+ --detail-reading-block-gap:14px; /* 摘要和笔记段落、列表之间的间距 */
+ --detail-list-indent:1.5em; /* 摘要和笔记的列表缩进 */
+ --detail-list-item-gap:6px; /* 摘要和笔记相邻列表项的间距 */
+ --detail-section-gap:24px; /* 摘要和笔记小标题上方的间距 */
  --detail-video-max-height:52dvh; /* 详情视频播放器最大高度 */
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;

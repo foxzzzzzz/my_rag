@@ -9,7 +9,7 @@ from pathlib import Path
 from .workflow import ROOT, _root, _hash, make_store
 from .workflow_store import WorkflowError
 from .video_journal import VideoJournal
-from .video_pipeline import _digest, _Heartbeat, _preflight, paid_stage
+from .video_pipeline import _digest, _bind_strategy, _legacy_text_prompt, _Heartbeat, _preflight, paid_stage
 from .video_services import ProviderClient
 
 
@@ -37,6 +37,7 @@ def validate_config(c):
         if not Decimal(str(c['reserve_cny'])) <= Decimal(str(c['budget']['run_limit'])) <= Decimal(str(c['budget']['research_limit'])) <= 100: raise ValueError()
         if any(not isinstance(c[k], str) or not c[k].strip() for k in ('scheme_id', 'extractor_version')): raise ValueError()
         if not isinstance(c['strategy']['text_system_prompt'], str) or not c['strategy']['text_system_prompt'].strip(): raise ValueError()
+        _legacy_text_prompt(c['strategy'])
         if not isinstance(c['budget']['ledger'], str) or not c['budget']['ledger'].strip(): raise ValueError()
         m = c['models']['models']['text']; p = c['models']['providers'][m['provider']]
         if any(not isinstance(x, str) or not x.strip() for x in (m['model'], p['api_key_env'], p['compatible_base_url'])): raise ValueError()
@@ -83,8 +84,7 @@ def _guarded_run_html(workflow_config, html_config, keys, *, task_id, resume=Fal
     task = _claim(store, task_id, resume)
     token = task['lease_token']; journal = VideoJournal(store)
     try:
-        fingerprint = _digest({k:c[k] for k in ('models','strategy','prices','scheme_id','extractor_version')})
-        journal.bind(task_id, token, fingerprint)
+        fingerprint = _bind_strategy(journal, task_id, token, c, ('models','strategy','prices','scheme_id','extractor_version'))
         with store._tx() as db:
             store._lease(db,task_id,token,time.time())
             db.execute('CREATE TABLE IF NOT EXISTS html_runs (task_id TEXT PRIMARY KEY, base_version_id TEXT)')

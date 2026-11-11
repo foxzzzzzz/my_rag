@@ -22,6 +22,31 @@ def _positive(value):
     return n
 
 
+def _legacy_text_prompt(strategy):
+    if 'legacy_text_prompt' not in strategy:
+        return None
+    legacy = strategy['legacy_text_prompt']
+    if not isinstance(legacy, dict) or not isinstance(legacy.get('value'), str) or not legacy['value'].strip():
+        raise ValueError('invalid legacy prompt')
+    return legacy['value']
+
+
+def _bind_strategy(journal, task_id, token, config, keys):
+    """Keep the prompt of a previously bound task when the full strategy still matches."""
+    strategy = dict(config['strategy'])
+    old_prompt = _legacy_text_prompt(strategy)
+    strategy.pop('legacy_text_prompt', None)
+    config['strategy'] = strategy
+    inputs = {key: config[key] for key in keys}
+    fingerprint = _digest(inputs)
+    old_strategy = {**strategy, 'text_system_prompt': old_prompt} if old_prompt is not None else None
+    old_fingerprint = _digest({**inputs, 'strategy': old_strategy}) if old_strategy is not None else None
+    bound = journal.bind(task_id, token, fingerprint, old_fingerprint)
+    if old_fingerprint is not None and bound == old_fingerprint:
+        config['strategy'] = old_strategy
+    return bound
+
+
 def load_pipeline_config(path=None):
     try:
         with open(path or ROOT / 'config/video-pipeline.json', encoding='utf-8-sig') as f: config = json.load(f)
@@ -40,6 +65,7 @@ def load_pipeline_config(path=None):
             if type(value) is not int or value <= 0: raise ValueError()
         if config['poll_seconds'] > config['poll_timeout']: raise ValueError()
         if config['default_profile'] not in config['strategy']['profiles']: raise ValueError()
+        _legacy_text_prompt(config['strategy'])
         t = config['transport']
         if not isinstance(t['allowed_api_hosts'], list) or not t['allowed_api_hosts'] or any(not isinstance(h, str) or not h for h in t['allowed_api_hosts']): raise ValueError()
         if not isinstance(t['allowed_oss_suffix'], str) or not t['allowed_oss_suffix']: raise ValueError()
@@ -189,7 +215,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     from .video_services import ProviderClient
     from .video_media import prepare_media
     from .workflow import _hash, _root
-    pc = pipeline_config
+    pc = dict(pipeline_config)
     # Validate credentials before taking a lease or spending on any capability.
     if services is None:
         for kind in ('asr', 'vision', 'text'):
@@ -213,8 +239,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     task = journal.resume_claim(task_id, 'video-resume') if resume else journal.claim_task(task_id, 'video-worker')
     token = task['lease_token']
     try:
-        fingerprint = _digest({k: pc[k] for k in ('models', 'strategy', 'storage', 'prices', 'default_profile')})
-        journal.bind(task_id, token, fingerprint)
+        fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
         # Refuse all unqueryable in-flight calls before preparing media or uploads.
         for row in journal.list_stages(task_id):
             if row['status'] == 'in_flight' and (row['name'] != 'asr_submit' or not row['remote_task_id']):

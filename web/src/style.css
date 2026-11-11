@@ -87,9 +87,13 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .source-title-row button[aria-expanded="true"] { color:var(--accent); border-color:var(--accent) }
 .source-management { border-block:1px solid var(--border); padding:0 var(--mobile-pad-x); background:var(--app-bg) }
 .source-management summary { padding-block:var(--radius) }
-.source-summary .document-reader { max-width:var(--summary-measure) }
-.source-summary .document-reader p { margin-block:0 var(--summary-paragraph-gap) }
-.video-evidence { max-inline-size:var(--summary-measure); margin-block-start:var(--content-pad-y); border-top:1px solid var(--border) }
+.source-prose .document-reader { max-width:var(--detail-reading-measure) }
+.source-prose .document-reader :is(p,ul) { margin-block:0 var(--detail-reading-block-gap) }
+.source-prose .document-reader ul { padding-inline-start:var(--detail-list-indent) }
+.source-prose .document-reader li + li { margin-block-start:var(--detail-list-item-gap) }
+.source-prose .document-reader :is(h2,h3,h4,h5,h6) { margin-block:var(--detail-section-gap) var(--detail-reading-block-gap) }
+.source-prose .document-reader > :first-child { margin-block-start:0 }
+.video-evidence { max-inline-size:var(--detail-reading-measure); margin-block-start:var(--content-pad-y); border-top:1px solid var(--border) }
 .video-evidence h2 { font-size:var(--body-size) }
 .video-evidence video { width:100%; max-height:var(--detail-video-max-height); background:var(--text) }
 .source-downloads,.actions,.frame-list { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:12px 0; }

@@ -355,8 +355,9 @@ function App() {
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
               <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
               {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
-              <div className={selectedTab==='summary'?'source-summary':undefined}>
-                <DocumentView value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
+              <div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
+                <DocumentView structureSummary={selectedTab==='summary'&&!preview}
+                  value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               </div>
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}

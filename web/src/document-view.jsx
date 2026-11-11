@@ -1,12 +1,15 @@
 import React from 'react';
-import {parseDocument,safeLink} from './document-layout';
-function Inline({text}) {
-  const parts=String(text).split(/(!?\[[^\]]*\]\([^)]*\))/g);
-  return parts.map((part,i)=>{const m=part.match(/^(!?)\[([^\]]*)\]\(([^)]*)\)$/);
-    if(!m)return <React.Fragment key={i}>{part}</React.Fragment>; const href=safeLink(m[3]); return m[1]||!href?<React.Fragment key={i}>{m[2]}</React.Fragment>:<a key={i} href={href} target="_blank" rel="noopener noreferrer">{m[2]}</a>});
+import {parseDocument,parseInline} from './document-layout';
+function renderInline(tokens) {
+  return tokens.map((token,index)=>{
+    if(token.type==='strong')return <strong key={index}>{renderInline(token.children)}</strong>;
+    if(token.type==='link')return <a key={index} href={token.href} target="_blank" rel="noopener noreferrer">{renderInline(token.children)}</a>;
+    return <React.Fragment key={index}>{token.text}</React.Fragment>;
+  });
 }
-export function DocumentView({value}) {
-  return <div className="document-reader">{parseDocument(value).map((block,i)=>{
+function Inline({text}) {return renderInline(parseInline(text));}
+export function DocumentView({value,structureSummary}) {
+  return <div className="document-reader">{parseDocument(value,{structureSummary}).map((block,i)=>{
     if(block.type==='heading') return React.createElement('h'+Math.max(2,block.level),{key:i},<Inline text={block.text}/>);
     if(block.type==='code') return <pre key={i}>
 <code>{block.text}</code>

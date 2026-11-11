@@ -48,7 +48,12 @@ class PipelineIntegration(unittest.TestCase):
         self.assertNotIn('secret',json.dumps(status)); self.assertNotIn(b'secret', (Path(self.wc['data_dir'])/'workflow.sqlite3').read_bytes())
     def test_query_resume_only_get(self):
         self.s.mode='query'
+        strategy = self.pc['strategy']
+        legacy = strategy['legacy_text_prompt']['value']
+        self.pc['strategy'] = {key: value for key, value in strategy.items() if key != 'legacy_text_prompt'}
+        self.pc['strategy']['text_system_prompt'] = legacy
         with self.assertRaises(WorkflowError): self.run_pipeline()
+        self.pc['strategy'] = strategy
         self.assertEqual(self.status(),'needs_attention'); self.run_pipeline(True); self.assertEqual(self.s.submit_count,1); self.assertEqual(self.s.query_count,2)
         c=sqlite3.connect(self.pc['budget']['ledger']); self.addCleanup(c.close); self.assertEqual(c.execute("SELECT count(*) FROM reservations WHERE request_id=?",(self.task+':asr_submit',)).fetchone()[0],1)
     def test_failed_subtask_cleanup(self):

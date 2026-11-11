@@ -26,12 +26,13 @@ class VideoJournal:
             return self.store._row(c,'tasks',task_id)
     def claim_task(self,task_id,worker_id): return self._claim(task_id,worker_id,'queued')
     def resume_claim(self,task_id,worker_id): return self._claim(task_id,worker_id,'needs_attention')
-    def bind(self,task_id,token,fingerprint):
+    def bind(self,task_id,token,fingerprint,legacy_fingerprint=None):
         with self.store._tx() as c:
             self._lease(c,task_id,token)
             r=c.execute('SELECT fingerprint FROM video_runs WHERE task_id=?',(task_id,)).fetchone()
-            if r and r[0]!=fingerprint: raise WorkflowError('fingerprint_conflict')
+            if r and r[0] not in (fingerprint, legacy_fingerprint): raise WorkflowError('fingerprint_conflict')
             c.execute('INSERT OR IGNORE INTO video_runs VALUES(?,?)',(task_id,fingerprint))
+            return r[0] if r else fingerprint
     def stage(self,task_id,name):
         with self.store._tx() as c:
             r=c.execute('SELECT * FROM video_stages WHERE task_id=? AND name=?',(task_id,name)).fetchone()
