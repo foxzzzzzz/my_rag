@@ -6,6 +6,11 @@
  --radius:5px; --ui-size:14px; --body-size:16px; --heading-size:23px;
  --sidebar-meta-size:13px; /* 侧栏状态和主题标题字号 */
  --connection-online:#285d46; /* 连接正常时的状态点颜色 */
+ --detail-meta-size:13px; /* 详情返回文字字号 */
+ --detail-heading-gap:12px; /* 详情标题与返回、管理入口间距 */
+ --summary-measure:54em; /* 宽屏摘要的最大阅读行宽 */
+ --summary-paragraph-gap:14px; /* 摘要段落之间的间距 */
+ --detail-video-max-height:52dvh; /* 详情视频播放器最大高度 */
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
  --ask-width:850px; --list-side-width:150px;

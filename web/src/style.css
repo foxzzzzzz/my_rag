@@ -78,10 +78,23 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .connection-status[data-connected="true"]::before { color:var(--connection-online); background:currentColor }
 .app-nav .logout-button { width:auto; color:var(--muted); white-space:nowrap }
 .app-nav .logout-button:hover { background:var(--surface); color:var(--accent) }
+.detail-back { border:0; background:transparent; color:var(--accent); padding:6px 0; margin-bottom:var(--detail-heading-gap); font-size:var(--detail-meta-size) }
+.detail-back:hover { text-decoration:underline }
 .source-heading { margin-bottom:18px; min-width:0; overflow-wrap:anywhere; }
-.source-heading h1 { font-size:var(--heading-size); margin:0 0 8px; }
+.source-title-row { display:flex; align-items:start; gap:var(--detail-heading-gap) }
+.source-title-row h1 { flex:1; min-inline-size:0; font-size:var(--heading-size); margin:0 }
+.source-title-row button { flex:none }
+.source-title-row button[aria-expanded="true"] { color:var(--accent); border-color:var(--accent) }
+.source-management { border-block:1px solid var(--border); padding:0 var(--mobile-pad-x); background:var(--app-bg) }
+.source-management summary { padding-block:var(--radius) }
+.source-summary .document-reader { max-width:var(--summary-measure) }
+.source-summary .document-reader p { margin-block:0 var(--summary-paragraph-gap) }
+.video-evidence { max-inline-size:var(--summary-measure); margin-block-start:var(--content-pad-y); border-top:1px solid var(--border) }
+.video-evidence h2 { font-size:var(--body-size) }
+.video-evidence video { width:100%; max-height:var(--detail-video-max-height); background:var(--text) }
 .source-downloads,.actions,.frame-list { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:12px 0; }
 .frame-list button { display:flex; flex-direction:column; align-items:start; gap:4px; }
+.frame-list figure { margin:0 }
 .drop { border:1px dashed var(--border); padding:18px; margin:12px 0; overflow-wrap:anywhere; }
 .edit-field { display:flex; flex-direction:column; align-items:stretch; margin:12px 0; }
 .management label,.management input[type=file] { margin:4px 6px 4px 0; }

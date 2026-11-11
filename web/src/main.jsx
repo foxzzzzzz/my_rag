@@ -32,6 +32,7 @@ function App() {
   const dialogRef=useRef(null), dialogOpener=useRef(null);
   const [drafts, setDrafts] = useState({}), [edits, setEdits] = useState({}), [stale, setStale] = useState(false);
   const [tab, setTab] = useState('summary'), [taskPaid, setTaskPaid] = useState(false), [sourcePaid, setSourcePaid] = useState(false);
+  const [sourceManagementOpen,setSourceManagementOpen]=useState(false);
   const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [htmlMode, setHtmlMode] = useState('preview'), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
   const authEpoch=useRef(0);
@@ -127,6 +128,7 @@ function App() {
       if (sequence!==openSequence.current) return;
       const prior=cache.current[id];
       const conflict=!discard && prior?.current?.id!==value.current?.id && hasWork(draftKey(id,prior?.current?.id));
+      if(page!=='detail'||detailRef.current?.source.id!==id)setSourceManagementOpen(false);
       showDetail(conflict?prior:value);setStale(!!conflict);setTab('summary');setSourcePaid(false);setPage('detail');
     } catch(e) {if(sequence===openSequence.current)setError(e.message);}
     finally {if(sequence===openSequence.current)setBusy(!!writing.current);}
@@ -227,6 +229,10 @@ function App() {
     &&(isVideo(source?.kind)||!['transcript','visual'].includes(name))
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
+  useEffect(()=>{
+    const video=videoRef.current;
+    if(selectedTab!=='visual'&&video&&!video.paused)video.pause();
+  },[selectedTab]);
   const libraryActive=!!session&&page==='library';
   const tasksActive=!!session&&page==='tasks';
   const sidebarTopics=catalog.filter(item=>item.kind==='topic');
@@ -307,44 +313,66 @@ function App() {
           </div>
         </section>}
         {page==='detail'&&detail&&<>
-          <button className="text-button" onClick={()=>navigate('library')}>返回资料库</button>
-          <div className="source-heading"><h1 {...titleProps}>{result.title||source.title||source.original_name}</h1><p className="muted">
-            {isVideo(source.kind)?'视频':'HTML'} · {current?(detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}{detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
-              {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}</p></div>
+          <div className="source-heading">
+            <button className="detail-back" type="button" onClick={()=>navigate('library')}><span aria-hidden="true">← </span>返回资料库</button>
+            <div className="source-title-row">
+              <h1 {...titleProps}>{result.title||source.title||source.original_name}</h1>
+              {current&&<button type="button" aria-expanded={sourceManagementOpen} aria-controls="source-management"
+                onClick={()=>setSourceManagementOpen(open=>!open)}>资料管理</button>}
+            </div>
+            <p className="muted">
+              {isVideo(source.kind)?'视频':'HTML'} · {current?(detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
+              {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
+            </p>
+            {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
+          </div>
           {!current?<section><p>尚未生成可审核内容。</p><button onClick={()=>navigate('tasks')}>到任务页处理</button></section>:<>
             {(stale||source.content_status&&source.content_status!=='synced')&&<p className="error" role="alert">{stale?'版本或连接状态已变化，旧草稿不会提交到新版本。':'长期内容尚未同步或校验失败，不能用于正式知识库。'} <button onClick={reloadDetail}>重新加载详情</button></p>}
             <div className="source-layout"><div className="source-reading">
+              <section id="source-management" key={source.id} className="source-management" aria-label="资料管理" hidden={!sourceManagementOpen}>
+                <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&!isVideo(source.kind)&&<a href={detail.original_url}>下载原HTML</a>}</div>
+                <details><summary>分类</summary><ClassificationEditor key={source.id+'-classification'} source={source} catalog={catalog} api={api} changed={changed} disabled={busy}/></details>
+                <details><summary>Obsidian 导出与更新</summary><ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!edit||hasWork(key)}/></details>
+                <details open={!!edit}><summary>人工修订</summary>{edit?<>
+                  {Object.keys(fields).filter(name=>isVideo(source.kind)||!['transcript','visual'].includes(name)).map(name=><label className="edit-field" key={name}>{fields[name]}<textarea disabled={busy} value={edit[name]} onChange={event=>setEdit({...edit,[name]:event.target.value})}/></label>)}
+                  <button className="primary" disabled={busy||stale} onClick={()=>run(async()=>{
+                    const sequence=openSequence.current,sourceId=source.id;
+                    await api('/sources/'+sourceId+'/revisions',{method:'POST',body:JSON.stringify({expected_version_id:current.id,...edit})});setEdit(null);
+                    const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
+                    if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setStale(false);setTab('summary');}
+                    await refresh();setMessage('已生成新版本，请重新审核。');
+                  })}>保存新版本</button>
+                  <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
+                </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
+                {source.kind==='html'&&<details><summary>重新整理网页</summary><label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次网页模型整理费用</label><p className="muted">保留旧版本与评分，新结果需要重新审核。</p>
+                  <button disabled={busy||!sourcePaid||!session.config.live_html_enabled||stale||['queued','running','needs_attention'].includes(detail.task?.status)} onClick={()=>run(async()=>{await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id})});setSourcePaid(false);await changed();})}>生成新的模型整理版本</button></details>}
+                <details><summary>版本与技术信息</summary><pre>{JSON.stringify({source_id:source.id,version_id:current.id,content_sha256:current.content_sha256,content_status:source.content_status},null,2)}</pre></details>
+                <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。可在回收站保留期限内撤销。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。可在回收站保留期限内撤销。',()=>run(async()=>{
+                  const sequence=openSequence.current,sourceId=source.id;await api('/sources/'+sourceId,{method:'DELETE'});delete cache.current[sourceId];
+                  if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){detailRef.current=null;setDetail(null);navigate('library');}await refresh();
+                }))}>确认删除资料</button></details>
+              </section>
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
               <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
               {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
-              <DocumentView value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
-              {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
+              <div className={selectedTab==='summary'?'source-summary':undefined}>
+                <DocumentView value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
+                {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
+              </div>
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
-              {isVideo(source.kind)&&<details><summary>视频原片与关键帧</summary>{detail.original_url?<video ref={videoRef} controls src={detail.original_url}/>:<p>原片已不可用；长期证据和关键帧仍可查看。</p>}
-                <div className="frame-list">{detail.frames?.map((frame,i)=><button key={i} onClick={()=>{if(videoRef.current)videoRef.current.currentTime=frame.seconds??0;}}><img width={ui.frame_preview_width} alt={'关键帧 '+(i+1)} src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??i))}/><span>{frame.seconds??0} 秒</span></button>)}</div>
-              </details>}
-              <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&!isVideo(source.kind)&&<a href={detail.original_url}>下载原HTML</a>}</div>
-              <details><summary>分类、导出和资料管理</summary><ClassificationEditor key={source.id+'-classification'} source={source} catalog={catalog} api={api} changed={changed} disabled={busy}/>
-                <ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!edit||hasWork(key)}/>
-                {source.kind==='html'&&<section><h2>重新整理网页</h2><label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次网页模型整理费用</label><p className="muted">保留旧版本与评分，新结果需要重新审核。</p>
-                  <button disabled={busy||!sourcePaid||!session.config.live_html_enabled||stale||['queued','running','needs_attention'].includes(detail.task?.status)} onClick={()=>run(async()=>{await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id})});setSourcePaid(false);await changed();})}>生成新的模型整理版本</button></section>}
-                <details><summary>版本与技术信息</summary><pre>{JSON.stringify({source_id:source.id,version_id:current.id,content_sha256:current.content_sha256,content_status:source.content_status},null,2)}</pre></details>
-              </details>
-              <details open={!!edit}><summary>人工修订</summary>{edit?<>
-                {Object.keys(fields).filter(name=>isVideo(source.kind)||!['transcript','visual'].includes(name)).map(name=><label className="edit-field" key={name}>{fields[name]}<textarea disabled={busy} value={edit[name]} onChange={event=>setEdit({...edit,[name]:event.target.value})}/></label>)}
-                <button className="primary" disabled={busy||stale} onClick={()=>run(async()=>{
-                  const sequence=openSequence.current,sourceId=source.id;
-                  await api('/sources/'+sourceId+'/revisions',{method:'POST',body:JSON.stringify({expected_version_id:current.id,...edit})});setEdit(null);
-                  const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
-                  if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setStale(false);setTab('summary');}
-                  await refresh();setMessage('已生成新版本，请重新审核。');
-                })}>保存新版本</button>
-                <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
-              </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
-              <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。可在回收站保留期限内撤销。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。可在回收站保留期限内撤销。',()=>run(async()=>{
-                const sequence=openSequence.current,sourceId=source.id;await api('/sources/'+sourceId,{method:'DELETE'});delete cache.current[sourceId];
-                if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){detailRef.current=null;setDetail(null);navigate('library');}await refresh();
-              }))}>确认删除资料</button></details>
+              {isVideo(source.kind)&&<section className="video-evidence" hidden={selectedTab!=='visual'} aria-label="视频原片与关键帧">
+                <h2>视频原片与关键帧</h2>
+                {detail.original_url?<video ref={videoRef} controls preload={selectedTab==='visual'?'metadata':'none'} src={detail.original_url}
+                  poster={selectedTab==='visual'?detail.frames?.[0]?.url:undefined}/>:<p>原片已不可用。</p>}
+                <div className="frame-list">{detail.frames?.map((frame,index)=>{
+                  const seconds=frame.seconds??0;
+                  const thumbnail=<img width={ui.frame_preview_width} loading="lazy" alt={'关键帧 '+(index+1)}
+                    src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??index))}/>;
+                  return detail.original_url
+                    ? <button key={index} type="button" onClick={()=>{if(videoRef.current)videoRef.current.currentTime=seconds;}}>{thumbnail}<span>{seconds} 秒</span></button>
+                    : <figure key={index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
+                })}</div>
+              </section>}
             </div>
             <aside className="review-panel" aria-label="审核当前版本"><h2>审核</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
               {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
