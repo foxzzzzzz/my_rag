@@ -95,3 +95,16 @@ test('隐藏已归档或结果未知的恢复动作，保留可查询任务的�
   assert.equal(taskControls({...task, resume_blocked_reason:'unknown_submission'}, 'preview').action, undefined);
   assert.equal(taskControls(task, 'preview').action, 'resume');
 });
+
+
+test('上传阶段可恢复且未知提交仍被阻止', async ()=> {
+  const {statusText, taskControls, taskActionLabel, uploadRecoveryText} = await import('./helpers.js');
+  for (const [stage, label] of [['asr_upload_policy','获取上传凭证'],['asr_audio_upload','上传音频'],['asr_upload_prepare','准备音频上传（具体步骤未知）']]) {
+    const task = {status:'needs_attention', stage};
+    assert.equal(statusText(stage), label);
+    assert.equal(taskControls(task, 'preview').action, 'resume');
+    assert.equal(taskActionLabel(task, 'resume'), '重新上传并继续');
+    for (const code of ['network_timeout','network_unconfirmed']) assert.match(uploadRecoveryText(task, code), /可重新上传并继续/);
+    assert.equal(taskControls({...task,resume_blocked_reason:'unknown_submission'}, 'preview').action, undefined);
+  }
+});

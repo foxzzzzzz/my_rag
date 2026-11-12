@@ -1,6 +1,19 @@
 import hashlib, json, secrets, time, math, re
 from contextlib import contextmanager
-from .workflow_store import WorkflowError, _json
+from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError, _json
+
+
+def legacy_upload_interruption(connection, task, stages):
+    # Older workers only emitted this storage error before registering the
+    # temporary asset and calling the transcription provider.
+    return (
+        task['stage'] == 'asr_submit' and task['error_code'] == 'network_unconfirmed'
+        and not task['remote_task_id'] and len(stages) == 1
+        and stages[0]['name'] == 'asr_submit' and stages[0]['status'] == 'in_flight'
+        and not stages[0]['remote_task_id']
+        and not connection.execute('SELECT 1 FROM video_assets WHERE task_id=?', (task['id'],)).fetchone()
+    )
+
 
 class VideoJournal:
     def __init__(self, store):
@@ -50,6 +63,27 @@ class VideoJournal:
             r=c.execute('SELECT input_sha256 FROM video_stages WHERE task_id=? AND name=?',(task_id,name)).fetchone()
             if r and r[0]!=input_sha256: raise WorkflowError('stage_conflict')
             c.execute("INSERT OR IGNORE INTO video_stages(task_id,name,input_sha256,status) VALUES(?,?,?,'prepared')",(task_id,name,input_sha256))
+    def upload_progress(self, task_id, token, name, digest, completed):
+        if name not in ASR_UPLOAD_STAGES:
+            raise WorkflowError('invalid_state')
+        if completed:
+            self.complete(task_id, token, name, {})
+            return
+        self.begin(task_id, token, name, digest)
+        with self.store._tx() as c:
+            self._lease(c, task_id, token)
+            c.execute("UPDATE video_stages SET status='in_flight',result=NULL,result_sha256=NULL WHERE task_id=? AND name=?", (task_id, name))
+            c.execute('UPDATE tasks SET stage=?,error_code=NULL WHERE id=?', (name, task_id))
+
+    def restore_legacy_upload(self, task_id, token):
+        with self.store._tx() as c:
+            task = self.store._lease(c, task_id, token, time.time())
+            stages = c.execute('SELECT name,status,remote_task_id FROM video_stages WHERE task_id=?', (task_id,)).fetchall()
+            if not legacy_upload_interruption(c, task, stages):
+                return False
+            c.execute("UPDATE video_stages SET status='prepared' WHERE task_id=? AND name='asr_submit'", (task_id,))
+            c.execute("UPDATE tasks SET stage='asr_upload_prepare',external_started=0,error_code=NULL WHERE id=?", (task_id,))
+            return True
     def mark_started(self,task_id,token,name):
         with self.store._tx() as c:
             self._lease(c,task_id,token)

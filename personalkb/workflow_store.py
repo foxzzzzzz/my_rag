@@ -13,6 +13,8 @@ def _number(x, lo, hi=None):
     return not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x) and x >= lo and (hi is None or x <= hi)
 
 _UNSET = object()
+ASR_UPLOAD_STAGES = ('asr_upload_policy', 'asr_audio_upload')
+ASR_UPLOAD_TASK_STAGES = (*ASR_UPLOAD_STAGES, 'asr_upload_prepare')
 
 class WorkflowStore:
     def __init__(self, db_path, *, quality_target=98, lease_seconds=300, max_attempts=3, busy_timeout_seconds=5, content_root=None, data_root=None, source_trash_days=7):
@@ -99,7 +101,13 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             self._row(c,'sources',source_id)
             return [self._row(c,'versions',r[0]) for r in c.execute('SELECT id FROM versions WHERE source_id=? ORDER BY rowid',(source_id,))]
     def _recover(self,c,now):
-        c.execute("UPDATE tasks SET status=CASE WHEN external_started=1 THEN 'needs_attention' WHEN attempts>=? THEN 'failed' ELSE 'queued' END, lease_token=NULL, lease_until=NULL, worker_id=NULL WHERE status='running' AND lease_until<=?",(self.max_attempts,now))
+        c.execute("""UPDATE tasks
+            SET status=CASE WHEN external_started=1 OR stage IN (?,?,?) THEN 'needs_attention'
+                            WHEN attempts>=? THEN 'failed' ELSE 'queued' END,
+                error_code=CASE WHEN stage IN (?,?,?) THEN 'upload_interrupted' ELSE error_code END,
+                lease_token=NULL, lease_until=NULL, worker_id=NULL
+            WHERE status='running' AND lease_until<=?""",
+            (*ASR_UPLOAD_TASK_STAGES, self.max_attempts, *ASR_UPLOAD_TASK_STAGES, now))
     def recover_expired(self,now=None):
         with self._tx() as c: self._recover(c,time.time() if now is None else now)
     def claim(self, *args, **kwargs):
@@ -169,7 +177,7 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             t=self._lease(c,task_id,token,now); s=self._row(c,'sources',t['source_id'])
             if expected_version_id is not _UNSET and s['current_version_id'] != expected_version_id: raise WorkflowError('version_conflict')
             v=self._version(c,s['id'],result,s['current_version_id'],False)
-            c.execute("UPDATE tasks SET status='succeeded',lease_token=NULL,lease_until=NULL WHERE id=?",(task_id,)); return v
+            c.execute("UPDATE tasks SET status='succeeded',lease_token=NULL,lease_until=NULL,error_code=NULL WHERE id=?",(task_id,)); return v
     def fail(self,task_id,token,code,*,needs_attention=False,now=None):
         now=time.time() if now is None else now
         if not isinstance(code,str) or not code.strip(): raise WorkflowError('invalid_error')

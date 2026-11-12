@@ -4,7 +4,8 @@ import threading
 import time
 import uuid
 
-from .workflow_store import WorkflowError
+from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
+from .video_journal import legacy_upload_interruption
 
 
 def task_stages(connection, task_id):
@@ -13,9 +14,11 @@ def task_stages(connection, task_id):
     return connection.execute('SELECT name,status,remote_task_id FROM video_stages WHERE task_id=?', (task_id,)).fetchall()
 
 
-def has_unknown_submission(task, stages):
+def has_unknown_submission(task, stages, *, legacy_upload=False):
+    if legacy_upload:
+        return False
     return task['error_code'] == 'unknown_submission' or any(
-        stage['status'] == 'in_flight' and stage['name'] != 'asr_result'
+        stage['status'] == 'in_flight' and stage['name'] not in (*ASR_UPLOAD_STAGES, 'asr_result')
         and not (stage['name'] == 'asr_submit' and stage['remote_task_id'])
         for stage in stages
     )
@@ -53,7 +56,7 @@ class WebDispatcher:
             source = self.store._row(c, 'sources', task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
             if task_is_archived(c, task_id): raise WorkflowError('task_archived')
-            if source['kind'] == 'video':
+            if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
             elif source['kind']=='html' and processing_mode=='model':
@@ -66,8 +69,10 @@ class WebDispatcher:
                 return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
             expected = 'needs_attention' if mode == 'resume' else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
-            if mode == 'resume' and has_unknown_submission(task, task_stages(c, task_id)):
-                raise WorkflowError('unknown_submission')
+            if mode == 'resume':
+                stages = task_stages(c, task_id)
+                if has_unknown_submission(task, stages, legacy_upload=legacy_upload_interruption(c, task, stages)):
+                    raise WorkflowError('unknown_submission')
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,claimed,owner,error_code) VALUES(?,?,'pending',?,NULL,NULL,NULL) ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL", (task_id, mode, time.time()))
             c.execute('UPDATE web_dispatch SET processing_mode=? WHERE task_id=?',(processing_mode,task_id))
             return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
@@ -134,7 +139,7 @@ class WebDispatcher:
             source = self.store._row(c,'sources',task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
             if task_is_archived(c, task_id): raise WorkflowError('task_archived')
-            if source['kind']=='video':
+            if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
             if task['status'] not in ('failed','cancelled') or task['external_started'] or task['attempts']>=self.store.max_attempts:
@@ -192,7 +197,7 @@ class WebDispatcher:
                     from .workflow import run_once
                     result = run_once(self.service.wc, worker_id='web-html', task_id=tid)
                     if not result or 'error' in result: raise WorkflowError(result.get('error','invalid_state') if result else 'invalid_state')
-            elif source['kind'] == 'video':
+            elif source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 runner = self.service.video_runner
                 if runner is None:

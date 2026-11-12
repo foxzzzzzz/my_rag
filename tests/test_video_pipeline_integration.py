@@ -1,9 +1,13 @@
 import hashlib, json, sqlite3, tempfile, time, unittest
+from contextlib import closing
 from pathlib import Path
-from personalkb.asr_storage import PreparedAudio
+from personalkb.asr_storage import PreparedAudio, StorageError
+from personalkb.asr_storage_temporary import TemporaryStorage
 from personalkb.workflow import make_store
 from personalkb.workflow_store import WorkflowError
-from personalkb.video_pipeline import load_pipeline_config, run_video, cleanup_video, video_status
+from personalkb.video_journal import VideoJournal
+from personalkb.video_pipeline import _bind_strategy, _digest, load_pipeline_config, run_video, cleanup_video, video_status
+from tools.api_smoke import reserve
 
 class FakeStorage:
     def prepare(self,path,model):
@@ -70,6 +74,60 @@ class PipelineIntegration(unittest.TestCase):
         with self.assertRaises(WorkflowError): self.run_pipeline()
         with self.assertRaises(WorkflowError): self.run_pipeline(True)
         self.assertEqual(self.s.submit_count,1)
+
+    def test_upload_failure_can_resume_without_duplicate_asr(self):
+        class UploadTransport:
+            def __init__(self): self.fail = 'policy'
+
+            def request(self, url, *, key=None, data=None, content_type=None):
+                if self.fail == ('policy' if key else 'audio'):
+                    raise StorageError('network_timeout')
+                if key:
+                    return 200, {'data': dict(upload_dir='dir', upload_host='https://upload.oss-cn-beijing.aliyuncs.com',
+                        oss_access_key_id='id', signature='sig', policy='policy', x_oss_object_acl='private',
+                        x_oss_forbid_overwrite='true')}
+                return 200, {}
+
+        transport = UploadTransport()
+        self.storage = TemporaryStorage(self.pc['storage'], {'DASHSCOPE_API_KEY': 'secret'}, transport)
+        store = make_store(self.wc)
+        journal = VideoJournal(store)
+        for failure, phase, resume in (('policy', 'asr_upload_policy', False), ('audio', 'asr_audio_upload', True)):
+            transport.fail = failure
+            with self.assertRaisesRegex(WorkflowError, 'network_timeout'):
+                self.run_pipeline(resume)
+            task = store.get_task(self.task)
+            self.assertEqual((task['status'], task['stage'], task['external_started']), ('needs_attention', phase, 0))
+            self.assertEqual(journal.stage(self.task, phase)['status'], 'in_flight')
+            self.assertEqual(journal.stage(self.task, 'asr_submit')['status'], 'prepared')
+            self.assertEqual(self.s.submit_count, 0)
+        with closing(sqlite3.connect(self.pc['budget']['ledger'])) as ledger:
+            self.assertEqual(ledger.execute('SELECT count(*) FROM reservations').fetchone()[0], 0)
+        transport.fail = None
+        self.run_pipeline(True)
+        self.assertIsNone(store.get_task(self.task)['error_code'])
+        self.assertEqual(self.s.submit_count, 1)
+        self.assertEqual(journal.stage(self.task, 'asr_audio_upload')['status'], 'completed')
+
+    def test_legacy_upload_failure_keeps_reservation_and_resumes_with_new_timeouts(self):
+        store = make_store(self.wc)
+        journal = VideoJournal(store)
+        task = journal.claim_task(self.task, 'legacy-worker')
+        token = task['lease_token']
+        old_pc = {**self.pc, 'storage': {key: value for key, value in self.pc['storage'].items()
+                                         if not key.startswith(('policy_timeout', 'upload_timeout'))}}
+        _bind_strategy(journal, self.task, token, old_pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
+        digest = _digest({'audio': hashlib.sha256(b'audio').hexdigest(), 'model': self.pc['models']['models']['asr']})
+        journal.begin(self.task, token, 'asr_submit', digest)
+        journal.mark_started(self.task, token, 'asr_submit')
+        request_id = self.task + ':asr_submit'
+        reserve(self.pc['budget']['ledger'], self.task, request_id, '0.10', '5', '100')
+        store.fail(self.task, token, 'network_unconfirmed')
+        self.run_pipeline(True)
+        self.assertEqual(self.s.submit_count, 1)
+        self.assertEqual(self.status(), 'succeeded')
+        with closing(sqlite3.connect(self.pc['budget']['ledger'])) as ledger:
+            self.assertEqual(ledger.execute('SELECT amount FROM reservations WHERE request_id=?', (request_id,)).fetchall(), [('0.10',)])
     def test_unknown_vision_never_repeats(self):
         self.s.mode='vision'
         with self.assertRaises(WorkflowError): self.run_pipeline()

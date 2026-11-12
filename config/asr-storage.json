@@ -14,6 +14,10 @@
   "backend": "temporary",
   "max_upload_bytes": 67108864,
   "request_timeout_seconds": 60,
+  "policy_timeout_seconds": 30,
+  "policy_timeout_seconds说明": "获取临时上传凭证的网络操作超时，单位秒。旧配置沿用 request_timeout_seconds",
+  "upload_timeout_seconds": 300,
+  "upload_timeout_seconds说明": "临时音频上传的网络操作超时，单位秒。旧配置沿用 request_timeout_seconds",
   "temporary": {
     "api_base_url": "https://dashscope.aliyuncs.com/api/v1",
     "api_key_env": "DASHSCOPE_API_KEY",

@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {errorText, formatDate, progressText, statusText, taskControls} from './helpers';
+import {errorText, formatDate, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
 
 const emptyFilters={query:'',status:'',kind:''};
 const statusOptions={
@@ -38,7 +38,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   const progress=progressText(task.progress,task.status);
   const stage=task.stage?statusText(task.stage):'';
   const problem=task.resume_blocked_reason||task.error_code||task.dispatch?.error_code;
-  const reason=problem&&(failureReasons[problem]||errorText(400,problem));
+  const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const summary=problem?(reason.startsWith('操作失败：')?'查看详情了解原因':reason):'';
   const detailId='task-detail-'+task.id;
   return <article className="task-grid task-item">
@@ -58,7 +58,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
     </div>
     <div className="task-actions">
       {action&&(action==='cancel'||item&&!item.deleted)&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
-        onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{actionNames[action]}</button>}
+        onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{taskActionLabel(task,action)||actionNames[action]}</button>}
       {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id)}>查看资料</button>}
       {(task.archived||task.can_archive)&&<button type="button" disabled={busy}
         onClick={()=>onAction(task.id,task.archived?'unarchive':'archive',{})}>{task.archived?'取消归档':'归档'}</button>}

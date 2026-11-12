@@ -27,6 +27,28 @@ class JournalTests(unittest.TestCase):
         self.store.fail(self.task,self.token,'fail')
         with self.j.cleanup_claim(self.task): self.assertEqual(self.j.assets(self.task),[])
 
+    def test_upload_and_resumed_upload_stay_recoverable_after_expired_lease(self):
+        token = self.token
+        for phase in ('asr_upload_policy', 'asr_audio_upload'):
+            self.j.upload_progress(self.task, token, phase, 'b' * 64, False)
+            self.store.recover_expired(now=self.store.get_task(self.task)['lease_until'] + 1)
+            task = self.store.get_task(self.task)
+            self.assertEqual((task['status'], task['error_code'], task['external_started']),
+                             ('needs_attention', 'upload_interrupted', 0))
+            token = self.j.resume_claim(self.task, 'worker-resume')['lease_token']
+
+    def test_legacy_upload_normalization_is_recoverable_before_new_upload(self):
+        self.j.begin(self.task, self.token, 'asr_submit', 'b' * 64)
+        self.j.mark_started(self.task, self.token, 'asr_submit')
+        self.store.fail(self.task, self.token, 'network_unconfirmed')
+        resumed = self.j.resume_claim(self.task, 'worker-resume')
+        self.assertTrue(self.j.restore_legacy_upload(self.task, resumed['lease_token']))
+        self.assertEqual(self.store.get_task(self.task)['external_started'], 0)
+        self.store.recover_expired(now=resumed['lease_until'] + 1)
+        task = self.store.get_task(self.task)
+        self.assertEqual((task['status'], task['stage'], task['error_code']),
+                         ('needs_attention', 'asr_upload_prepare', 'upload_interrupted'))
+
     def test_corrupt_completed_result_rejected(self):
         self.j.begin(self.task,self.token,'asr','b'*64); self.j.mark_started(self.task,self.token,'asr'); self.j.complete(self.task,self.token,'asr',{'text':'ok'})
         with self.store._tx() as c: c.execute("UPDATE video_stages SET result='{}'")

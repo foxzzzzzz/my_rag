@@ -1,7 +1,7 @@
 import hashlib, json, time, uuid
 from pathlib import Path
 from .workflow import make_store, run_once, _root, _hash, render_markdown
-from .workflow_store import WorkflowError
+from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 
 
 def _display_title(title, original_name, platform_title):
@@ -126,6 +126,7 @@ class WebService:
         return self._douyin
     def _task(self, t):
         from .web_dispatch import has_unknown_submission, task_can_archive, task_is_archived, task_stages
+        from .video_journal import legacy_upload_interruption
         d = {k:t[k] for k in ('id','source_id','status','stage','error_code','attempts','created_at','updated_at')}
         d['progress'] = dict(completed_stages=None,total_stages=None,completed_frames=None,total_frames=None)
         with self.store._tx() as c:
@@ -135,7 +136,11 @@ class WebService:
             d['can_archive'] = not d['archived'] and task_can_archive(t['status'], dispatch['state'] if dispatch else None)
             rows = task_stages(c, t['id'])
             if t['status']=='needs_attention':
-                d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows) else None
+                legacy_upload = legacy_upload_interruption(c, t, rows)
+                if legacy_upload:
+                    d['stage'] = 'asr_upload_prepare'
+                d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows, legacy_upload=legacy_upload) else None
+            upload_stages = sum(row['name'] in ASR_UPLOAD_STAGES for row in rows)
             if rows:
                 if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
                 d['progress']['completed_stages']=sum(r['status']=='completed' for r in rows)
@@ -145,7 +150,7 @@ class WebService:
         try:
             if manifest.is_file():
                 d['progress']['total_frames']=len(json.loads(manifest.read_text(encoding='utf8'))['frames'])
-                d['progress']['total_stages']=d['progress']['total_frames']+3
+                d['progress']['total_stages']=d['progress']['total_frames']+3+upload_stages
         except (OSError,ValueError,KeyError,TypeError): pass
         return d
     def tasks(self):

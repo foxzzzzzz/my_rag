@@ -187,6 +187,29 @@ class WebApiTests(unittest.TestCase):
         assert self.client.post(path+'resume', json={'allow_paid':True}, headers=self.h).status_code == 200
         assert self.client.post(path+'archive', json={}, headers=self.h).status_code == 409
 
+    def test_legacy_upload_error_has_resume_action_but_unknown_asr_does_not(self):
+        from personalkb.video_journal import VideoJournal
+
+        store = self.service.store
+        VideoJournal(store)
+        for digest, kind, error, stage, blocked in (
+            ('a' * 64, 'mp4', 'network_unconfirmed', 'asr_upload_prepare', None),
+            ('b' * 64, 'video', 'video_processing_failed', 'asr_submit', 'unknown_submission'),
+        ):
+            task_id = store.import_source(kind, digest, 'clip.mp4', 'originals/' + digest)['task']['id']
+            with store._tx() as db:
+                db.execute("UPDATE tasks SET status='needs_attention',stage='asr_submit',error_code=?,external_started=1 WHERE id=?", (error, task_id))
+                db.execute("INSERT INTO video_stages(task_id,name,status) VALUES(?,'asr_submit','in_flight')", (task_id,))
+            visible = next(item for item in self.client.get('/api/tasks').json()['items'] if item['id'] == task_id)
+            assert visible['stage'] == stage
+            assert visible['error_code'] == error
+            assert visible['resume_blocked_reason'] == blocked
+            response = self.client.post(f'/api/tasks/{task_id}/resume', json={'allow_paid': True}, headers=self.h)
+            if blocked:
+                assert response.json()['error'] == blocked
+            else:
+                assert response.status_code == 200
+
     def test_finished_tasks_can_archive_without_changing_task_or_source(self):
         sid, version = self.make_version()
         store = self.service.store

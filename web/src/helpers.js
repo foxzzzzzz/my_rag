@@ -11,7 +11,7 @@ export function errorText(status, code) {
 export function textValue(v) { return typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v,null,2); }
 export function uploadError(file, config) { let html=/\.html?$/i.test(file.name); if(!html&&!/\.mp4$/i.test(file.name)) return '仅支持 HTML 和 MP4 文件'; if(file.size>config.max_upload_bytes || (html&&file.size>config.max_html_bytes)) return '文件超过大小限制'; return ''; }
 export function progressText(p, status) { const terminal={succeeded:'处理完成',completed:'处理完成',failed:'处理失败',cancelled:'已取消',needs_attention:'等待确认'}; if(terminal[status]&&(!p||(p.completed_frames==null&&p.completed_stages==null)))return terminal[status]; if(status==='queued' && (!p || (p.completed_frames==null && p.completed_stages==null))) return '待开始'; if(!p)return '等待进度'; let a=[]; if(p.completed_frames!=null)a.push(`帧 ${p.completed_frames}${p.total_frames==null?'':` / ${p.total_frames}`}`); if(p.completed_stages!=null)a.push(`阶段 ${p.completed_stages}${p.total_stages==null?'':` / ${p.total_stages}`}`); return a.join(' · ')||'处理中'; }
-export function statusText(s) { if (/^vision-\d+$/.test(s || '')) return `视觉分析 · 帧 ${s.slice(7)}`; return ({succeeded:'已完成',preparing_video:'准备视频',extracting_html:'提取网页',asr_submit:'提交转录',asr_result:'获取转录结果',text:'生成文本','html-text':'整理网页文本',verifying_source:'校验来源',loading_provider_result:'读取处理结果',queued:'排队中',pending:'待处理',running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消',needs_attention:'需要关注',approve:'批准',reject:'拒绝',rework:'返工',extract:'提取',extracting:'提取中',transcribe:'转录',visual:'视觉分析',summarize:'生成摘要'})[s]||s||'等待处理'; }
+export function statusText(s) { if (/^vision-\d+$/.test(s || '')) return `视觉分析 · 帧 ${s.slice(7)}`; return ({succeeded:'已完成',preparing_video:'准备视频',extracting_html:'提取网页',asr_upload_policy:'获取上传凭证',asr_audio_upload:'上传音频',asr_upload_prepare:'准备音频上传（具体步骤未知）',asr_submit:'提交转录',asr_result:'获取转录结果',text:'生成文本','html-text':'整理网页文本',verifying_source:'校验来源',loading_provider_result:'读取处理结果',queued:'排队中',pending:'待处理',running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消',needs_attention:'需要关注',approve:'批准',reject:'拒绝',rework:'返工',extract:'提取',extracting:'提取中',transcribe:'转录',visual:'视觉分析',summarize:'生成摘要'})[s]||s||'等待处理'; }
 
 export function formatDate(value, timeZone) { if (!value) return ''; const date = new Date(value); if (Number.isNaN(date.getTime())) return value; try { return new Intl.DateTimeFormat('zh-CN', {timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(date); } catch { return value; } }
 
@@ -64,4 +64,22 @@ export function taskControls(task, selectedMode) {
     ? selectedMode : task.dispatch?.processing_mode || selectedMode;
   const action = queuedForProcessing ? 'cancel' : actions[task.status];
   return {mode, action: task.archived || (action === 'resume' && task.resume_blocked_reason) ? undefined : action, queuedForProcessing};
+}
+
+export function uploadRecoveryText(task, problem) {
+  if (!['asr_upload_policy', 'asr_audio_upload', 'asr_upload_prepare'].includes(task.stage) || task.resume_blocked_reason) return null;
+  const failure = ({
+    network_timeout: '网络请求超时',
+    network_unconfirmed: '网络结果未确认',
+    upload_interrupted: '后台任务中断',
+    http_error: '服务端返回 HTTP 错误',
+    invalid_policy: '上传凭证格式无效',
+    upload_failed: '服务端未确认上传成功',
+  })[problem] || '处理失败';
+  const continuation = task.status === 'needs_attention' && !task.archived ? '，可重新上传并继续' : '';
+  return `${statusText(task.stage)}：${failure}${continuation}。`;
+}
+export function taskActionLabel(task, action) {
+  if (action === 'resume' && ['asr_upload_policy', 'asr_audio_upload', 'asr_upload_prepare'].includes(task.stage)) return '重新上传并继续';
+  return null;
 }

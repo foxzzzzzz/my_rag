@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from urllib.error import URLError
 from unittest.mock import patch
 from pathlib import Path
 from personalkb.asr_storage import create_storage, StorageError, PreparedAudio
@@ -59,6 +60,21 @@ class Tests(unittest.TestCase):
 
     def test_redirects_disabled(self):
         self.assertIsNone(NoRedirect().redirect_request(None, None, 302, '', {}, 'https://evil.example'))
+
+    def test_temporary_timeouts_and_legacy_fallback(self):
+        legacy = {key: value for key, value in C.items() if not key.startswith(('policy_timeout', 'upload_timeout'))}
+        address = [(2, 1, 6, '', ('8.8.8.8', 443))]
+        with patch('personalkb.asr_storage_temporary.socket.getaddrinfo', return_value=address), patch('personalkb.asr_storage_temporary.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = URLError(TimeoutError())
+            for config, expected in ((C, (30, 300)), (legacy, (60, 60))):
+                transport = HTTPTransport(config)
+                for url, kwargs, timeout in (
+                    ('https://dashscope.aliyuncs.com/api/v1/uploads', {'key': 'secret'}, expected[0]),
+                    ('https://upload.oss-cn-beijing.aliyuncs.com', {'data': b'audio'}, expected[1]),
+                ):
+                    with self.assertRaisesRegex(StorageError, 'network_timeout'):
+                        transport.request(url, **kwargs)
+                    self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'], timeout)
 
     def test_malformed_secrets(self):
         for secrets in (None, [], {'DASHSCOPE_API_KEY':123}):

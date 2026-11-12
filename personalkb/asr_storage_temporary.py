@@ -14,6 +14,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class HTTPTransport:
     def __init__(self, config):
         self.config = config
+        self.policy_timeout = positive(config.get('policy_timeout_seconds', config['request_timeout_seconds']))
+        self.upload_timeout = positive(config.get('upload_timeout_seconds', config['request_timeout_seconds']))
 
     def request(self, url, key=None, payload=None, data=None, content_type=None):
         cfg = self.config['temporary']
@@ -37,7 +39,8 @@ class HTTPTransport:
                 headers['Content-Type'] = 'application/json'
             if content_type: headers['Content-Type'] = content_type
             req = urllib.request.Request(url, data=data, headers=headers)
-            with urllib.request.build_opener(NoRedirect()).open(req, timeout=self.config['request_timeout_seconds']) as response:
+            timeout = self.policy_timeout if key is not None else self.upload_timeout
+            with urllib.request.build_opener(NoRedirect()).open(req, timeout=timeout) as response:
                 limit = int(self.config['response_max_bytes'])
                 raw = response.read(limit + 1)
                 if len(raw) > limit: raise StorageError('response_too_large')
@@ -46,7 +49,9 @@ class HTTPTransport:
         except urllib.error.HTTPError as e:
             e.close()
             raise StorageError('http_error') from None
-        except (OSError, TimeoutError): raise StorageError('network_unconfirmed') from None
+        except (OSError, TimeoutError) as exc:
+            cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            raise StorageError('network_timeout' if isinstance(cause, TimeoutError) else 'network_unconfirmed') from None
         except (ValueError, TypeError, UnicodeError): raise StorageError('response_format') from None
 
 class TemporaryStorage:
@@ -69,18 +74,23 @@ class TemporaryStorage:
         except (KeyError, TypeError, ValueError): raise StorageError('invalid_config') from None
         self.transport = transport or HTTPTransport(config)
 
-    def prepare(self, path, model):
+    def prepare(self, path, model, *, on_stage=None):
         path, digest, size = check_file(path, self.config)
         if not isinstance(model, str) or not model.strip(): raise StorageError('invalid_model')
         asset = str(uuid.uuid4())
         name = asset + '.wav'
         try:
             url = self.settings['api_base_url'].rstrip('/') + '/uploads?' + urllib.parse.urlencode({'action':'getPolicy', 'model':model})
+            if on_stage:
+                on_stage('asr_upload_policy', False)
             status, result = self.transport.request(url, key=self.key)
             if not 200 <= status < 300: raise StorageError('policy_failed')
             policy = result['data']
             required = ('upload_dir','upload_host','oss_access_key_id','signature','policy','x_oss_object_acl','x_oss_forbid_overwrite')
             if not isinstance(policy, dict) or any(not isinstance(policy.get(k), str) or not policy[k].strip() for k in required): raise StorageError('invalid_policy')
+            if on_stage:
+                on_stage('asr_upload_policy', True)
+                on_stage('asr_audio_upload', False)
             object_key = policy['upload_dir'].rstrip('/') + '/' + name
             boundary = 'upload' + uuid.uuid4().hex
             pairs = {'OSSAccessKeyId':policy['oss_access_key_id'], 'Signature':policy['signature'], 'policy':policy['policy'], 'x-oss-object-acl':policy['x_oss_object_acl'], 'x-oss-forbid-overwrite':policy['x_oss_forbid_overwrite'], 'key':object_key, 'success_action_status':'200'}
@@ -89,6 +99,8 @@ class TemporaryStorage:
             parts.append(('--'+boundary+'--\r\n').encode())
             status, _ = self.transport.request(policy['upload_host'], data=b''.join(parts), content_type='multipart/form-data; boundary='+boundary)
             if not 200 <= status < 300: raise StorageError('upload_failed')
+            if on_stage:
+                on_stage('asr_audio_upload', True)
             return PreparedAudio('temporary', model, asset, digest, size, time.time()+self.settings['lifetime_seconds'], 'oss://'+object_key, object_key)
         except StorageError: raise
         except (KeyError, TypeError, ValueError, OSError): raise StorageError('storage_failed') from None

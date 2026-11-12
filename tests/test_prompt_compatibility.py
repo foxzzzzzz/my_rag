@@ -18,6 +18,11 @@ def test_prompt_fingerprint_compatibility(loader, keys):
     old = copy.deepcopy(config)
     old['strategy'].pop('legacy_text_prompt')
     old['strategy']['text_system_prompt'] = original['text_system_prompt']
+    if 'storage' in keys:
+        # The saved pre-upgrade fingerprint predates the split upload timeouts.
+        for key in ('policy_timeout_seconds', 'policy_timeout_seconds说明',
+                    'upload_timeout_seconds', 'upload_timeout_seconds说明'):
+            old['storage'].pop(key)
     old_fingerprint = _digest({k: old[k] for k in keys})
     resumed = copy.deepcopy(config)
     assert _bind_strategy(Journal(old_fingerprint), 't', 'token', resumed, keys) == old_fingerprint

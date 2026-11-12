@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from contextlib import closing
 from .workflow import ROOT, make_store
-from .workflow_store import WorkflowError
+from .workflow_store import ASR_UPLOAD_STAGES, ASR_UPLOAD_TASK_STAGES, WorkflowError
 from .video_journal import VideoJournal
 from tools.api_smoke import reserve
 from .asr_storage import PreparedAudio, StorageError, create_storage
@@ -38,6 +38,11 @@ def _bind_strategy(journal, task_id, token, config, keys):
     strategy.pop('legacy_text_prompt', None)
     config['strategy'] = strategy
     inputs = {key: config[key] for key in keys}
+    if 'storage' in inputs:
+        # These transport limits do not change the submitted audio or results.
+        timeout_options = {'policy_timeout_seconds', 'policy_timeout_seconds说明',
+                           'upload_timeout_seconds', 'upload_timeout_seconds说明'}
+        inputs['storage'] = {key: value for key, value in inputs['storage'].items() if key not in timeout_options}
     fingerprint = _digest(inputs)
     old_strategy = {**strategy, 'text_system_prompt': old_prompt} if old_prompt is not None else None
     old_fingerprint = _digest({**inputs, 'strategy': old_strategy}) if old_strategy is not None else None
@@ -238,11 +243,13 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     if task_id is None: raise WorkflowError('task_id_required')
     task = journal.resume_claim(task_id, 'video-resume') if resume else journal.claim_task(task_id, 'video-worker')
     token = task['lease_token']
+    preparing_upload = False
     try:
         fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
+        legacy_upload = resume and journal.restore_legacy_upload(task_id, token)
         # Refuse all unqueryable in-flight calls before preparing media or uploads.
         for row in journal.list_stages(task_id):
-            if row['status'] == 'in_flight' and (row['name'] != 'asr_submit' or not row['remote_task_id']):
+            if row['status'] == 'in_flight' and row['name'] not in ASR_UPLOAD_STAGES and (row['name'] != 'asr_submit' or not row['remote_task_id']):
                 if row['name'] != 'asr_result': raise WorkflowError('unknown_submission')
         source = store.get_source(task['source_id'])
         root = _root(workflow_config).resolve()
@@ -254,7 +261,9 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         work.mkdir(parents=True, exist_ok=True)
         provider = services or ProviderClient(pc['models'], pc, secrets)
         with _Heartbeat(store, task_id, token, pc['heartbeat_seconds']) as beat:
-            store.checkpoint(task_id, token, 'preparing_video')
+            # Preserve the durable upload phase until a resumed upload starts.
+            if not legacy_upload and not (resume and task['stage'] in ASR_UPLOAD_TASK_STAGES):
+                store.checkpoint(task_id, token, 'preparing_video')
             material = (media or prepare_media)(blob, work, workflow_config, pc, heartbeat=beat.check)
             audio = Path(material['audio_path'])
             if not audio.resolve().is_relative_to(work) or not audio.is_file(): raise WorkflowError('invalid_audio_path')
@@ -278,16 +287,34 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                 journal.complete(task_id, token, 'asr_submit', {'remote_task_id':remote_id,
                     'audio_seconds':audio_seconds, 'reserved_upper_cny':str(asr_amount),
                     'request_id':task_id + ':asr_submit'})
+            elif row['status'] == 'completed':
+                remote_id = row['result']['remote_task_id']
             else:
-                def submit():
-                    adapter = storage or _scope_storage(journal, task_id, token, pc['storage'], secrets)
-                    asset = adapter.prepare(audio, pc['models']['models']['asr']['model'])
-                    if asset.backend == 'temporary':
-                        journal.register_asset(task_id, token, dict(asset_id=asset.asset_id, backend='temporary',
-                            object_key='', source_sha256=audio_hash, size_bytes=asset.size_bytes, model=asset.model,
-                            expires_at=asset.expires_at, scope={}))
+                from .asr_storage_temporary import TemporaryStorage
+
+                def upload_progress(stage, completed):
                     beat.check()
-                    if asset.is_expired(): raise WorkflowError('audio_url_expired')
+                    journal.upload_progress(task_id, token, stage, voice_digest, completed)
+
+                preparing_upload = True
+                adapter = storage or _scope_storage(journal, task_id, token, pc['storage'], secrets)
+                model = pc['models']['models']['asr']['model']
+                if isinstance(adapter, TemporaryStorage):
+                    asset = adapter.prepare(audio, model, on_stage=upload_progress)
+                else:
+                    upload_progress('asr_audio_upload', False)
+                    asset = adapter.prepare(audio, model)
+                    upload_progress('asr_audio_upload', True)
+                if asset.backend == 'temporary':
+                    journal.register_asset(task_id, token, dict(asset_id=asset.asset_id, backend='temporary',
+                        object_key='', source_sha256=audio_hash, size_bytes=asset.size_bytes, model=asset.model,
+                        expires_at=asset.expires_at, scope={}))
+                beat.check()
+                if asset.is_expired():
+                    raise WorkflowError('audio_url_expired')
+                preparing_upload = False
+
+                def submit():
                     remote = provider.submit_asr(asset)
                     journal.save_remote(task_id, token, 'asr_submit', remote)
                     return {'remote_task_id': remote, 'audio_seconds': audio_seconds}
@@ -352,7 +379,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         version = store.finish(task_id, token, result)
     except Exception as exc:
         code = exc.code if isinstance(exc, (WorkflowError, StorageError)) else 'video_processing_failed'
-        try: store.fail(task_id, token, code)
+        try: store.fail(task_id, token, code, needs_attention=preparing_upload)
         except WorkflowError: pass
         raise WorkflowError(code) from None
     # Cleanup failure must never erase or roll back a completed knowledge draft.
