@@ -36,6 +36,7 @@ CREATE TRIGGER IF NOT EXISTS content_version_insert AFTER INSERT ON versions BEG
 CREATE TRIGGER IF NOT EXISTS content_review_insert AFTER INSERT ON reviews BEGIN INSERT INTO content_sync(source_id,generation) VALUES(NEW.source_id,1) ON CONFLICT(source_id) DO UPDATE SET generation=generation+1; END;
 CREATE TABLE IF NOT EXISTS video_maintenance (id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS source_trash (source_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, purge_started INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, title TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
             c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager

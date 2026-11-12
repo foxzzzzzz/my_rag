@@ -14,6 +14,7 @@
  --detail-list-item-gap:6px; /* 摘要和笔记相邻列表项的间距 */
  --detail-section-gap:24px; /* 摘要和笔记小标题上方的间距 */
  --detail-video-max-height:52dvh; /* 详情视频播放器最大高度 */
+ --detail-frame-max-height:84px; /* 横向关键帧缩略图最大高度 */
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
  --ask-width:850px; --list-side-width:150px;

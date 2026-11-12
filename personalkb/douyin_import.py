@@ -45,6 +45,19 @@ class DouyinImporter:
             return self._safe(c.execute('SELECT * FROM douyin_jobs WHERE id=?',(id,)).fetchone())
     def jobs(self):
         with self.store._tx() as c: return [self._safe(x) for x in c.execute('SELECT * FROM douyin_jobs ORDER BY created_at DESC')]
+    def backfill_title(self, source_id, work_id, title):
+        if not isinstance(work_id,str) or not re.fullmatch(r'[0-9]+',work_id) or not isinstance(title,str):
+            raise WorkflowError('invalid_request')
+        title=' '.join(title.split()).strip()
+        if not title:
+            raise WorkflowError('invalid_request')
+        with self.store._tx() as c:
+            source=self.store._row(c,'sources',source_id)
+            cached=c.execute('SELECT source_id,source_sha256 FROM douyin_cache WHERE work_id=?',(work_id,)).fetchone()
+            if source['deleted'] or not cached or cached['source_id']!=source_id or cached['source_sha256']!=source['sha256']:
+                raise WorkflowError('invalid_source')
+            c.execute('INSERT OR IGNORE INTO source_display_titles(source_id,title) VALUES(?,?)',(source_id,title))
+            return c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(source_id,)).fetchone()[0]
     def retry(self,id):
         self._ready()
         with self.store._tx() as c:
@@ -100,7 +113,7 @@ class DouyinImporter:
                     if not self._heartbeat(id,token): lost.set(); return
                 except Exception: lost.set(); return
         thread=threading.Thread(target=beat,daemon=True); thread.start()
-        folder=None; target=None; source_id=None; work=None; error=None
+        folder=None; target=None; source_id=None; work=None; error=None; platform_title=None
         def fence(c):
             now=time.time()
             row=c.execute("SELECT 1 FROM douyin_jobs j JOIN douyin_lock l ON l.job_id=j.id AND l.token=j.token WHERE j.id=? AND j.token=? AND j.status='running' AND j.lease_until>? AND l.id=1",(id,token,now)).fetchone()
@@ -116,6 +129,8 @@ class DouyinImporter:
             if not source_id:
                 check()
                 data=self.resolver(work,self.keys[self.cfg['cookie_env']],self.cfg)
+                if isinstance(data.get('title'),str):
+                    platform_title=' '.join(data['title'].split()).strip()
                 check()
                 base=ROOT/'tmp'/'douyin'
                 if any(x.is_symlink() or (hasattr(x,'is_junction') and x.is_junction()) for x in (base,*base.parents)): raise WorkflowError('douyin_import_failed')
@@ -150,6 +165,8 @@ class DouyinImporter:
             if source_id and not error:
                 s=self.store._row(c,'sources',source_id)
                 c.execute('INSERT OR REPLACE INTO douyin_cache VALUES(?,?,?)',(work,source_id,s['sha256']))
+                if platform_title:
+                    c.execute('INSERT OR IGNORE INTO source_display_titles(source_id,title) VALUES(?,?)',(source_id,platform_title))
             c.execute('UPDATE douyin_jobs SET status=?,error_code=?,work_id=?,source_id=?,token=NULL,lease_until=NULL,updated_at=? WHERE id=?',('failed' if error else 'succeeded',error,work,source_id,now,id))
             c.execute('DELETE FROM douyin_lock WHERE id=1'); c.execute('DELETE FROM video_maintenance WHERE id=1')
             return self._safe(c.execute('SELECT * FROM douyin_jobs WHERE id=?',(id,)).fetchone())

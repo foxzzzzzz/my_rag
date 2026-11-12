@@ -131,12 +131,15 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .source-prose .document-reader li + li { margin-block-start:var(--detail-list-item-gap) }
 .source-prose .document-reader :is(h2,h3,h4,h5,h6) { margin-block:var(--detail-section-gap) var(--detail-reading-block-gap) }
 .source-prose .document-reader > :first-child { margin-block-start:0 }
-.video-evidence { max-inline-size:var(--detail-reading-measure); margin-block-start:var(--content-pad-y); border-top:1px solid var(--border) }
-.video-evidence h2 { font-size:var(--body-size) }
-.video-evidence video { width:100%; max-height:var(--detail-video-max-height); background:var(--text) }
-.source-downloads,.actions,.frame-list { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:12px 0; }
+.video-evidence { max-inline-size:var(--detail-reading-measure); margin-block:16px 20px }
+.video-evidence h2,.visual-text-heading { font-size:var(--body-size) }
+.video-evidence video { display:block; width:100%; max-height:var(--detail-video-max-height); background:var(--text) }
+.source-downloads,.actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:12px 0; }
+.frame-list { display:flex; gap:10px; overflow-x:auto; padding:4px 4px 8px; overscroll-behavior-inline:contain }
+.frame-list :is(button,figure) { flex:none }
 .frame-list button { display:flex; flex-direction:column; align-items:start; gap:4px; }
 .frame-list figure { margin:0 }
+.frame-list img { display:block; max-block-size:var(--detail-frame-max-height); object-fit:contain; background:var(--app-bg) }
 .drop { border:1px dashed var(--border); padding:18px; margin:12px 0; overflow-wrap:anywhere; }
 .edit-field { display:flex; flex-direction:column; align-items:stretch; margin:12px 0; }
 .management label,.management input[type=file] { margin:4px 6px 4px 0; }

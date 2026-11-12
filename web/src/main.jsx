@@ -291,7 +291,7 @@ function App() {
           <div className="source-heading">
             <button className="detail-back" type="button" onClick={()=>navigate('library')}><span aria-hidden="true">← </span>返回资料库</button>
             <div className="source-title-row">
-              <h1 {...titleProps}>{result.title||source.title||source.original_name}</h1>
+              <h1 {...titleProps}>{source.title||result.title||source.original_name}</h1>
               {current&&<button type="button" aria-expanded={sourceManagementOpen} aria-controls="source-management"
                 onClick={()=>setSourceManagementOpen(open=>!open)}>资料管理</button>}
             </div>
@@ -330,25 +330,27 @@ function App() {
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
               <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
               {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
+              {isVideo(source.kind)&&<section className="video-evidence" hidden={selectedTab!=='visual'} aria-label="视频原片与关键帧">
+                <h2>视频原片</h2>
+                {detail.original_url?<video ref={videoRef} controls preload={selectedTab==='visual'?'metadata':'none'} src={detail.original_url}
+                  poster={selectedTab==='visual'?detail.frames?.[0]?.url:undefined}/>:<p className="muted">{detail.media?.status==='removed'?'原片已超过保留期并清理。':'原片已不可用。'}</p>}
+                <h2>关键帧</h2>
+                {detail.frames?.length?<div className="frame-list" role="region" aria-label="关键帧列表" tabIndex={0}>{detail.frames.map((frame,index)=>{
+                  const seconds=frame.seconds??0;
+                  const thumbnail=<img width={ui.frame_preview_width} loading="lazy" alt={'关键帧 '+(index+1)}
+                    src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??index))}/>;
+                  return detail.original_url
+                    ? <button key={frame.index??index} type="button" onClick={()=>{if(videoRef.current)videoRef.current.currentTime=seconds;}}>{thumbnail}<span>{seconds} 秒</span></button>
+                    : <figure key={frame.index??index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
+                })}</div>:<p className="muted">暂无可查看的关键帧。</p>}
+              </section>}
+              {selectedTab==='visual'&&<h2 className="visual-text-heading">画面识别文字</h2>}
               <div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
                 <DocumentView structureSummary={selectedTab==='summary'&&!preview}
                   value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               </div>
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
-              {isVideo(source.kind)&&<section className="video-evidence" hidden={selectedTab!=='visual'} aria-label="视频原片与关键帧">
-                <h2>视频原片与关键帧</h2>
-                {detail.original_url?<video ref={videoRef} controls preload={selectedTab==='visual'?'metadata':'none'} src={detail.original_url}
-                  poster={selectedTab==='visual'?detail.frames?.[0]?.url:undefined}/>:<p>原片已不可用。</p>}
-                <div className="frame-list">{detail.frames?.map((frame,index)=>{
-                  const seconds=frame.seconds??0;
-                  const thumbnail=<img width={ui.frame_preview_width} loading="lazy" alt={'关键帧 '+(index+1)}
-                    src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??index))}/>;
-                  return detail.original_url
-                    ? <button key={index} type="button" onClick={()=>{if(videoRef.current)videoRef.current.currentTime=seconds;}}>{thumbnail}<span>{seconds} 秒</span></button>
-                    : <figure key={index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
-                })}</div>
-              </section>}
             </div>
             <aside className="review-panel" aria-label="审核当前版本"><h2>审核</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
               {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}

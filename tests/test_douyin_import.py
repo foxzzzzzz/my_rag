@@ -24,6 +24,19 @@ class DouyinImportTests(unittest.TestCase):
             self.assertNotIn('secret',str(job)); self.assertNotIn('canonical_url',str(self.worker.jobs()))
         self.assertEqual(self.calls,['resolve','download'])
         with self.worker.store._tx() as c: self.assertIsNone(c.execute('SELECT * FROM video_maintenance').fetchone())
+    def test_platform_title_is_stored_separately(self):
+        source=self.worker.store.import_source('video','d'*64,'v.mp4','originals/'+('d'*64))['source']
+        self.worker.resolver=lambda *args: {'title':'作品标题\n第二行','media_url':'https://secret.example/media'}
+        with patch('personalkb.douyin_import.workflow.import_file',return_value={'source':source}):
+            self.worker.enqueue('https://www.douyin.com/video/123',True)
+            self.assertEqual(self.worker.process_next()['status'],'succeeded')
+        with self.worker.store._tx() as c:
+            title=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(source['id'],)).fetchone()
+            self.assertEqual(title['title'],'作品标题 第二行')
+            self.assertEqual(c.execute('SELECT original_name FROM sources WHERE id=?',(source['id'],)).fetchone()[0],'douyin-123.mp4')
+        self.assertEqual(self.worker.backfill_title(source['id'],'123','新标题'),'作品标题 第二行')
+        with self.assertRaises(WorkflowError):
+            self.worker.backfill_title(source['id'],'456','错误作品')
     def test_failure_retry_and_global_lock(self):
         job=self.worker.enqueue('https://www.douyin.com/video/123',True)
         with self.worker.store._tx() as c: c.execute('INSERT INTO video_maintenance VALUES(1)')

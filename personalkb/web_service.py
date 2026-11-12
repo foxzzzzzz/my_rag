@@ -3,6 +3,12 @@ from pathlib import Path
 from .workflow import make_store, run_once, _root, _hash, render_markdown
 from .workflow_store import WorkflowError
 
+
+def _display_title(title, original_name, platform_title):
+    if title and title != original_name:
+        return title
+    return platform_title or title or ''
+
 class WebService:
     def __init__(self, workflow_config, pipeline_config, web_config, *, video_runner=None, suggestion_provider_factory=None, rag_provider_factory=None):
         self.wc, self.pc, self.webcfg = workflow_config, pipeline_config, web_config
@@ -145,12 +151,13 @@ class WebService:
     def tasks(self):
         with self.store._tx() as c:
             rows = c.execute("""SELECT s.id,s.kind,s.original_name,s.deleted,
-                json_extract(v.result, '$.title') AS title
-                FROM sources s LEFT JOIN versions v ON v.id=s.current_version_id""").fetchall()
+                json_extract(v.result, '$.title') AS title, d.title AS platform_title
+                FROM sources s LEFT JOIN versions v ON v.id=s.current_version_id
+                LEFT JOIN source_display_titles d ON d.source_id=s.id""").fetchall()
             sources = {
                 row['id']: {
                     'id': row['id'], 'kind': row['kind'], 'original_name': row['original_name'],
-                    'title': row['title'] or '', 'deleted': bool(row['deleted']),
+                    'title': _display_title(row['title'], row['original_name'], row['platform_title']), 'deleted': bool(row['deleted']),
                 } for row in rows
             }
         items = []
@@ -180,6 +187,8 @@ class WebService:
                 metadata=classifications.snapshot(s['id'],connection=c)
                 review=c.execute('SELECT decision,seq FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(s['current_version_id'],)).fetchone()
                 title=self.store._row(c,'versions',s['current_version_id'])['result'].get('title','') if s['current_version_id'] else ''
+                platform=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(s['id'],)).fetchone()
+                title=_display_title(title,s['original_name'],platform['title'] if platform else None)
             status=review[0] if review else 'pending'
             d.update(title=title,status=tasks.get(s['id'],{}).get('status'),eligible=s['id'] in eligible,content_status=self.store.content_status(s['id']),classification=metadata,review_status=status,review_revision=review['seq'] if review else None)
             if filters.get('kind') and s['kind']!=filters['kind']: continue

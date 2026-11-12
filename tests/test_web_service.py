@@ -38,6 +38,31 @@ class WebServiceTests(unittest.TestCase):
     def test_review_revoke(self):
         v=self.finish(); p=dict(version_id=v['id'],content_sha256=v['content_sha256'],score=99,decision='approve',reviewer='A',review_id='1')
         self.assertTrue(self.s.review(self.sid,p)['eligible']); p.update(decision='reject',review_id='2'); self.assertFalse(self.s.review(self.sid,p)['eligible']); self.assertEqual(self.s.detail(self.sid)['review']['decision'],'reject')
+    def test_douyin_title_consistent_in_library_detail_and_tasks(self):
+        template = self.finish()['result']
+        store = self.s.store
+        filename = 'douyin-123.mp4'
+        entry = store.import_source('video', 'd'*64, filename, 'originals/test.mp4')
+        source_id = entry['source']['id']
+        task = store.claim_specific(entry['task']['id'], 'test')
+        version = store.finish(task['id'], task['lease_token'], {
+            **template, 'title': filename, 'transcript': '语音示例', 'visual': '画面示例',
+        })
+
+        def titles():
+            return [
+                next(item['title'] for item in self.s.sources()['items'] if item['id']==source_id),
+                self.s.detail(source_id)['source']['title'],
+                next(item['source']['title'] for item in self.s.tasks()['items'] if item['id']==task['id']),
+            ]
+
+        self.assertEqual(titles(), [filename]*3)
+        with store._tx() as c:
+            c.execute('INSERT INTO source_display_titles VALUES (?,?)', (source_id,'平台标题'))
+        self.assertEqual(titles(), ['平台标题']*3)
+        self.assertEqual(self.s.detail(source_id)['current']['result']['title'], filename)
+        self.s.revise(source_id, {'expected_version_id':version['id'], 'title':'人工标题'})
+        self.assertEqual(titles(), ['人工标题']*3)
     def test_approval_queues_index_and_worker_makes_evidence_retrievable(self):
         from personalkb.rag_index import RagIndex, load_rag_config
 
