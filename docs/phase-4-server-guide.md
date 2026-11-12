@@ -80,6 +80,20 @@ sh deploy/operate.sh start
 
 需要处理时手动启用web.json的`live_video_enabled`/`live_html_enabled`、douyin.json的`enabled`，重启自有服务；导入后仍需显式启动并同意费用。ASR默认沿用本人C02确认的临时上传，正式音频OSS只在本人另外切换时启用，不与备份OSS混用。
 
+### 抖音收藏只读验证
+
+服务器从 Git 同步发布提交并按现有流程验证手动链接导入后，从检出根目录运行以下命令。浏览器依赖安装在宿主机专用 Python 环境，Web 和 worker 继续使用原有镜像。以有权读取 `$SECRET_FILE` 的服务运维用户执行，系统包安装可能需要 sudo。 [Playwright 浏览器安装文档](https://playwright.dev/python/docs/browsers)
+
+```bash
+python3 -m venv ../douyin-favorites-venv
+../douyin-favorites-venv/bin/python -m pip install -r config/douyin-favorites-requirements.txt
+../douyin-favorites-venv/bin/python -m playwright install --with-deps --no-shell chromium
+../douyin-favorites-venv/bin/python -m tools.douyin_favorites \
+  --env-file "$SECRET_FILE" --douyin-config "$CONFIG_DIR/douyin.json" --limit 10
+```
+
+验收时核对 `status=ok`、收藏请求的 HTTP 状态以及前 10 条视频的作品 ID 和顺序。可用 `--limit 3` 读取后续下载验收的候选视频。遇到 403、登录要求或翻页中断时保留状态码并暂停这一批。读取命令只输出 JSON，无需打开下载开关。
+
 问答页展开索引诊断，确认合格资料3份，勾选本次费用同意后重建索引。索引绑定绝对路径，因此迁移后不能把旧214块ready当成仍可直接使用；新索引块数由实际配置/版本决定。预算账本已迁移，重建和测试用量继续计入原累计额度。本机未替本人调用模型或重建。
 
 随后各验证1份有权处理的视频与HTML导入→启动→复核，以及问答引用/无依据拒答。云端模型、真实下载、中断恢复和网站/小程序正常情况记录后回传；不要把离线测试当成这些步骤已经完成。

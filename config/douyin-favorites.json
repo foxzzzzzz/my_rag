@@ -1,0 +1,18 @@
+{
+  "_说明": {
+    "limit": "默认返回的视频条数",
+    "max_pages": "单次读取的收藏页数上限",
+    "browser_channel": "Playwright 浏览器通道。chromium 使用 Playwright 安装的 Chromium，Windows 可通过命令选用 msedge",
+    "initial_timeout_ms": "浏览器启动、导航和首页收藏响应各自的超时，单位毫秒",
+    "page_timeout_ms": "触发网页翻页后等待收藏响应的超时，单位毫秒",
+    "viewport": "后台浏览器窗口宽高，滚动时使用窗口内坐标",
+    "scroll_pixels": "每次向下滚动的像素数"
+  },
+  "limit": 10,
+  "max_pages": 5,
+  "browser_channel": "chromium",
+  "initial_timeout_ms": 22000,
+  "page_timeout_ms": 7500,
+  "viewport": {"width": 1440, "height": 1400},
+  "scroll_pixels": 1700
+}
