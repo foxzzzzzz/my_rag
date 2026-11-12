@@ -165,21 +165,28 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
       </div>
     </div>
     {!visible.length&&<p>没有匹配的资料，请清空筛选或导入资料。</p>}
+    {!!visible.length&&<div className="library-list-columns library-column-head" aria-hidden="true">
+      <span/><span>资料名称</span><span>主题 / 标签</span><span>审核状态</span><span>导入时间</span>
+    </div>}
     {visible.map(source=>{
-      const topicNames=source.classification?.topics?.map(item=>item.name)||[];
-      const tagNames=source.classification?.tags?.map(item=>item.name)||[];
-      return <div className="source-row" key={source.id}>
+      const topicNames=source.classification?.topics?.map(item=>item.name).join('、')||'未分类';
+      const tagNames=source.classification?.tags?.map(item=>item.name).join('、');
+      const date=source.created_at||source.updated_at;
+      return <div className="source-row library-list-columns library-source-row" key={source.id}>
         <input aria-label={'选择 '+source.original_name} type="checkbox" disabled={working}
           checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
-        <button className="source" onClick={()=>open(source.id)}>
-          <strong>{source.title||source.original_name}</strong>
-          <small>{[...(isUnclassifiedSource(source)?['未分类']:topicNames),...tagNames].join('、')}</small>
+        <div className="library-identity">
+          <button type="button" className="source" onClick={()=>open(source.id)}><strong>{source.title||source.original_name}</strong></button>
           <small>{['video','mp4'].includes(source.kind)?'视频':'网页'}</small>
-        </button>
-        <div className="source-side">
-          <span>{({approve:'已批准',rework:'返工',reject:'拒绝',pending:'待审核'})[source.review_status]||'待审核'}</span>
-          <span className="source-date">{(source.updated_at||source.created_at)?formatDate(source.updated_at||source.created_at,displayTimezone):''}</span>
         </div>
+        <div className="library-taxonomy">
+          <span>{topicNames}</span>
+          {tagNames&&<small>标签 · {tagNames}</small>}
+        </div>
+        <div className="library-review" data-review={source.review_status}>
+          {({approve:'已批准',rework:'返工',reject:'拒绝',pending:'待审核'})[source.review_status]||'待审核'}
+        </div>
+        {date&&<time className="source-date" dateTime={date}>{formatDate(date,displayTimezone)}</time>}
       </div>;
     })}
     </div>

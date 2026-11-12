@@ -17,9 +17,10 @@
  --detail-frame-max-height:84px; /* 横向关键帧缩略图最大高度 */
  --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
  --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
- --ask-width:850px; --list-side-width:150px;
+ --ask-width:850px;
  --rag-scope-list-limit:min(16rem, 38dvh); /* 问答范围选择中的列表滚动高度上限 */
  --library-actions-height:36px; /* 资料列表选择栏最小高度 */
+ --library-grid-columns:1.5rem minmax(0,2.1fr) minmax(0,1.35fr) minmax(5rem,.65fr) minmax(9rem,.8fr); /* 宽屏资料列表列宽 */
  --status-dot-size:7px; /* 侧栏连接状态指示点尺寸 */
  --mobile-library-nav-limit:40dvh; /* 手机列表页导航高度上限 */
  --library-tag-filter-limit:18dvh; /* 展开标签筛选时的选项区高度上限 */
