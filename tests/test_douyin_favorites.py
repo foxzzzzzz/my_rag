@@ -33,6 +33,42 @@ def test_empty_collection_is_distinct_from_a_business_error():
         favorites.collection_items({'status_code': 403, 'aweme_list': [], 'has_more': 0})
 
 
+def test_collection_author_is_not_the_account_identity():
+    videos = {}
+    favorites.append_videos([{'aweme_id': '1', 'video': {}, 'author': {'sec_uid': 'author-id'}}], videos)
+    assert 'account_id' not in videos['1']
+
+
+def test_authenticated_account_requires_login_and_stable_user_id():
+    from urllib.parse import quote
+    user = {'app': {'user': {'isLogin': True, 'info': {'secUid': 'MS4wLj'+'a'*20, 'nickname': 'A'}}}}
+    assert favorites.authenticated_account(quote(json.dumps(user))) == {'account_id': 'MS4wLj'+'a'*20, 'account_label': 'A'}
+    user['app']['user']['isLogin'] = False
+    assert favorites.authenticated_account(json.dumps(user)) is None
+    user['app']['user']['isLogin'] = True
+    user['app']['user']['info']['secUid'] = 'self'
+    assert favorites.authenticated_account(json.dumps(user)) is None
+    assert favorites.authenticated_account('invalid') is None
+
+
+def test_pagination_scrolls_until_response_arrives():
+    responses = []
+    class Mouse:
+        def move(self, x, y): pass
+        def wheel(self, x, y): pass
+    class Page:
+        mouse = Mouse()
+        count = 0
+        def wait_for_timeout(self, timeout):
+            self.count += 1
+            if self.count == 3:
+                responses.append(object())
+    page = Page()
+    settings = {'viewport': {'width': 1440, 'height': 1400}, 'scroll_pixels': 1700, 'page_timeout_ms': 7500}
+    assert favorites.scroll_for_collection(page, responses, 0, settings)
+    assert page.count == 3
+
+
 def test_cli_missing_cookie_does_not_start_browser(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv('PERSONALKB_DOUYIN_COOKIE', raising=False)
     assert favorites.main(['--env-file', str(tmp_path / 'missing.env')]) == 1

@@ -182,6 +182,22 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     def tasks(): return service.tasks()
     @app.get('/api/douyin/status')
     def douyin_status(): return service.douyin.status()
+    @app.get('/api/douyin/favorites/sync')
+    def favorites_sync():
+        sync = service.favorites_sync
+        return sync.status(service.favorites_cookie()) if sync else {'enabled': False, 'items': []}
+    @app.post('/api/douyin/favorites/{action}')
+    async def favorites_action(action:str, req:Request):
+        payload = await read_object(req)
+        sync = service.favorites_sync
+        if not sync: raise WorkflowError('favorites_disabled')
+        if action == 'scan': return sync.request_scan()
+        cookie = service.favorites_cookie()
+        if action == 'confirm': return sync.confirm(payload.get('account_id'), cookie)
+        if action == 'import':
+            return sync.select(payload.get('account_id'), payload.get('work_ids'), cookie,
+                               rights_confirmed=payload.get('rights_confirmed'))
+        raise WorkflowError('favorites_action_not_found')
     @app.get('/api/douyin/jobs')
     def douyin_jobs(): return {'items':service.douyin.jobs()}
     @app.post('/api/douyin/import')

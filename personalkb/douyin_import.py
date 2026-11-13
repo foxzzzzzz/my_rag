@@ -97,12 +97,17 @@ class DouyinImporter:
         from .execution_guard import execution_guard
         with execution_guard(self.store):
             return self._guarded_process_next(*args, **kwargs)
-    def _guarded_process_next(self):
+    def _guarded_process_next(self, *, job_id=None):
         self._ready(); now=time.time(); token=secrets.token_urlsafe(32)
         with self.store._tx() as c:
             self._expire(c,now)
             if c.execute('SELECT 1 FROM video_maintenance').fetchone() or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone(): return None
-            job=c.execute("SELECT * FROM douyin_jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+            favorites = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='favorites_queue'").fetchone()
+            if job_id is not None:
+                job=c.execute("SELECT * FROM douyin_jobs WHERE status='queued' AND id=?", (job_id,)).fetchone()
+            else:
+                exclude = ' AND NOT EXISTS (SELECT 1 FROM favorites_queue WHERE job_id=douyin_jobs.id)' if favorites else ''
+                job=c.execute("SELECT * FROM douyin_jobs WHERE status='queued'"+exclude+" ORDER BY created_at LIMIT 1").fetchone()
             if not job: return None
             id=job['id']; c.execute('INSERT INTO video_maintenance VALUES(1)'); c.execute('INSERT INTO douyin_lock VALUES(1,?,?)',(id,token))
             c.execute("UPDATE douyin_jobs SET status='running',token=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE id=?",(token,now+self.lease,now,id))

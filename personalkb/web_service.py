@@ -169,6 +169,47 @@ class WebService:
             self._douyin=DouyinImporter(self.wc,cfg,{cfg['cookie_env']:keys.get(cfg['cookie_env'],'')})
             self._douyin_stamp=stamp
         return self._douyin
+    @property
+    def favorites_sync(self):
+        from .douyin_daily_sync import FavoritesSync, load_config
+        from .workflow import ROOT
+
+        path = ROOT / self.webcfg.get('favorites_sync_config', 'config/douyin-daily-sync.json')
+        stamp = path.stat().st_mtime_ns if path.is_file() else None
+        if not hasattr(self, '_favorites_sync') or self._favorites_stamp != stamp:
+            config = load_config(path) if stamp is not None else {'enabled': False}
+            self._favorites_sync = FavoritesSync(self.store, config) if config['enabled'] else None
+            self._favorites_stamp = stamp
+        return self._favorites_sync
+
+    def favorites_cookie(self):
+        import os
+        from .workflow import ROOT
+        from tools.demo_setup import dotenv
+
+        downloader = self.douyin
+        key = downloader.cfg['cookie_env']
+        if downloader.cfg['enabled']:
+            return downloader.keys.get(key, '')
+        path = ROOT / self.webcfg.get('env_file', '.env')
+        return os.environ[key] if key in os.environ else (dotenv(path).get(key, '') if path.exists() else '')
+
+    def _process_favorites(self):
+        from .workflow import ROOT
+
+        sync = self.favorites_sync
+        if not sync:
+            return None
+        from tools.douyin_favorites import browser_cookies, read_favorites
+
+        def read(cookie, limit, anchors, account):
+            path = ROOT / sync.config['browser_settings']
+            settings = json.loads(path.read_text(encoding='utf-8-sig'))
+            settings['max_pages'] = sync.config['max_pages']
+            return read_favorites(browser_cookies(cookie), settings, limit,
+                                  settings['browser_channel'], require_account=True, stop_ids=anchors, stop_account=account)
+        return sync.tick(self.favorites_cookie(), read, self.douyin, self.dispatcher,
+                         stop_requested=self.stop_requested)
     def _task(self, t):
         from .web_dispatch import has_unknown_submission, task_can_archive, task_is_archived, task_stages
         from .video_journal import legacy_upload_interruption
@@ -376,6 +417,12 @@ class WebService:
         index_update = self.rag_auto_index.process_next(stop_requested=self.stop_requested)
         if index_update is not None or self.stop_requested():
             return index_update
-        return self.dispatcher.process_next()
+        try:
+            favorites = self._process_favorites()
+        except WorkflowError as exc:
+            if exc.code not in ('worker_busy', 'invalid_favorites_config', 'invalid_douyin_config'):
+                raise
+            favorites = None
+        return favorites if favorites is not None else self.dispatcher.process_next()
     def start(self): return self.dispatcher.start()
     def stop(self): return self.dispatcher.stop()

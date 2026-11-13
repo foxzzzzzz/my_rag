@@ -209,6 +209,22 @@ def _preflight(journal, tid, pc, amounts):
         raise WorkflowError('budget_invalid_or_exceeded')
 
 
+def _favorites_budget_preflight(store, task_id, amounts):
+    """Enforce the durable per-video ceiling reserved by automatic dispatch."""
+    with closing(sqlite3.connect(store.db_path)) as db:
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='favorites_conversion'").fetchone()
+        row = db.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (task_id,)).fetchone() if exists else None
+    if row is None:
+        return
+    try:
+        ceiling = Decimal(row[0])
+        required = sum(amounts.values(), Decimal(0))
+        if not ceiling.is_finite() or ceiling <= 0 or not required.is_finite() or required > ceiling:
+            raise WorkflowError('favorites_budget_exceeded')
+    except (InvalidOperation, TypeError, ValueError):
+        raise WorkflowError('favorites_budget_exceeded') from None
+
+
 def run_video(*args, **kwargs):
     from .execution_guard import execution_guard
     with execution_guard(make_store(args[0] if args else kwargs["workflow_config"])):
@@ -282,6 +298,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             asr_amount = max(Decimal(str(pc['strategy']['reserve_cny']['asr'])), Decimal(str(audio_seconds)) * asr_price)
             amounts = {'asr_submit':asr_amount, 'text':Decimal(str(pc['strategy']['reserve_cny']['text']))}
             amounts.update({'vision-' + str(f['index']):Decimal(str(pc['strategy']['reserve_cny']['vision'])) for f in frames})
+            _favorites_budget_preflight(store, task_id, amounts)
             _preflight(journal, task_id, pc, amounts)
             voice_digest = _digest({'audio': audio_hash, 'model': pc['models']['models']['asr']})
             journal.begin(task_id, token, 'asr_submit', voice_digest)

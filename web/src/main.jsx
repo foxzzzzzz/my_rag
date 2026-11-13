@@ -4,6 +4,7 @@ import {RagPanel} from './rag';
 import {hasOlderSourceReviews} from './rag-state';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
 import {ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
+import {FavoritesPanel} from './favorites-panel';
 import {CatalogManager} from './catalog-manager';
 import {LibraryView} from './library-view';
 import {TaskList} from './task-list';
@@ -294,6 +295,7 @@ function App() {
           <div className="actions"><button className="primary" disabled={busy||!rights||!files.length} onClick={()=>run(upload)}>上传文件</button><button onClick={()=>navigate('tasks')}>查看任务</button></div>
           <div role="status">{uploads.map((value,i)=><p key={i}>{value}</p>)}</div>
           <details><summary>抖音分享链接</summary><DouyinPanel api={api} opened={open} pollInterval={session.config.poll_interval_ms} disabled={busy}/></details>
+          <FavoritesPanel api={api} pollInterval={session.config.poll_interval_ms} disabled={busy}/>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></>}
         <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy}

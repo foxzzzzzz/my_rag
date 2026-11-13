@@ -92,6 +92,12 @@ class WebDispatcher:
             return {'task_id': task_id, 'archived': archived}
 
     def _claim(self):
+        sync = cookie = None
+        try:
+            sync = self.service.favorites_sync
+            cookie = self.service.favorites_cookie() if sync else None
+        except (AttributeError, WorkflowError):
+            pass
         with self.store._tx() as c:
             now = time.time()
             self.store._recover(c, now)
@@ -101,7 +107,13 @@ class WebDispatcher:
             c.execute("UPDATE web_dispatch SET state='error' WHERE state='working' AND task_id IN (SELECT id FROM tasks WHERE status IN ('failed','needs_attention','cancelled'))")
             if c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone():
                 return None
-            row = c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested LIMIT 1").fetchone()
+            has_favorites = c.execute("SELECT 1 FROM sqlite_master WHERE name='favorites_conversion' AND type='table'").fetchone()
+            row = None
+            for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
+                reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
+                if not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                    row = pending
+                    break
             if not row: return None
             job = dict(row)
             token = uuid.uuid4().hex

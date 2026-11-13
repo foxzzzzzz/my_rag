@@ -4,8 +4,9 @@ import argparse
 import json
 import os
 import re
+import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from personalkb.douyin import load_douyin_config
 from personalkb.workflow_store import WorkflowError
@@ -15,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = 'https://www.douyin.com'
 FAVORITES = ORIGIN + '/user/self?from_tab_name=main&showTab=favorite_collection'
 COLLECTION_PATH = '/aweme/v1/web/aweme/listcollection'
+
+
+def authenticated_account(raw):
+    try:
+        user = json.loads(unquote(raw))['app']['user']
+        info = user['info']
+        account_id = info['secUid']
+        if user['isLogin'] is not True or not isinstance(account_id, str) or not re.fullmatch(r'MS4wLj[A-Za-z0-9_-]{10,200}', account_id):
+            return None
+        nickname = info.get('nickname')
+        return {'account_id': account_id, 'account_label': nickname.strip() if isinstance(nickname, str) and nickname.strip() else account_id}
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def browser_cookies(header):
@@ -64,7 +78,17 @@ def append_videos(items, videos):
         }
 
 
-def read_favorites(cookies, settings, limit, browser_channel):
+def scroll_for_collection(page, responses, index, settings):
+    deadline = time.monotonic() + settings['page_timeout_ms'] / 1000
+    viewport = settings['viewport']
+    page.mouse.move(viewport['width'] * 0.7, viewport['height'] * 0.8)
+    while index >= len(responses) and time.monotonic() < deadline:
+        page.mouse.wheel(0, settings['scroll_pixels'])
+        page.wait_for_timeout(min(250, max(1, (deadline - time.monotonic()) * 1000)))
+    return index < len(responses)
+
+
+def read_favorites(cookies, settings, limit, browser_channel, *, require_account=False, stop_ids=(), stop_account=None):
     try:
         from playwright.sync_api import Error, TimeoutError, sync_playwright
     except ImportError:
@@ -73,9 +97,15 @@ def read_favorites(cookies, settings, limit, browser_channel):
     responses = []
     statuses = []
     videos = {}
+    account = None
+    stop_ids = frozenset(stop_ids)
 
     def result(status):
-        return {'status': status, 'http_statuses': statuses, 'videos': list(videos.values())[:limit]}
+        value = {'status': status, 'http_statuses': statuses, 'videos': list(videos.values())[:limit]}
+        if require_account:
+            value.update(account or {'account_id':None, 'account_label':None})
+            value['exhausted'] = exhausted
+        return value
 
     def record(response):
         if is_collection(response):
@@ -83,6 +113,7 @@ def read_favorites(cookies, settings, limit, browser_channel):
 
     timeout = settings['initial_timeout_ms']
     viewport = settings['viewport']
+    exhausted = False
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=browser_channel, headless=True, timeout=timeout)
@@ -98,13 +129,16 @@ def read_favorites(cookies, settings, limit, browser_channel):
                     login_visible = page.get_by_text('登录', exact=True).filter(visible=True).count() > 0
                     return result('login_required' if login_visible else 'collection_timeout')
 
+                if require_account:
+                    raw = page.locator('#RENDER_DATA').text_content(timeout=timeout)
+                    account = authenticated_account(raw)
+                    if not account:
+                        return result('account_unverified')
+                use_boundary = account is not None and account['account_id'] == stop_account
+
                 for index in range(settings['max_pages']):
                     if index >= len(responses):
-                        try:
-                            with page.expect_response(is_collection, timeout=settings['page_timeout_ms']):
-                                page.mouse.move(viewport['width'] * 0.7, viewport['height'] * 0.8)
-                                page.mouse.wheel(0, settings['scroll_pixels'])
-                        except TimeoutError:
+                        if not scroll_for_collection(page, responses, index, settings):
                             return result('pagination_incomplete')
 
                     response = responses[index]
@@ -113,7 +147,8 @@ def read_favorites(cookies, settings, limit, browser_channel):
                         return result('collection_http_error')
                     items, has_more = collection_items(response.json())
                     append_videos(items, videos)
-                    if len(videos) >= limit or not has_more:
+                    exhausted = not has_more and len(videos) <= limit
+                    if len(videos) >= limit or not has_more or (use_boundary and not stop_ids.isdisjoint(videos)):
                         return result('ok')
                 return result('pagination_incomplete')
             finally:
