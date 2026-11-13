@@ -9,6 +9,51 @@ def _display_title(title, original_name, platform_title):
         return title
     return platform_title or title or ''
 
+def _version_catalog(connection, source, platform_title):
+    versions = {}
+    for row in connection.execute("""SELECT id,source_id,content_sha256,output_kind,parent_version_id,created_at,
+            json_extract(result,'$.title') AS title FROM versions WHERE source_id=? ORDER BY rowid""", (source['id'],)):
+        version = dict(row)
+        if version['output_kind'] == 'machine_initial':
+            version['title'] = _display_title(version['title'], source['original_name'], platform_title)
+        versions[version['id']] = version
+    return versions
+
+
+def _task_views(tasks, versions):
+    from collections import Counter
+
+    completed = [task for task in tasks if task['status'] == 'succeeded']
+    machine = {vid: v for vid, v in versions.items() if v['output_kind'] == 'machine_initial'}
+    results = {task['id']: task['result_version_id'] for task in completed if task['result_version_id'] in machine}
+    unresolved = [task for task in completed if task['id'] not in results]
+    unassigned = machine.keys() - results.values()
+    candidates = {}
+    for task in unresolved:
+        base = task['base_version_id']
+        related = [vid for vid in unassigned if base and machine[vid]['parent_version_id'] == base]
+        matches = [vid for vid in unassigned if machine[vid]['created_at'] == task['updated_at'] and (not base or vid in related)]
+        candidates[task['id']] = matches or related
+    # Legacy links are inferred only when the match is unique on both sides.
+    counts = Counter(vid for choices in candidates.values() for vid in choices)
+    for tid, choices in candidates.items():
+        if len(choices) == 1 and counts[choices[0]] == 1:
+            results[tid] = choices[0]
+    unmatched = [task for task in unresolved if task['id'] not in results]
+    remaining = machine.keys() - results.values()
+    if len(unmatched) == len(remaining) == 1 and not unmatched[0]['base_version_id']:
+        results[unmatched[0]['id']] = next(iter(remaining))
+
+    # Human revisions belong to the most recent machine result on their own branch.
+    roots, views = {}, {}
+    for vid, version in versions.items():
+        root = vid if vid in machine else roots.get(version['parent_version_id'])
+        if root is not None:
+            roots[vid] = root
+            views[root] = vid
+    return {tid: views[vid] for tid, vid in results.items()}
+
+
 class WebService:
     def __init__(self, workflow_config, pipeline_config, web_config, *, video_runner=None, suggestion_provider_factory=None, rag_provider_factory=None):
         self.wc, self.pc, self.webcfg = workflow_config, pipeline_config, web_config
@@ -157,21 +202,39 @@ class WebService:
         except (OSError,ValueError,KeyError,TypeError): pass
         return d
     def tasks(self):
+        from collections import defaultdict
+
         with self.store._tx() as c:
-            rows = c.execute("""SELECT s.id,s.kind,s.original_name,s.deleted,
-                json_extract(v.result, '$.title') AS title, d.title AS platform_title
-                FROM sources s LEFT JOIN versions v ON v.id=s.current_version_id
+            rows = c.execute("""SELECT s.id,s.kind,s.original_name,s.deleted,s.current_version_id,d.title AS platform_title
+                FROM sources s
                 LEFT JOIN source_display_titles d ON d.source_id=s.id""").fetchall()
-            sources = {
-                row['id']: {
-                    'id': row['id'], 'kind': row['kind'], 'original_name': row['original_name'],
-                    'title': _display_title(row['title'], row['original_name'], row['platform_title']), 'deleted': bool(row['deleted']),
-                } for row in rows
-            }
+            tasks = [dict(t) for t in c.execute("""SELECT t.*,r.version_id AS result_version_id,p.base_version_id
+                FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id
+                LEFT JOIN video_reprocess p ON p.task_id=t.id ORDER BY t.rowid""")]
+            grouped = defaultdict(list)
+            for task in tasks:
+                grouped[task['source_id']].append(task)
+            sources, catalogs, views = {}, {}, {}
+            for row in rows:
+                sid = row['id']
+                catalog = _version_catalog(c, row, row['platform_title'])
+                catalogs[sid] = catalog
+                sources[sid] = {
+                    'id': sid, 'kind': row['kind'], 'original_name': row['original_name'], 'deleted': bool(row['deleted']),
+                    'title': catalog.get(row['current_version_id'], {}).get('title') or row['platform_title'],
+                    'current_version_id': row['current_version_id'],
+                }
+                views.update(_task_views(grouped[sid], catalog))
         items = []
-        for task in self.store.list_tasks():
+        for task in tasks:
             item = self._task(task)
-            item['source'] = sources.get(task['source_id'])
+            sid = task['source_id']
+            source = sources.get(sid)
+            view = views.get(task['id'])
+            item.update(source=source, view_version_id=view, reprocess=bool(task['base_version_id']),
+                        viewing_history=bool(source and view and view != source['current_version_id']))
+            if source and view:
+                item['source'] = {**source, 'title': catalogs[sid][view]['title']}
             items.append(item)
         return {'items': items}
     def trash(self):
@@ -194,9 +257,10 @@ class WebService:
             with self.store._tx() as c:
                 metadata=classifications.snapshot(s['id'],connection=c)
                 review=c.execute('SELECT decision,seq FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(s['current_version_id'],)).fetchone()
-                title=self.store._row(c,'versions',s['current_version_id'])['result'].get('title','') if s['current_version_id'] else ''
                 platform=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(s['id'],)).fetchone()
-                title=_display_title(title,s['original_name'],platform['title'] if platform else None)
+                platform_title=platform['title'] if platform else None
+                versions=_version_catalog(c,s,platform_title)
+                title=versions.get(s['current_version_id'],{}).get('title') or platform_title or ''
             status=review[0] if review else 'pending'
             d.update(title=title,status=tasks.get(s['id'],{}).get('status'),eligible=s['id'] in eligible,content_status=self.store.content_status(s['id']),classification=metadata,review_status=status,review_revision=review['seq'] if review else None)
             if filters.get('kind') and s['kind']!=filters['kind']: continue
@@ -205,14 +269,24 @@ class WebService:
             if any(filters.get(k) and not set(filters[k]).intersection(x['id'] for x in metadata[k]) for k in ('topics','tags')): continue
             items.append(d)
         return {'items':items}
-    def detail(self, source_id):
+    def detail(self, source_id, version_id=None):
         source=next((s for s in self.sources({'filter_deleted':False})['items'] if s['id']==source_id),None)
         if source is None: raise WorkflowError('source_not_found')
         if source['deleted']: raise WorkflowError('source_deleted')
-        versions=self.store.list_versions(source_id)
+        selected=version_id if version_id is not None else source['current_version_id']
+        history=selected != source['current_version_id']
+        with self.store._tx() as c:
+            platform=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(source_id,)).fetchone()
+            catalog=_version_catalog(c,source,platform['title'] if platform else None)
+            if selected is not None and selected not in catalog: raise WorkflowError('version_not_found')
+            current=self.store._row(c,'versions',selected) if selected else None
+            row=c.execute('SELECT id FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(selected,)).fetchone()
+            review=self.store._row(c,'reviews',row[0]) if row else None
+        if history:
+            source={**source, 'title':catalog[selected]['title'], 'eligible':False,
+                    'review_status':review['decision'] if review else 'pending',
+                    'review_revision':review['seq'] if review else None}
         allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at')
-        metas=[{k:v[k] for k in allowed} for v in versions]
-        current=next((v for v in versions if v['id']==source['current_version_id']),None)
         result_fields=('title','body','summary','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','processing')
         if current: current={**{k:current[k] for k in allowed},'result':{k:current['result'][k] for k in result_fields if k in current['result']}}
         if current:
@@ -220,16 +294,13 @@ class WebService:
             if 'processing' in result and isinstance(result['processing'],dict): result['processing']={k:result['processing'][k] for k in ('mode','model','usage','estimated_cost_cny','reserved_cny','extractor_version','stats') if k in result['processing']}
             if 'evidence' in result: result['evidence']=[{k:e[k] for k in ('type','locator','text','start','end','start_seconds','end_seconds','seconds','image_sha256') if k in e} for e in result['evidence'] if isinstance(e,dict)]
             if 'frames' in result: result['frames']=[{k:f[k] for k in ('index','seconds','sha256') if k in f} for f in result['frames'] if isinstance(f,dict)]
-        with self.store._tx() as c:
-            row=c.execute('SELECT id FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(source['current_version_id'],)).fetchone()
-            review=self.store._row(c,'reviews',row[0]) if row else None
         task=next((t for t in reversed(self.tasks()['items']) if t['source_id']==source_id),None)
-        frames=[{'index':f['index'],'seconds':f['seconds'],'url':f"/api/sources/{source_id}/frames/{f['index']}"} for f in (current or {}).get('result',{}).get('frames',[])]
+        frames=[{'index':f['index'],'seconds':f['seconds'],'url':f"/api/sources/{source_id}/frames/{f['index']}?version_id={selected}"} for f in (current or {}).get('result',{}).get('frames',[])]
         from .maintenance import media_status
         media=media_status(self.store,source_id)
         if not (_root(self.wc) / self.store.get_source(source_id)['blob_relpath']).is_file():
             media={**media, 'available':False}
-        return dict(source=source,current=current,versions=metas,review=review,task=task,eligible=source['eligible'],frames=frames,media=media,original_url=f'/api/sources/{source_id}/original' if media['available'] else None)
+        return dict(source=source,current=current,versions=list(catalog.values()),review=review,task=task,eligible=source['eligible'],viewing_history=history,frames=frames,media=media,original_url=f'/api/sources/{source_id}/original' if media['available'] else None)
     def review(self, source_id, p):
         r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
         eligible=any(s['id']==source_id for s in self.store.eligible_sources())
@@ -263,11 +334,16 @@ class WebService:
         root=_root(self.wc).resolve(); candidate=root/s['blob_relpath']; p=candidate.resolve()
         if candidate.is_symlink() or not p.is_relative_to(root) or not p.is_file() or _hash(p)!=s['sha256']: raise WorkflowError('source_integrity')
         return p,s['kind'],s['original_name']
-    def frame(self, source_id, index):
-        detail=self.detail(source_id); current=detail['current']; task=detail['task']
+    def frame(self, source_id, index, version_id=None):
+        with self.store._tx() as c:
+            source=self.store._row(c,'sources',source_id)
+            if source['deleted']: raise WorkflowError('source_deleted')
+            selected=version_id if version_id is not None else source['current_version_id']
+            current=self.store._row(c,'versions',selected) if selected is not None else None
+            if current and current['source_id'] != source_id: raise WorkflowError('version_not_found')
         frames=(current or {}).get('result',{}).get('frames',[])
         f=next((x for x in frames if x['index']==index),None)
-        if not f or not task: raise WorkflowError('frame_not_found')
+        if not f: raise WorkflowError('frame_not_found')
         if self.store.content_root:
             self.store.assert_synced(source_id)
             from .content_storage import safe, read, digest

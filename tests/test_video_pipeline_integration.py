@@ -81,6 +81,17 @@ class PipelineIntegration(unittest.TestCase):
         with store._tx() as db:
             self.assertEqual([tuple(row) for row in db.execute('SELECT version_id,decision FROM reviews WHERE source_id=?', (sid,))], [(old['id'], 'rework')])
         self.assertEqual(store.eligible_sources(), [])
+        from personalkb.web_app import load_web_config
+        from personalkb.web_service import WebService
+        service = WebService(self.wc, self.pc, load_web_config())
+        for version in (old, new):
+            detail = service.detail(sid, version['id'])
+            self.assertIn('?version_id='+version['id'], detail['frames'][0]['url'])
+            frame = service.frame(sid, 0, version['id'])
+            self.assertEqual(hashlib.sha256(frame.read_bytes()).hexdigest(), version['result']['frames'][0]['sha256'])
+        other = store.import_source('video', 'b'*64, 'other.mp4', 'other.mp4')['source']['id']
+        with self.assertRaisesRegex(WorkflowError, 'version_not_found'):
+            service.frame(other, 0, old['id'])
 
     def test_reprocess_version_race_preserves_newer_manual_edit(self):
         from types import SimpleNamespace

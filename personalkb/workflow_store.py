@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS video_maintenance (id INTEGER PRIMARY KEY CHECK(id=1)
 CREATE TABLE IF NOT EXISTS source_trash (source_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, purge_started INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, title TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS video_reprocess (task_id TEXT PRIMARY KEY, base_version_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_results (task_id TEXT PRIMARY KEY, version_id TEXT NOT NULL UNIQUE);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
             c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager
@@ -184,7 +185,11 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             reprocess=c.execute('SELECT base_version_id FROM video_reprocess WHERE task_id=?', (task_id,)).fetchone()
             if reprocess and s['current_version_id'] != reprocess[0]: raise WorkflowError('version_conflict')
             if expected_version_id is not _UNSET and s['current_version_id'] != expected_version_id: raise WorkflowError('version_conflict')
+            if s['kind'] in ('video', 'mp4') and isinstance(result, dict) and result.get('title') == s['original_name']:
+                display=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(s['id'],)).fetchone()
+                if display: result={**result,'title':display['title']}
             v=self._version(c,s['id'],result,s['current_version_id'],False)
+            c.execute('INSERT INTO task_results(task_id,version_id) VALUES(?,?)',(task_id,v['id']))
             c.execute("UPDATE tasks SET status='succeeded',lease_token=NULL,lease_until=NULL,error_code=NULL WHERE id=?",(task_id,)); return v
     def fail(self,task_id,token,code,*,needs_attention=False,now=None):
         now=time.time() if now is None else now

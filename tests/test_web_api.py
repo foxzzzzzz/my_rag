@@ -304,6 +304,61 @@ class WebApiTests(unittest.TestCase):
         payload=dict(version_id=v['id'],content_sha256=v['content_sha256'],score=50,decision='approve',reviewer='tester',review_id='r1')
         self.assertEqual(self.client.post('/api/sources/'+sid+'/reviews',json=payload,headers=self.h).status_code,400)
 
+    def test_video_tasks_open_their_own_versions_and_keep_the_older_review(self):
+        store = self.service.store
+        source = store.import_source('video', 'a'*64, 'clip.mp4', 'clip.mp4')
+        sid, old_task = source['source']['id'], source['task']['id']
+        (Path(self.wc['data_dir']) / 'clip.mp4').write_bytes(b'video')
+        result = dict(title='clip.mp4', body='Old body', summary='Summary', notes='Notes',
+            transcript='Old transcript', visual='Frame', provenance='provider', output_kind='machine_initial',
+            scheme_id='test', scheme_version='1', evidence=[{'type':'audio','text':'Old transcript'}])
+        with store._tx() as c:
+            c.execute('INSERT INTO source_display_titles VALUES (?,?)', (sid, 'Original Douyin title'))
+        old = store.finish(old_task, store.claim_specific(old_task,'worker')['lease_token'], result)
+        assert old['result']['title'] == 'Original Douyin title'
+        revision = store.revise(sid, old['id'], {**result,'title':'Edited title','output_kind':'human_edited','provenance':'human_edited'})
+        store.review(sid, revision['id'], revision['content_sha256'], 90, 'rework', 'tester', note='Check timestamps')
+        task = self.service.dispatcher.reprocess(sid, revision['id'], True)['task_id']
+        with store._tx() as c:
+            c.execute("UPDATE tasks SET status='running',lease_token='test',lease_until=9999999999 WHERE id=?", (task,))
+        new = store.finish(task, 'test', {**result,'body':'New body','transcript':'New transcript'})
+        assert new['result']['title'] == 'Original Douyin title'
+        # Simulate a result from the first deployment, where task links were absent and the title was the file name.
+        legacy_result = {**new['result'], 'title':'clip.mp4'}
+        import hashlib, json
+        raw = json.dumps(legacy_result, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        with store._tx() as c:
+            c.execute('DELETE FROM task_results')
+            c.execute('UPDATE versions SET result=?,content_sha256=? WHERE id=?', (raw, hashlib.sha256(raw.encode()).hexdigest(), new['id']))
+            c.execute("UPDATE tasks SET updated_at='2026-11-12T07:40:49.137Z' WHERE id=?", (old_task,))
+        tasks = {item['id']: item for item in self.client.get('/api/tasks').json()['items']}
+        assert tasks[old_task]['view_version_id'] == revision['id']
+        assert tasks[old_task]['viewing_history']
+        assert tasks[task]['view_version_id'] == new['id']
+        assert not tasks[task]['viewing_history']
+        assert tasks[task]['reprocess']
+        path = f'/api/sources/{sid}'
+        current = self.client.get(path).json()
+        history = self.client.get(path, params={'version_id':revision['id']}).json()
+        assert tasks[old_task]['source']['title'] == history['source']['title'] == 'Edited title'
+        assert tasks[task]['source']['title'] == current['source']['title'] == 'Original Douyin title'
+        assert current['current']['result']['title'] == 'clip.mp4'
+        assert current['current']['result']['body'] == 'New body'
+        assert current['review'] is None
+        assert history['viewing_history'] and not history['eligible']
+        assert history['current']['result']['body'] == 'Old body'
+        assert history['review']['score'] == 90
+        assert history['review']['note'] == 'Check timestamps'
+        with store._tx() as c:
+            c.execute('DELETE FROM source_display_titles WHERE source_id=?', (sid,))
+        assert self.client.get(path).json()['source']['title'] == 'clip.mp4'
+        assert self.client.get(path, params={'version_id':revision['id']}).json()['source']['title'] == 'Edited title'
+        assert self.client.get(path, params={'version_id':'missing'}).status_code == 404
+        assert self.client.get(path+'/frames/0', params={'version_id':'missing'}).status_code == 404
+        assert self.client.post(path+'/reviews', headers=self.h, json={
+            'version_id':revision['id'], 'content_sha256':revision['content_sha256'], 'score':98,
+            'decision':'approve', 'reviewer':'tester'}).status_code == 409
+
     def test_stale_review_rejected(self):
         sid,v=self.make_version()
         payload=dict(version_id='stale',content_sha256=v['content_sha256'],score=100,decision='approve',reviewer='tester',review_id='r1')

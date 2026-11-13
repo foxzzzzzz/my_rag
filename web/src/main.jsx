@@ -18,6 +18,7 @@ const fields = {title:'标题', summary:'摘要', notes:'笔记', body:'正文',
 const isVideo = kind => ['video','mp4'].includes(kind);
 const inputDraft = () => emptyReviewDraft(ui.default_reviewer);
 const emptyLibraryFilters = {q:'',kind:'',review:'',tags:[]};
+const detailPath = (id, versionId) => '/sources/'+id+(versionId?'?version_id='+encodeURIComponent(versionId):'');
 
 function App() {
   const [session, setSession] = useState(null), [connection, setConnection] = useState('connecting');
@@ -25,6 +26,7 @@ function App() {
   const [page, setPage] = useState('library'), [sources, setSources] = useState([]), [tasks, setTasks] = useState([]), [catalog, setCatalog] = useState([]);
   const [trash, setTrash] = useState({items:[], retention_days:null});
   const [detail, setDetail] = useState(null), [topic, setTopic] = useState('');
+  const [selectedVersion, setSelectedVersion] = useState(null);
   const [libraryFilters,setLibraryFilters]=useState(emptyLibraryFilters);
   const [dataLoaded,setDataLoaded] = useState(false);
   const [reviewEpoch,setReviewEpoch] = useState(0), [reviewPending,setReviewPending] = useState(false);
@@ -53,7 +55,7 @@ function App() {
 
   function clearPrivate() {
     ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
-    setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setDrafts({}); setEdits({});
+    setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setSelectedVersion(null); setDrafts({}); setEdits({});
     setDataLoaded(false); resetLibraryFilters(); setPage('library'); setFiles([]); setUploads([]); setRights(false);
     setSourcePaid(false); setConfirmation(null); setMessage('');
     setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
@@ -115,23 +117,24 @@ function App() {
     try {const value=await api('/session');if(epoch!==authEpoch.current)return;lastSession.current=value;setSession(value);setAuthEnabled(!!value.config.auth_enabled);setConnection('connected');}
     catch (e) {if(e.message!=='LOGIN_REQUIRED') {setConnection('disconnected'); setError(e.message);}}
   }
-  function showDetail(value) {detailRef.current=value;setDetail(value);cache.current[value.source.id]=value;}
+  function showDetail(value) {detailRef.current=value;setDetail(value);if(!value.viewing_history)cache.current[value.source.id]=value;}
   function syncDetail(value) {
     const previous=detailRef.current;
     if (!previous || previous.source.id!==value.source.id) return;
     if (previous.current?.id!==value.current?.id && hasWork(draftKey(previous.source.id,previous.current?.id))) {setStale(true);return;}
     showDetail(value);
   }
-  async function open(id, discard=false) {
+  async function open(id, options=false) {
+    const discard=options===true, versionId=options?.versionId||null;
     const sequence=++openSequence.current;
     setBusy(true);setError('');setMessage('');
     try {
-      const value=await api('/sources/'+id);
+      const value=await api(detailPath(id,versionId));
       if (sequence!==openSequence.current) return;
       const prior=cache.current[id];
-      const conflict=!discard && prior?.current?.id!==value.current?.id && hasWork(draftKey(id,prior?.current?.id));
+      const conflict=!discard && !versionId && prior?.current?.id!==value.current?.id && hasWork(draftKey(id,prior?.current?.id));
       if(page!=='detail'||detailRef.current?.source.id!==id)setSourceManagementOpen(false);
-      showDetail(conflict?prior:value);setStale(!!conflict);setTab('summary');setSourcePaid(false);setPage('detail');
+      showDetail(conflict?prior:value);setSelectedVersion(versionId);setStale(!!conflict);setTab('summary');setSourcePaid(false);setPage('detail');
     } catch(e) {if(sequence===openSequence.current)setError(e.message);}
     finally {if(sequence===openSequence.current)setBusy(!!writing.current);}
   }
@@ -140,7 +143,14 @@ function App() {
     setTopic('');
     setLibraryFilters({...emptyLibraryFilters});
   }
-  async function changed() {await refresh();if(detailRef.current)syncDetail(await api('/sources/'+detailRef.current.source.id));}
+  async function changed() {
+    const previous=detailRef.current, sequence=openSequence.current;
+    await refresh();
+    if(previous&&sequence===openSequence.current){
+      const value=await api(detailPath(previous.source.id,selectedVersion));
+      if(sequence===openSequence.current)syncDetail(value);
+    }
+  }
   const videoReprocessBusy = ['queued','running','needs_attention'].includes(detail?.task?.status)
     && detail?.task?.error_code !== 'version_conflict';
   async function obsidianApplied(id, originNavigation) {
@@ -155,6 +165,7 @@ function App() {
     dialogOpener.current=document.activeElement;setConfirmation({title,text,action});
   }
   async function reloadDetail() {
+    if(detail.viewing_history){await open(source.id,{versionId:current.id});return;}
     const action=async()=>{
       setDrafts(previous=>{const next={...previous};delete next[key];return next;});
       setEdits(previous=>{const next={...previous};delete next[key];return next;});
@@ -206,10 +217,10 @@ function App() {
   },[session]);
   useEffect(()=>{
     if(page!=='detail'||!session||!source?.id)return;
-    let alive=true;const id=source.id;
-    const timer=setInterval(async()=>{try{const value=await api('/sources/'+id);if(alive)syncDetail(value);}catch(e){if(alive&&e.message!=='LOGIN_REQUIRED')setError(e.message);}},session.config.poll_interval_ms);
+    let alive=true;const path=detailPath(source.id,selectedVersion), sequence=openSequence.current;
+    const timer=setInterval(async()=>{try{const value=await api(path);if(alive&&sequence===openSequence.current)syncDetail(value);}catch(e){if(alive&&sequence===openSequence.current&&e.message!=='LOGIN_REQUIRED')setError(e.message);}},session.config.poll_interval_ms);
     return()=>{alive=false;clearInterval(timer);};
-  },[page,session,source?.id]);
+  },[page,session,source?.id,selectedVersion,renderNavigation]);
   useEffect(()=>{
     [...(mainRef.current?.querySelectorAll('[data-page-title]')||[])].find(element=>!element.closest('[hidden]'))?.focus({preventScroll:true});
   },[page,source?.id]);
@@ -295,19 +306,21 @@ function App() {
             <button className="detail-back" type="button" onClick={()=>navigate('library')}><span aria-hidden="true">← </span>返回资料库</button>
             <div className="source-title-row">
               <h1 {...titleProps}>{source.title||result.title||source.original_name}</h1>
-              {current&&<button type="button" aria-expanded={sourceManagementOpen} aria-controls="source-management"
+              {current&&!detail.viewing_history&&<button type="button" aria-expanded={sourceManagementOpen} aria-controls="source-management"
                 onClick={()=>setSourceManagementOpen(open=>!open)}>资料管理</button>}
             </div>
             <p className="muted">
-              {isVideo(source.kind)?'视频':'HTML'} · {current?(detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
+              {isVideo(source.kind)?'视频':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
+            {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}</option>)}</select></label>}
+            {detail.viewing_history&&<p className="notice">正在查看历史版本，仅供阅读。 <a href={'/api/versions/'+current.id+'/export'}>下载此版本 Markdown 与证据</a></p>}
             {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
           </div>
           {!current?<section><p>尚未生成可审核内容。</p><button onClick={()=>navigate('tasks')}>到任务页处理</button></section>:<>
             {(stale||source.content_status&&source.content_status!=='synced')&&<p className="error" role="alert">{stale?'版本或连接状态已变化，旧草稿不会提交到新版本。':'长期内容尚未同步或校验失败，不能用于正式知识库。'} <button onClick={reloadDetail}>重新加载详情</button></p>}
             <div className="source-layout"><div className="source-reading">
-              <section id="source-management" key={source.id} className="source-management" aria-label="资料管理" hidden={!sourceManagementOpen}>
+              {!detail.viewing_history&&<section id="source-management" key={source.id} className="source-management" aria-label="资料管理" hidden={!sourceManagementOpen}>
                 <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&!isVideo(source.kind)&&<a href={detail.original_url}>下载原HTML</a>}</div>
                 <details><summary>分类</summary><ClassificationEditor key={source.id+'-classification'} source={source} catalog={catalog} api={api} changed={changed} disabled={busy}/></details>
                 <details><summary>Obsidian 导出与更新</summary><ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!edit||hasWork(key)}/></details>
@@ -317,11 +330,11 @@ function App() {
                     const sequence=openSequence.current,sourceId=source.id;
                     await api('/sources/'+sourceId+'/revisions',{method:'POST',body:JSON.stringify({expected_version_id:current.id,...edit})});setEdit(null);
                     const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
-                    if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setStale(false);setTab('summary');}
+                    if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setSelectedVersion(null);setStale(false);setTab('summary');}
                     await refresh();setMessage('已生成新版本，请重新审核。');
                   })}>保存新版本</button>
                   <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
-                </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
+                </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(name==='title'&&isVideo(source.kind)&&result.title===source.original_name?source.title||result.title:result[name])])))}>编辑内容</button>}</details>
                 {source.kind==='html'&&<details><summary>重新整理网页</summary><label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次网页模型整理费用</label><p className="muted">保留旧版本与评分，新结果需要重新审核。</p>
                   <button disabled={busy||!sourcePaid||!session.config.live_html_enabled||stale||['queued','running','needs_attention'].includes(detail.task?.status)} onClick={()=>run(async()=>{await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id})});setSourcePaid(false);await changed();})}>生成新的模型整理版本</button></details>}
                 {isVideo(source.kind)&&<details><summary>重新转写视频</summary>
@@ -334,14 +347,14 @@ function App() {
                     if (videoReprocessRequest.current?.key !== key) videoReprocessRequest.current = {key, id:crypto.randomUUID()};
                     await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id,request_id:videoReprocessRequest.current.id})});
                     videoReprocessRequest.current = null;
-                    setSourcePaid(false);await changed();setMessage('重新转写任务已提交，请在任务页查看进度。');
+                    setSourcePaid(false);setSelectedVersion(null);await changed();setMessage('重新转写任务已提交，请在任务页查看进度。');
                   })}>重新转写并生成新版本</button></details>}
                 <details><summary>版本与技术信息</summary><pre>{JSON.stringify({source_id:source.id,version_id:current.id,content_sha256:current.content_sha256,content_status:source.content_status},null,2)}</pre></details>
                 <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。可在回收站保留期限内撤销。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。可在回收站保留期限内撤销。',()=>run(async()=>{
                   const sequence=openSequence.current,sourceId=source.id;await api('/sources/'+sourceId,{method:'DELETE'});delete cache.current[sourceId];
                   if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){detailRef.current=null;setDetail(null);navigate('library');}await refresh();
                 }))}>确认删除资料</button></details>
-              </section>
+              </section>}
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
               <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
               {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
@@ -367,16 +380,16 @@ function App() {
               </div>
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
             </div>
-            <aside className="review-panel" aria-label="审核当前版本"><h2>审核</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
+            <aside className="review-panel" aria-label={detail.viewing_history?'历史版本审核记录':'审核当前版本'}><h2>{detail.viewing_history?'审核记录':'审核'}</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
               {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
               {detail.review&&<><p className="muted">{detail.review.reviewer} · {formatDate(detail.review.created_at,session.config.display_timezone)}</p><p>审核意见：{detail.review.note||'无'}</p></>}
-              <p className="muted">批准门槛 {session.config.quality_target} 分。修改内容生成新版本后须重新审核。</p>
+              {!detail.viewing_history&&<><p className="muted">批准门槛 {session.config.quality_target} 分。修改内容生成新版本后须重新审核。</p>
               <label>审核人<input disabled={busy} value={draft.reviewer} onChange={event=>patchDraft({reviewer:event.target.value})}/></label><label>评分<input disabled={busy} type="number" min="0" max="100" step={ui.review_score_step} value={draft.score} onChange={event=>patchDraft({score:event.target.value})}/></label>
               <label>决定<select disabled={busy} value={draft.decision} onChange={event=>patchDraft({decision:event.target.value})}><option value="approve">批准</option><option value="rework">返工</option><option value="reject">拒绝</option></select></label><label>审核意见<textarea disabled={busy} value={draft.note} onChange={event=>patchDraft({note:event.target.value})}/></label>
               <p className="muted">草稿仅保留在当前打开的页面，刷新会丢失；保存草稿不会批准资料。</p><div className="actions">
                 <button disabled={busy||stale||!!edit||!validReview(draft.score,'rework',session.config.quality_target,draft.reviewer)} onClick={()=>{setDrafts(previous=>({...previous,[key]:saveReviewDraft(previous[key]||inputDraft())}));setMessage('评分草稿已保存，尚未提交审核。');}}>保存评分草稿</button>
                 <button className="primary" disabled={busy||stale||!!edit||!canSubmitReview(draft,session.config.quality_target)} onClick={()=>run(submitReview)}>提交{statusText(draft.decision)}</button></div>
-              <p className="muted" role="status">{edit?'人工修订尚未提交，请先保存新版本或放弃修订。':reviewDraftSaved(draft)?'评分草稿已保存，请核对后明确提交。':'评分或意见尚未保存。'}</p>
+              <p className="muted" role="status">{edit?'人工修订尚未提交，请先保存新版本或放弃修订。':reviewDraftSaved(draft)?'评分草稿已保存，请核对后明确提交。':'评分或意见尚未保存。'}</p></>}
             </aside></div>
           </>}
         </>}

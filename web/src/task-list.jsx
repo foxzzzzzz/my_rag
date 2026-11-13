@@ -44,7 +44,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   return <article className="task-grid task-item">
     <div className="task-identity">
       <strong>{title}</strong>
-      {(kind||item?.deleted)&&<span className="muted">{[kind,item?.deleted&&'来源在回收站'].filter(Boolean).join(' · ')}</span>}
+      {(kind||item?.deleted)&&<span className="muted">{[kind,task.reprocess&&'重新转写',item?.deleted&&'来源在回收站'].filter(Boolean).join(' · ')}</span>}
     </div>
     <div className="task-state">
       <strong data-status={status}>{label}</strong>
@@ -59,7 +59,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
     <div className="task-actions">
       {action&&(action==='cancel'||item&&!item.deleted)&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
         onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{taskActionLabel(task,action)||actionNames[action]}</button>}
-      {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id)}>查看资料</button>}
+      {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id,{versionId:task.view_version_id})}>{task.viewing_history?'查看旧版本':task.view_version_id||task.status!=='succeeded'?'查看资料':'查看当前资料'}</button>}
       {(task.archived||task.can_archive)&&<button type="button" disabled={busy}
         onClick={()=>onAction(task.id,task.archived?'unarchive':'archive',{})}>{task.archived?'取消归档':'归档'}</button>}
       <button type="button" aria-expanded={expanded} aria-controls={expanded?detailId:undefined} onClick={toggle}>{expanded?'收起详情':'详情'}</button>

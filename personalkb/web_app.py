@@ -193,7 +193,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         await read_object(req)
         return service.douyin.retry(job_id)
     @app.get('/api/sources/{source_id}')
-    def detail(source_id:str): return service.detail(source_id)
+    def detail(source_id:str, version_id:str|None=None): return service.detail(source_id,version_id)
     @app.put('/api/imports')
     async def upload(req:Request,filename:str,rights_confirmed:bool=False):
         if not rights_confirmed: raise WorkflowError('rights_required')
@@ -375,7 +375,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         if kind=='html': r.headers['Content-Security-Policy']="sandbox; default-src 'none'"
         return r
     @app.get('/api/sources/{source_id}/frames/{index}')
-    def frame(source_id:str,index:int): return FileResponse(service.frame(source_id,index),media_type='image/jpeg')
+    def frame(source_id:str,index:int,version_id:str|None=None): return FileResponse(service.frame(source_id,index,version_id),media_type='image/jpeg')
     @app.get('/api/versions/{version_id}/export')
     def export(version_id:str):
         data,name=service.export(version_id)
