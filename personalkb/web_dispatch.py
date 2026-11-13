@@ -70,6 +70,8 @@ class WebDispatcher:
             expected = 'needs_attention' if mode == 'resume' else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
             if mode == 'resume':
+                if source['kind'] in ('video', 'mp4') and task['error_code'] == 'version_conflict':
+                    raise WorkflowError('version_conflict')
                 stages = task_stages(c, task_id)
                 if has_unknown_submission(task, stages, legacy_upload=legacy_upload_interruption(c, task, stages)):
                     raise WorkflowError('unknown_submission')
@@ -108,21 +110,53 @@ class WebDispatcher:
             return job
 
     def reprocess_html(self, source_id, expected_version_id, allow_paid=False):
+        return self.reprocess(source_id, expected_version_id, allow_paid, html_only=True)
+
+    def reprocess(self, source_id, expected_version_id, allow_paid=False, *, html_only=False, request_id=None):
         """New explicit task and consent in one transaction; never revive a POST."""
         if type(allow_paid) is not bool: raise WorkflowError('invalid_request')
-        if not self.config.get('live_html_enabled',False): raise WorkflowError('html_model_disabled')
         if not allow_paid: raise WorkflowError('paid_consent_required')
         with self.store._tx() as c:
             s=self.store._row(c,'sources',source_id)
             if s['deleted']: raise WorkflowError('source_deleted')
-            if s['kind']!='html': raise WorkflowError('invalid_source')
+            video = not html_only and s['kind'] in ('video', 'mp4')
+            if video:
+                if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
+                if request_id is not None:
+                    try:
+                        task_id = uuid.UUID(request_id).hex if isinstance(request_id, str) else None
+                    except ValueError:
+                        raise WorkflowError('invalid_request') from None
+                    if not task_id: raise WorkflowError('invalid_request')
+                    previous = c.execute("""SELECT t.source_id, v.base_version_id, d.state
+                        FROM tasks t LEFT JOIN video_reprocess v ON v.task_id=t.id
+                        LEFT JOIN web_dispatch d ON d.task_id=t.id WHERE t.id=?""", (task_id,)).fetchone()
+                    if previous:
+                        if previous['source_id'] != source_id or previous['base_version_id'] != expected_version_id or not previous['state']:
+                            raise WorkflowError('dispatch_conflict')
+                        return {'task_id':task_id,'source_id':source_id,'dispatch_state':previous['state'],'processing_mode':'model'}
+            elif s['kind'] == 'html':
+                if not self.config.get('live_html_enabled', False): raise WorkflowError('html_model_disabled')
+            else:
+                raise WorkflowError('invalid_source')
             if not expected_version_id or s['current_version_id']!=expected_version_id: raise WorkflowError('version_conflict')
-            if c.execute("SELECT 1 FROM tasks WHERE source_id=? AND status IN ('queued','running','needs_attention')",(source_id,)).fetchone(): raise WorkflowError('invalid_state')
-            tid=uuid.uuid4().hex
+            if c.execute("""SELECT 1 FROM tasks WHERE source_id=? AND
+                         (status IN ('queued','running') OR
+                          (status='needs_attention' AND (?=0 OR error_code IS NOT 'version_conflict')))""",
+                         (source_id, video)).fetchone(): raise WorkflowError('invalid_state')
+            if video:
+                from .maintenance import media_status
+                blob = self.store.data_root / s['blob_relpath']
+                if not media_status(self.store, source_id)['available'] or not blob.is_file():
+                    raise WorkflowError('media_expired')
+            tid=task_id if video and request_id is not None else uuid.uuid4().hex
             c.execute("INSERT INTO tasks(id,source_id,status) VALUES(?,?,'queued')",(tid,source_id))
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,processing_mode) VALUES(?,'run','pending',?,'model')",(tid,time.time()))
-            c.execute('CREATE TABLE IF NOT EXISTS html_runs (task_id TEXT PRIMARY KEY, base_version_id TEXT)')
-            c.execute('INSERT INTO html_runs(task_id,base_version_id) VALUES(?,?)',(tid,expected_version_id))
+            if video:
+                c.execute('INSERT INTO video_reprocess(task_id,base_version_id) VALUES(?,?)',(tid,expected_version_id))
+            else:
+                c.execute('CREATE TABLE IF NOT EXISTS html_runs (task_id TEXT PRIMARY KEY, base_version_id TEXT)')
+                c.execute('INSERT INTO html_runs(task_id,base_version_id) VALUES(?,?)',(tid,expected_version_id))
             return {'task_id':tid,'source_id':source_id,'dispatch_state':'pending','processing_mode':'model'}
 
     def cancel(self, task_id):
@@ -143,6 +177,12 @@ class WebDispatcher:
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
             if task['status'] not in ('failed','cancelled') or task['external_started'] or task['attempts']>=self.store.max_attempts:
+                raise WorkflowError('invalid_state')
+            if source['kind'] in ('video', 'mp4') and c.execute(
+                """SELECT 1 FROM tasks WHERE source_id=? AND id<>? AND
+                   (status IN ('queued','running') OR (status='needs_attention' AND error_code IS NOT 'version_conflict'))""",
+                (task['source_id'], task_id),
+            ).fetchone():
                 raise WorkflowError('invalid_state')
             old=c.execute('SELECT processing_mode FROM web_dispatch WHERE task_id=?',(task_id,)).fetchone()
             chosen=processing_mode if processing_mode is not None else (old['processing_mode'] if old else 'preview')

@@ -354,9 +354,9 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.post('/api/sources/{source_id}/reviews')
     async def review(source_id:str,req:Request): return service.review(source_id,await read_object(req))
     @app.post('/api/sources/{source_id}/process')
-    async def reprocess_html(source_id:str,req:Request):
+    async def reprocess_source(source_id:str,req:Request):
         p=await read_object(req)
-        return service.dispatcher.reprocess_html(source_id,p.get('expected_version_id'),p.get('allow_paid',False))
+        return service.dispatcher.reprocess(source_id,p.get('expected_version_id'),p.get('allow_paid',False),request_id=p.get('request_id'))
     @app.post('/api/sources/{source_id}/revisions')
     async def revise(source_id:str,req:Request): return service.revise(source_id,await read_object(req))
     @app.delete('/api/sources/{source_id}')

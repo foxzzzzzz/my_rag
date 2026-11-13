@@ -139,7 +139,10 @@ class WebService:
                 legacy_upload = legacy_upload_interruption(c, t, rows)
                 if legacy_upload:
                     d['stage'] = 'asr_upload_prepare'
-                d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows, legacy_upload=legacy_upload) else None
+                if t['error_code'] == 'version_conflict':
+                    d['resume_blocked_reason'] = 'version_conflict'
+                else:
+                    d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows, legacy_upload=legacy_upload) else None
             upload_stages = sum(row['name'] in ASR_UPLOAD_STAGES for row in rows)
             if rows:
                 if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
@@ -224,6 +227,8 @@ class WebService:
         frames=[{'index':f['index'],'seconds':f['seconds'],'url':f"/api/sources/{source_id}/frames/{f['index']}"} for f in (current or {}).get('result',{}).get('frames',[])]
         from .maintenance import media_status
         media=media_status(self.store,source_id)
+        if not (_root(self.wc) / self.store.get_source(source_id)['blob_relpath']).is_file():
+            media={**media, 'available':False}
         return dict(source=source,current=current,versions=metas,review=review,task=task,eligible=source['eligible'],frames=frames,media=media,original_url=f'/api/sources/{source_id}/original' if media['available'] else None)
     def review(self, source_id, p):
         r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
@@ -271,17 +276,22 @@ class WebService:
                 if digest(read(self.store.content_root,rel))!=f['sha256']: raise WorkflowError('frame_integrity')
                 return safe(self.store.content_root,rel)
             except OSError: raise WorkflowError('frame_integrity') from None
-        root=_root(self.wc).resolve(); candidate=root/'video-work'/task['id']
-        if any(p.is_symlink() for p in (candidate,candidate.parent)): raise WorkflowError('frame_integrity')
-        work=candidate.resolve()
-        if not work.is_relative_to(root): raise WorkflowError('frame_integrity')
-        try:
-            manifest=json.loads((work/'media-manifest.json').read_text(encoding='utf8'))
-            entry=next(x for x in manifest['frames'] if x['index']==index)
-            p=(work/entry['file']).resolve()
-            if (work/entry['file']).is_symlink() or not p.is_relative_to(work) or p.suffix.lower() not in ('.jpg','.jpeg') or entry['sha256']!=f['sha256'] or _hash(p)!=f['sha256']: raise ValueError()
-            return p
-        except (OSError,ValueError,KeyError,StopIteration,TypeError): raise WorkflowError('frame_integrity') from None
+        root=_root(self.wc).resolve()
+        with self.store._tx() as db:
+            tasks=db.execute("SELECT id FROM tasks WHERE source_id=? AND status='succeeded' ORDER BY rowid DESC", (source_id,)).fetchall()
+        for (task_id,) in tasks:
+            candidate=root/'video-work'/task_id
+            if any(p.is_symlink() for p in (candidate,candidate.parent)): continue
+            work=candidate.resolve()
+            if not work.is_relative_to(root): continue
+            try:
+                manifest=json.loads((work/'media-manifest.json').read_text(encoding='utf8'))
+                entry=next(x for x in manifest['frames'] if x['index']==index and x['sha256']==f['sha256'])
+                p=(work/entry['file']).resolve()
+                if (work/entry['file']).is_symlink() or not p.is_relative_to(work) or p.suffix.lower() not in ('.jpg','.jpeg') or _hash(p)!=f['sha256']: continue
+                return p
+            except (OSError,ValueError,KeyError,StopIteration,TypeError): continue
+        raise WorkflowError('frame_integrity')
     def export(self, version_id):
         v=self.store.get_version(version_id)
         return render_markdown(self.store, v).encode('utf8'), version_id+'.md'

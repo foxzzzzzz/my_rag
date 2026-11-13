@@ -34,8 +34,12 @@ class FakeServices:
     def summarize(self,body,title): return {'structured':{'summary':'summary','notes':'notes'},'content':'notes','model':'fake','estimated_cost_cny':0}
 
 def media(source,work,wc,pc,*,heartbeat):
-    heartbeat(); audio=work/'audio.wav'; audio.write_bytes(b'audio'); frame=work/'frame.jpg'; frame.write_bytes(b'jpeg')
-    return {'audio_path':str(audio),'audio_seconds':1,'duration_seconds':1,'frames':[{'index':0,'seconds':0,'path':str(frame),'sha256':hashlib.sha256(b'jpeg').hexdigest()}]}
+    heartbeat(); audio=work/'audio.wav'; audio.write_bytes(b'audio'); frame=work/'frame.jpg'
+    payload = ('jpeg-' + work.name).encode()
+    frame.write_bytes(payload)
+    frame_metadata = {'index':0,'seconds':0,'sha256':hashlib.sha256(payload).hexdigest()}
+    (work/'media-manifest.json').write_text(json.dumps({'frames':[{**frame_metadata,'file':frame.name}]}), encoding='utf-8')
+    return {'audio_path':str(audio),'audio_seconds':1,'duration_seconds':1,'frames':[{**frame_metadata,'path':str(frame)}]}
 
 class PipelineIntegration(unittest.TestCase):
     def setUp(self):
@@ -50,6 +54,55 @@ class PipelineIntegration(unittest.TestCase):
         version=self.run_pipeline(); self.assertEqual(version['output_kind'],'machine_initial'); self.assertEqual(self.status(),'succeeded')
         status=video_status(self.wc,self.pc,self.task); self.assertEqual(status['assets'][0]['status'],'provider_managed')
         self.assertNotIn('secret',json.dumps(status)); self.assertNotIn(b'secret', (Path(self.wc['data_dir'])/'workflow.sqlite3').read_bytes())
+
+    def test_reprocess_creates_pending_child_and_keeps_prior_review(self):
+        from types import SimpleNamespace
+        from personalkb.web_dispatch import WebDispatcher
+
+        old = self.run_pipeline()
+        store = make_store(self.wc)
+        sid = old['source_id']
+        store.review(sid, old['id'], old['content_sha256'], 90, 'rework', 'tester')
+        dispatcher = WebDispatcher(SimpleNamespace(store=store, webcfg={'live_video_enabled': True,'dispatch_recovery_seconds':60},
+            video_runner=lambda wc, pc, keys, *, task_id, resume: run_video(wc, pc, keys, task_id=task_id,
+                resume=resume, services=self.s, storage=self.storage, media=media), wc=self.wc, pc=self.pc))
+        self.task = dispatcher.reprocess(sid, old['id'], True)['task_id']
+        self.storage.prepare = lambda path, model: PreparedAudio('temporary',model,'asset2',
+            hashlib.sha256(Path(path).read_bytes()).hexdigest(),Path(path).stat().st_size,time.time()+3600,'https://unused')
+        self.assertEqual(dispatcher.process_next()['dispatch_state'], 'done')
+        new = store.get_version(store.get_source(sid)['current_version_id'])
+        self.assertEqual(new['parent_version_id'], old['id'])
+        self.assertEqual(store.get_source(sid)['current_version_id'], new['id'])
+        self.assertEqual(self.s.submit_count, 2)
+        store.assert_synced(sid)
+        for version in (old, new):
+            self.assertTrue((store.content_root/sid/'versions'/version['id']/'evidence.json').is_file())
+            self.assertTrue((store.content_root/sid/'frames'/(version['result']['frames'][0]['sha256']+'.jpg')).is_file())
+        with store._tx() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT version_id,decision FROM reviews WHERE source_id=?', (sid,))], [(old['id'], 'rework')])
+        self.assertEqual(store.eligible_sources(), [])
+
+    def test_reprocess_version_race_preserves_newer_manual_edit(self):
+        from types import SimpleNamespace
+        from personalkb.web_dispatch import WebDispatcher
+
+        old = self.run_pipeline()
+        store = make_store(self.wc)
+        sid = old['source_id']
+        dispatcher = WebDispatcher(SimpleNamespace(store=store, webcfg={'live_video_enabled': True}))
+        self.task = dispatcher.reprocess(sid, old['id'], True)['task_id']
+        self.storage.prepare = lambda path, model: PreparedAudio('temporary',model,'asset2',
+            hashlib.sha256(Path(path).read_bytes()).hexdigest(),Path(path).stat().st_size,time.time()+3600,'https://unused')
+        edit = dict(old['result'], title='Manual revision', output_kind='human_edited', provenance='human_edited')
+        revised = {}
+        self.s.cancel = lambda: revised.update(store.revise(sid, old['id'], edit))
+        with self.assertRaisesRegex(WorkflowError, 'version_conflict'):
+            self.run_pipeline()
+        self.assertEqual(store.get_source(sid)['current_version_id'], revised['id'])
+        self.assertEqual(len(store.list_versions(sid)), 2)
+        with self.assertRaisesRegex(WorkflowError, 'version_conflict'):
+            dispatcher.enqueue(self.task, mode='resume', allow_paid=True)
+        self.assertNotEqual(dispatcher.reprocess(sid, revised['id'], True)['task_id'], self.task)
     def test_query_resume_only_get(self):
         self.s.mode='query'
         strategy = self.pc['strategy']

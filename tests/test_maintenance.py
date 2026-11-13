@@ -120,6 +120,15 @@ def test_retention_dry_run_apply_and_failed_source(tmp_path):
     assert {x['source_id']:x['status'] for x in maintenance.retention(config, apply=True)['items']}['ok'] == 'requires_attention_dispatch'
     assert (data / 'originals/ok').exists()
     with sqlite3.connect(store.db_path) as db: db.execute('DELETE FROM web_dispatch')
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("INSERT INTO tasks(id,source_id,status) VALUES('cancelled-rerun','ok','cancelled')")
+        db.execute("INSERT INTO video_reprocess VALUES('cancelled-rerun','vok')")
+        db.execute("INSERT INTO web_dispatch VALUES('cancelled-rerun','cancelled')")
+        db.execute("CREATE TABLE video_stages(task_id TEXT,status TEXT)")
+        db.execute("INSERT INTO video_stages VALUES('cancelled-rerun','in_flight')")
+    assert {x['source_id']:x['status'] for x in maintenance.retention(config)['items']}['ok'] == 'requires_attention_remote_stage'
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("UPDATE video_stages SET status='prepared' WHERE task_id='cancelled-rerun'")
     maintenance.retention(config, apply=True)
     assert not (data / 'originals/ok').exists() and (data / 'originals/bad').exists()
     assert maintenance.media_status(store, 'ok')['status'] == 'removed'

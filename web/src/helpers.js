@@ -6,6 +6,7 @@ export function errorText(status, code) {
   if (code==='worker_busy') return '后台正在处理任务，请稍后再试。';
   if (code==='unknown_submission') return '模型请求结果未知，系统已阻止重发。原预算预留已保留。';
   if (code==='task_archived') return '任务已归档，请先取消归档。';
+  if (code==='version_conflict') return '资料版本已更新，请在最新版本上重新操作。';
   return status===409 ? '内容已有更新，请刷新后重新操作。' : `操作失败：${code || status || '网络连接异常'}`;
 }
 export function textValue(v) { return typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v,null,2); }

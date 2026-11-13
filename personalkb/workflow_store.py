@@ -39,6 +39,7 @@ CREATE TRIGGER IF NOT EXISTS content_review_insert AFTER INSERT ON reviews BEGIN
 CREATE TABLE IF NOT EXISTS video_maintenance (id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS source_trash (source_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, purge_started INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, title TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS video_reprocess (task_id TEXT PRIMARY KEY, base_version_id TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
             c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager
@@ -124,7 +125,10 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         with self._tx() as c:
             self._recover(c,now)
             if c.execute("SELECT 1 FROM video_maintenance").fetchone() or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone(): return None
-            r=c.execute("SELECT tasks.id FROM tasks JOIN sources ON sources.id=tasks.source_id WHERE tasks.status='queued' AND tasks.attempts<? AND sources.deleted=0 ORDER BY tasks.rowid LIMIT 1",(self.max_attempts,)).fetchone()
+            r=c.execute("""SELECT tasks.id FROM tasks JOIN sources ON sources.id=tasks.source_id
+                WHERE tasks.status='queued' AND tasks.attempts<? AND sources.deleted=0
+                AND NOT EXISTS (SELECT 1 FROM video_reprocess WHERE task_id=tasks.id)
+                ORDER BY tasks.rowid LIMIT 1""",(self.max_attempts,)).fetchone()
             if not r: return None
             c.execute("UPDATE tasks SET status='running',attempts=attempts+1,worker_id=?,lease_token=?,lease_until=? WHERE id=?",(worker_id,secrets.token_urlsafe(32),now+self.lease_seconds,r[0]))
             return self._row(c,'tasks',r[0])
@@ -142,7 +146,9 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         with self._tx() as c:
             self._recover(c,now)
             if c.execute("SELECT 1 FROM video_maintenance").fetchone() or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone(): return None
-            r=c.execute("SELECT tasks.id FROM tasks JOIN sources ON sources.id=tasks.source_id WHERE tasks.id=? AND tasks.status='queued' AND tasks.attempts<? AND sources.deleted=0",(task_id,self.max_attempts)).fetchone()
+            r=c.execute("""SELECT tasks.id FROM tasks JOIN sources ON sources.id=tasks.source_id
+                WHERE tasks.id=? AND tasks.status='queued' AND tasks.attempts<? AND sources.deleted=0
+                AND NOT EXISTS (SELECT 1 FROM video_reprocess WHERE task_id=tasks.id)""",(task_id,self.max_attempts)).fetchone()
             if not r: return None
             c.execute("UPDATE tasks SET status='running',attempts=attempts+1,worker_id=?,lease_token=?,lease_until=? WHERE id=?",(worker_id,secrets.token_urlsafe(32),now+self.lease_seconds,r[0]))
             return self._row(c,'tasks',r[0])
@@ -175,6 +181,8 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         now=time.time() if now is None else now
         with self._tx() as c:
             t=self._lease(c,task_id,token,now); s=self._row(c,'sources',t['source_id'])
+            reprocess=c.execute('SELECT base_version_id FROM video_reprocess WHERE task_id=?', (task_id,)).fetchone()
+            if reprocess and s['current_version_id'] != reprocess[0]: raise WorkflowError('version_conflict')
             if expected_version_id is not _UNSET and s['current_version_id'] != expected_version_id: raise WorkflowError('version_conflict')
             v=self._version(c,s['id'],result,s['current_version_id'],False)
             c.execute("UPDATE tasks SET status='succeeded',lease_token=NULL,lease_until=NULL,error_code=NULL WHERE id=?",(task_id,)); return v

@@ -119,7 +119,7 @@ def purge(config, apply=False):
                     shutil.rmtree(path)
             with store._tx() as db:
                 db.execute('PRAGMA secure_delete=ON')
-                for table in ('web_task_archive','web_dispatch','video_stages','video_assets','video_runs','html_runs'):
+                for table in ('web_task_archive','web_dispatch','video_stages','video_assets','video_runs','html_runs','video_reprocess'):
                     if table in tables:
                         for tid in tasks: db.execute(f'DELETE FROM {table} WHERE task_id=?', (tid,))
                 for table in ('reviews','versions','content_sync','source_labels','source_metadata','classification_suggestions','obsidian_previews','douyin_cache','media_retention','source_display_titles'):

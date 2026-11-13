@@ -33,6 +33,7 @@ function App() {
   const dialogRef=useRef(null), dialogOpener=useRef(null);
   const [drafts, setDrafts] = useState({}), [edits, setEdits] = useState({}), [stale, setStale] = useState(false);
   const [tab, setTab] = useState('summary'), [sourcePaid, setSourcePaid] = useState(false);
+  const videoReprocessRequest = useRef(null);
   const [sourceManagementOpen,setSourceManagementOpen]=useState(false);
   const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
@@ -140,6 +141,8 @@ function App() {
     setLibraryFilters({...emptyLibraryFilters});
   }
   async function changed() {await refresh();if(detailRef.current)syncDetail(await api('/sources/'+detailRef.current.source.id));}
+  const videoReprocessBusy = ['queued','running','needs_attention'].includes(detail?.task?.status)
+    && detail?.task?.error_code !== 'version_conflict';
   async function obsidianApplied(id, originNavigation) {
     await refresh();
     if(!id)return;
@@ -321,6 +324,18 @@ function App() {
                 </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
                 {source.kind==='html'&&<details><summary>重新整理网页</summary><label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次网页模型整理费用</label><p className="muted">保留旧版本与评分，新结果需要重新审核。</p>
                   <button disabled={busy||!sourcePaid||!session.config.live_html_enabled||stale||['queued','running','needs_attention'].includes(detail.task?.status)} onClick={()=>run(async()=>{await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id})});setSourcePaid(false);await changed();})}>生成新的模型整理版本</button></details>}
+                {isVideo(source.kind)&&<details><summary>重新转写视频</summary>
+                  <label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次转写、画面识别和整理产生的模型费用</label>
+                  <p className="muted">使用原视频生成待审核版本，保留旧版本及审核记录。</p>
+                  {!detail.original_url&&<p className="muted">原视频不可用，无法重新转写。</p>}
+                  {!session.config.live_video_enabled&&<p className="muted">视频处理当前未启用。</p>}
+                  {videoReprocessBusy&&<p className="muted">已有任务，请前往任务页查看进度或处理异常。</p>}
+                  <button disabled={busy||!!edit||!sourcePaid||!detail.original_url||!session.config.live_video_enabled||stale||videoReprocessBusy} onClick={()=>run(async()=>{
+                    if (videoReprocessRequest.current?.key !== key) videoReprocessRequest.current = {key, id:crypto.randomUUID()};
+                    await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id,request_id:videoReprocessRequest.current.id})});
+                    videoReprocessRequest.current = null;
+                    setSourcePaid(false);await changed();setMessage('重新转写任务已提交，请在任务页查看进度。');
+                  })}>重新转写并生成新版本</button></details>}
                 <details><summary>版本与技术信息</summary><pre>{JSON.stringify({source_id:source.id,version_id:current.id,content_sha256:current.content_sha256,content_status:source.content_status},null,2)}</pre></details>
                 <details><summary>删除资料</summary><p>删除后资料将退出检索与问答，现有引用会失效。可在回收站保留期限内撤销。</p><button className="danger" disabled={busy} onClick={()=>confirmAction('删除资料','删除“'+(source.title||source.original_name)+'”后将退出知识库，现有引用失效。可在回收站保留期限内撤销。',()=>run(async()=>{
                   const sequence=openSequence.current,sourceId=source.id;await api('/sources/'+sourceId,{method:'DELETE'});delete cache.current[sourceId];

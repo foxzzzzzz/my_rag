@@ -252,9 +252,14 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             if row['status'] == 'in_flight' and row['name'] not in ASR_UPLOAD_STAGES and (row['name'] != 'asr_submit' or not row['remote_task_id']):
                 if row['name'] != 'asr_result': raise WorkflowError('unknown_submission')
         source = store.get_source(task['source_id'])
+        with store._tx() as db:
+            base = db.execute('SELECT base_version_id FROM video_reprocess WHERE task_id=?', (task_id,)).fetchone()
+        if base and source['current_version_id'] != base[0] and not task['remote_task_id']:
+            raise WorkflowError('version_conflict')
         root = _root(workflow_config).resolve()
-        blob = (root / source['blob_relpath']).resolve()
-        if not blob.is_relative_to(root) or _hash(blob) != source['sha256']:
+        candidate = root / source['blob_relpath']
+        blob = candidate.resolve()
+        if any(p.is_symlink() or (hasattr(p, 'is_junction') and p.is_junction()) for p in (candidate, *candidate.parents)) or not blob.is_relative_to(root) or not blob.is_file() or _hash(blob) != source['sha256']:
             raise WorkflowError('source_integrity')
         work = root / 'video-work' / task_id
         if any(p.is_symlink() for p in (work, *work.parents)): raise WorkflowError('invalid_work_path')
@@ -352,6 +357,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             if asr.get('error'): raise WorkflowError(asr['error'])
             for a in journal.assets(task_id):
                 if a['status'] == 'registered': journal.asset_terminal(task_id, token, a['asset_id'])
+            if base and store.get_source(task['source_id'])['current_version_id'] != base[0]:
+                raise WorkflowError('version_conflict')
             visual, evidence = [], [dict(type='audio', **s) for s in asr['segments']]
             for frame in frames:
                 beat.check()
@@ -381,6 +388,9 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         code = exc.code if isinstance(exc, (WorkflowError, StorageError)) else 'video_processing_failed'
         try: store.fail(task_id, token, code, needs_attention=preparing_upload)
         except WorkflowError: pass
+        if code == 'version_conflict':
+            try: cleanup_video(workflow_config, pc, secrets, task_id, storage=storage)
+            except Exception: pass
         raise WorkflowError(code) from None
     # Cleanup failure must never erase or roll back a completed knowledge draft.
     try: cleanup_video(workflow_config, pc, secrets, task_id, storage=storage)
@@ -417,8 +427,8 @@ def _guarded_cleanup_video(workflow_config, pipeline_config, secrets, task_id, *
                     journal.mark_cleaned(row['asset_id'], 'deleted')
                 results.append({'asset_id':row['asset_id'], 'status':'deleted', 'deleted':True})
         # Only the owned temporary WAV; keep frames, manifests, original and evidence.
-        state = store._row(journal._cleanup[0], 'tasks', task_id)['status']
-        if state == 'succeeded' and results and all(r['status'] in ('deleted','provider_managed') for r in results):
+        task = store._row(journal._cleanup[0], 'tasks', task_id)
+        if (task['status'] == 'succeeded' or task['error_code'] == 'version_conflict') and results and all(r['status'] in ('deleted','provider_managed') for r in results):
             root = Path(workflow_config['data_dir']).resolve()
             audio = root / 'video-work' / task_id / 'audio.wav'
             if any(p.is_symlink() for p in (audio, *audio.parents)): raise WorkflowError('invalid_cleanup_path')

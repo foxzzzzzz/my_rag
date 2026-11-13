@@ -258,6 +258,47 @@ class WebApiTests(unittest.TestCase):
         detail=self.client.get('/api/sources/'+item['source_id']).json()
         return item['source_id'],detail['current']
 
+    def test_completed_video_reprocess_requires_consent_original_and_current_version(self):
+        import hashlib
+
+        store = self.service.store
+        root = Path(self.wc['data_dir'])
+        original = root / 'sample.mp4'
+        original.write_bytes(b'video')
+        imported = store.import_source('video', hashlib.sha256(b'video').hexdigest(), 'sample.mp4', 'sample.mp4')
+        sid = imported['source']['id']
+        tid = imported['task']['id']
+        lease = store.claim_specific(tid, 'test')['lease_token']
+        version = store.finish(tid, lease, dict(title='Sample', body='Body', summary='Summary', notes='Notes',
+            transcript='Body', visual='Frame',
+            provenance='provider', output_kind='machine_initial', scheme_id='test', scheme_version='1',
+            evidence=[{'type':'audio','text':'Body','start_seconds':0,'end_seconds':1}]))
+        store.review(sid, version['id'], version['content_sha256'], 90, 'rework', 'tester')
+        path = f'/api/sources/{sid}/process'
+        consent = {'allow_paid':True,'expected_version_id':version['id'],'request_id':'6aa28100-ef06-48f0-9d73-b4ff501051a8'}
+
+        assert self.client.post(path, json={**consent,'allow_paid':False}, headers=self.h).json()['error'] == 'paid_consent_required'
+        assert self.client.post(path, json={**consent,'expected_version_id':'old'}, headers=self.h).json()['error'] == 'version_conflict'
+        original.unlink()
+        assert self.client.get(f'/api/sources/{sid}').json()['original_url'] is None
+        assert self.client.post(path, json=consent, headers=self.h).json()['error'] == 'media_expired'
+        original.write_bytes(b'video')
+
+        queued = self.client.post(path, json=consent, headers=self.h)
+        assert queued.status_code == 200
+        assert queued.json()['task_id'] != tid
+        assert self.client.post(path, json=consent, headers=self.h).json() == queued.json()
+        assert self.client.post(path, json={**consent,'request_id':None}, headers=self.h).json()['error'] == 'invalid_state'
+        assert store.claim_specific(queued.json()['task_id'], 'offline-worker') is None
+        assert store.claim('offline-worker') is None
+        assert len(store.list_tasks()) == 2
+        detail = self.client.get(f'/api/sources/{sid}').json()
+        assert detail['current']['id'] == version['id']
+        assert detail['review']['decision'] == 'rework'
+        self.service.dispatcher.cancel(queued.json()['task_id'])
+        assert self.client.post(path, json=consent, headers=self.h).json()['dispatch_state'] == 'cancelled'
+        assert len(store.list_tasks()) == 2
+
     def test_low_score_approve_rejected(self):
         sid,v=self.make_version()
         payload=dict(version_id=v['id'],content_sha256=v['content_sha256'],score=50,decision='approve',reviewer='tester',review_id='r1')

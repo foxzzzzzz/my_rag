@@ -350,7 +350,18 @@ def retention(config, apply=False):
                 marker = c.execute('SELECT * FROM media_retention WHERE source_id=?', (sid,)).fetchone() if has_table else None
                 if marker and marker['status'] == 'removed':
                     report.append({'source_id': sid, 'status': 'removed'}); continue
-                tasks = c.execute('SELECT status,updated_at FROM tasks WHERE source_id=?', (sid,)).fetchall()
+                tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                tasks = c.execute('SELECT id,status,error_code,external_started,updated_at FROM tasks WHERE source_id=?', (sid,)).fetchall()
+                ignored = set()
+                if 'video_reprocess' in tables:
+                    for task in tasks:
+                        safe_terminal = (
+                            task['status'] in ('failed','cancelled') and not task['external_started']
+                            or task['status'] == 'needs_attention' and task['error_code'] == 'version_conflict'
+                        )
+                        if safe_terminal and c.execute('SELECT 1 FROM video_reprocess WHERE task_id=?', (task['id'],)).fetchone():
+                            ignored.add(task['id'])
+                tasks = [task for task in tasks if task['id'] not in ignored]
                 if not tasks or any(t['status'] != 'succeeded' for t in tasks): reason = 'requires_attention_tasks'
                 else:
                     try:
@@ -358,10 +369,9 @@ def retention(config, apply=False):
                         if latest > cutoff: reason = 'retention_not_expired'
                     except (ValueError, TypeError): reason = 'requires_attention_timestamp'
                 if reason is None:
-                    tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     if c.execute('SELECT 1 FROM sources WHERE id<>? AND blob_relpath=? LIMIT 1', (sid,source['blob_relpath'])).fetchone(): reason = 'requires_attention_shared_original'
-                    if 'web_dispatch' in tables and c.execute("SELECT 1 FROM web_dispatch d JOIN tasks t ON t.id=d.task_id WHERE t.source_id=? AND d.state<>'done' LIMIT 1", (sid,)).fetchone(): reason = 'requires_attention_dispatch'
-                    if 'video_stages' in tables and c.execute("SELECT 1 FROM video_stages v JOIN tasks t ON t.id=v.task_id WHERE t.source_id=? AND v.status<>'completed' LIMIT 1", (sid,)).fetchone(): reason = 'requires_attention_remote_stage'
+                    if 'web_dispatch' in tables and any(r['task_id'] not in ignored or r['state'] in ('pending','working') for r in c.execute("SELECT d.task_id,d.state FROM web_dispatch d JOIN tasks t ON t.id=d.task_id WHERE t.source_id=? AND d.state<>'done'", (sid,))): reason = 'requires_attention_dispatch'
+                    if 'video_stages' in tables and any(r['task_id'] not in ignored or r['status'] == 'in_flight' for r in c.execute("SELECT v.task_id,v.status FROM video_stages v JOIN tasks t ON t.id=v.task_id WHERE t.source_id=? AND v.status<>'completed'", (sid,))): reason = 'requires_attention_remote_stage'
                     if 'video_assets' in tables and c.execute("SELECT 1 FROM video_assets v JOIN tasks t ON t.id=v.task_id WHERE t.source_id=? AND v.status NOT IN ('deleted','provider_managed') LIMIT 1", (sid,)).fetchone(): reason = 'requires_attention_remote_asset'
                 if reason is None:
                     try:
