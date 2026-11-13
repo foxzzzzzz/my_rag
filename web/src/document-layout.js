@@ -8,17 +8,20 @@ function escapedAt(text, index) {
   return (index-start)%2!==0;
 }
 
+function codeSpanEnds(text) {
+  const ends=new Map(), nextRun=new Map();
+  for(const run of [...text.matchAll(/`+/g)].reverse()){
+    const length=run[0].length;
+    if(nextRun.has(length))ends.set(run.index,nextRun.get(length));
+    nextRun.set(length,run.index+length);
+  }
+  return ends;
+}
+
 export function parseInline(text) {
   text=String(text);
   const tokens=[];
-  const runs=[...text.matchAll(/`+/g)];
-  const nextRun=new Map();
-  const codeEnds=new Map();
-  for(const run of runs.reverse()){
-    const length=run[0].length;
-    if(nextRun.has(length))codeEnds.set(run.index,nextRun.get(length));
-    nextRun.set(length,run.index+length);
-  }
+  const codeEnds=codeSpanEnds(text);
 
   let bold=null;
   let cursor=0;
@@ -128,22 +131,80 @@ function summaryBlocks(paragraph) {
   const items=entries.map((marker,index)=>text.slice(marker.offset,entries[index+1]?.offset??listEnd).trimEnd());
   const blocks=[];
   if(intro)blocks.push({type:'paragraph',text:intro});
-  blocks.push({type:'list',items});
+  blocks.push({type:'list',ordered:false,items:items.map(text=>({text,children:[]}))});
   if(listEnd<text.length)blocks.push({type:'paragraph',text:text.slice(listEnd)});
   return blocks;
 }
 
-export function parseDocument(value, {structureSummary=false}={}) {
+const listMarker = line => line.match(/^( *)([-*+]|(\d{1,9})[.)])\s+(.+)$/);
+// Limit nested blocks to prevent hostile input exhausting the JavaScript stack.
+const MAX_BLOCK_DEPTH=32;
+function cells(line) {
+  const text=line.trim(), parts=[];
+  const closingRun=codeSpanEnds(text);
+  let start=0;
+  for(let i=0;i<text.length;i++){
+    if(text[i]==='`'&&!escapedAt(text,i)){
+      const end=closingRun.get(i);
+      if(end!==undefined){i=end-1;continue;}
+    }
+    if(text[i]==='|'&&!escapedAt(text,i)){parts.push(text.slice(start,i));start=i+1;}
+  }
+  parts.push(text.slice(start));
+  const framed=parts.length>1&&(parts[0]===''||parts.at(-1)==='');
+  const delimited=parts.length>1;
+  if(parts.length>1&&parts[0]==='')parts.shift();
+  if(parts.length>1&&parts.at(-1)==='')parts.pop();
+  return {framed,delimited,values:parts.map(part=>part.trim().replace(/(\\+)\|/g,(match,slashes)=>slashes.length%2?slashes.slice(1)+'|':match))};
+}
+function isTable(lines,i) {
+  if(i+1>=lines.length||!lines[i].includes('|'))return false;
+  const header=cells(lines[i]), separator=cells(lines[i+1]);
+  return header.delimited&&header.values.length===separator.values.length&&separator.values.every(cell=>/^:?-{3,}:?$/.test(cell));
+}
+function readList(lines, start, indent, depth=0) {
+  const first=listMarker(lines[start]);
+  const ordered=!!first[3], items=[]; let i=start;
+  while(i<lines.length){
+    const marker=listMarker(lines[i]);
+    if(!marker||marker[1].length!==indent||!!marker[3]!==ordered)break;
+    const item={text:marker[4],children:[]}; i++;
+    while(i<lines.length){
+      let next=i;while(next<lines.length&&!lines[next].trim())next++;
+      const child=listMarker(lines[next]||'');
+      if(!child)break;
+      if(child[1].length===indent&&!!child[3]===ordered){i=next;break;}
+      if(child[1].length<=indent||depth>=MAX_BLOCK_DEPTH)break;
+      const result=readList(lines,next,child[1].length,depth+1);item.children.push(result.block);i=result.next;
+    }
+    items.push(item);
+  }
+  return {block:{type:'list',ordered,start:ordered?Number(first[3]):undefined,items},next:i};
+}
+export function parseDocument(value, {structureSummary=false, depth=0}={}) {
   const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
   const blocks = []; let i = 0;
+  const beginsBlock = index => /^(#{1,6}\s|```)/.test(lines[index])||/^\s*>/.test(lines[index])&&depth<MAX_BLOCK_DEPTH||!!listMarker(lines[index])||isTable(lines,index);
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) { i++; continue; }
     if (/^```/.test(line)) { const code=[]; i++; while(i<lines.length && !/^```/.test(lines[i])) code.push(lines[i++]); if(i<lines.length)i++; blocks.push({type:'code',text:code.join('\n')}); continue; }
     const heading = line.match(/^(#{1,6})\s+(.+)$/); if(heading) { blocks.push({type:'heading',level:heading[1].length,text:heading[2]}); i++; continue; }
-    if(i+1<lines.length && line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1])) { const rows=[line]; i+=2; while(i<lines.length && lines[i].includes('|') && lines[i].trim()) rows.push(lines[i++]); blocks.push({type:'table',rows:rows.map(x=>x.replace(/^\s*\||\|\s*$/g,'').split('|').map(y=>y.trim()))}); continue; }
-    if(/^\s*[-*+]\s+/.test(line)) { const items=[]; while(i<lines.length && /^\s*[-*+]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*+]\s+/,'')); blocks.push({type:'list',items}); continue; }
-    const paragraph=[line]; i++; while(i<lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*[-*+]\s)/.test(lines[i])) paragraph.push(lines[i++]); blocks.push({type:'paragraph',text:paragraph.join('\n')});
+    if(isTable(lines,i)) {
+      const header=cells(line), rows=[header.values];
+      i+=2;
+      while(i<lines.length&&lines[i].trim()&&!beginsBlock(i)){
+        const row=cells(lines[i]);
+        if(!row.delimited||header.framed&&!row.framed||row.values.length!==header.values.length)break;
+        rows.push(row.values);
+        i++;
+      }
+      blocks.push({type:'table',rows});
+      continue;
+    }
+    if(/^\s*>/.test(line)&&depth<MAX_BLOCK_DEPTH) {const quoted=[];while(i<lines.length&&/^\s*>/.test(lines[i]))quoted.push(lines[i++].replace(/^\s*> ?/,''));blocks.push({type:'quote',blocks:parseDocument(quoted.join('\n'),{depth:depth+1})});continue;}
+    const marker=listMarker(line);if(marker){const result=readList(lines,i,marker[1].length);blocks.push(result.block);i=result.next;continue;}
+    const paragraph=[line]; i++; while(i<lines.length && lines[i].trim() && !beginsBlock(i)) paragraph.push(lines[i++]); blocks.push({type:'paragraph',text:paragraph.join('\n')});
   }
   return structureSummary?blocks.flatMap(block=>block.type==='paragraph'?summaryBlocks(block):[block]):blocks;
 }

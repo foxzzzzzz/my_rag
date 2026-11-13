@@ -126,8 +126,8 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .source-management { border-block:1px solid var(--border); padding:0 var(--mobile-pad-x); background:var(--app-bg) }
 .source-management summary { padding-block:var(--radius) }
 .source-prose .document-reader { max-width:var(--detail-reading-measure) }
-.source-prose .document-reader :is(p,ul) { margin-block:0 var(--detail-reading-block-gap) }
-.source-prose .document-reader ul { padding-inline-start:var(--detail-list-indent) }
+.source-prose .document-reader :is(p,ul,ol,blockquote) { margin-block:0 var(--detail-reading-block-gap) }
+.source-prose .document-reader :is(ul,ol) { padding-inline-start:var(--detail-list-indent) }
 .source-prose .document-reader li + li { margin-block-start:var(--detail-list-item-gap) }
 .source-prose .document-reader :is(h2,h3,h4,h5,h6) { margin-block:var(--detail-section-gap) var(--detail-reading-block-gap) }
 .source-prose .document-reader > :first-child { margin-block-start:0 }
@@ -246,3 +246,5 @@ dialog::backdrop { background:#0006; }
 .login-panel form { display: grid; gap: 16px; }
 .login-panel label { display: grid; gap: 8px; }
 .login-panel input { width: 100%; }
+
+.source-prose .document-reader blockquote { border-inline-start:2px solid var(--border); padding-inline-start:var(--detail-list-indent); margin-inline:0; color:var(--muted); }

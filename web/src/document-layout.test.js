@@ -15,7 +15,7 @@ test('旧摘要按明确枚举拆分并保留结论和取证边界的原文',()=
   const summary=['开头概述。', [intro,...items,limit].join(' ')].join('\n\n');
   assert.deepEqual(parseDocument(summary,{structureSummary:true}),[
     {type:'paragraph',text:'开头概述。'},{type:'paragraph',text:intro},
-    {type:'list',items},{type:'paragraph',text:limit}
+    {type:'list',ordered:false,items:items.map(text=>({text,children:[]}))},{type:'paragraph',text:limit}
   ]);
   assert.equal(parseDocument(summary)[1].text,[intro,...items,limit].join(' '));
 });
@@ -41,7 +41,7 @@ test('段首枚举和带粗体或分号的取证边界仍可分开',()=>{
   for(const limit of ['**作者强调**仅测试样本。','材料存在多处字幕与画面不一致。','**局限**：仅验证样本。','作者强调两类限制：一是样本量；二是测试范围。']){
     const text='一是静态；二是动态；'+limit;
     assert.deepEqual(parseDocument(text,{structureSummary:true}),[
-      {type:'list',items:['一是静态；','二是动态；']},
+      {type:'list',ordered:false,items:['一是静态；','二是动态；'].map(text=>({text,children:[]}))},
       {type:'paragraph',text:limit}
     ]);
   }
@@ -73,4 +73,50 @@ test('保留双反引号内的字面文本及加粗和链接的组合',()=>{
   const [link]=parseInline('[**文档**](https://example.com)');
   assert.equal(link.href,'https://example.com/');
   assert.deepEqual(link.children,[{type:'strong',children:[{type:'text',text:'文档'}]}]);
+});
+
+test('有序列表保留起始编号、两空格缩进及父子层级',()=>{
+  const [list]=parseDocument('3. 父项\n  1. 子项一\n  2. 子项二\n4. 第二项');
+  assert.equal(list.ordered,true);assert.equal(list.start,3);assert.equal(list.items.length,2);
+  assert.equal(list.items[0].children[0].items.length,2);assert.equal(list.items[0].children[0].start,1);assert.equal(list.items[1].text,'第二项');
+});
+test('引用块边界与紧跟正文的表格',()=>{
+  const blocks=parseDocument('正文\n| 列一 | 列二 |\n| --- | :---: |\n| a | b |\n\n> 引用一\n> 引用二\n普通文本');
+  assert.deepEqual(blocks.map(x=>x.type),['paragraph','table','quote','paragraph']);assert.deepEqual(blocks[1].rows,[['列一','列二'],['a','b']]);assert.equal(blocks[2].blocks[0].text,'引用一\n引用二');
+});
+test('引用内的列表保留层级，围栏内的列表和引用保持原样',()=>{
+  const [quote,code]=parseDocument('> 引用\n>\n> 1. 第一项\n>   - 子项\n> 2. 第二项\n\n```\n1. 示例\n> 示例\n```');
+  assert.equal(quote.type,'quote');
+  assert.equal(quote.blocks[1].items[0].children[0].items[0].text,'子项');
+  assert.deepEqual(code,{type:'code',text:'1. 示例\n> 示例'});
+});
+test('列表与引用中的 HTML 仍是纯文本',()=>{
+  const blocks=parseDocument('1. <script>alert(1)</script>\n\n> <img src=x onerror=evil>');
+  assert.equal(blocks[0].items[0].text,'<script>alert(1)</script>');assert.equal(blocks[1].blocks[0].text,'<img src=x onerror=evil>');
+});
+
+test('表格保留转义和代码中的竖线，遇到标题或下一张表停止',()=>{
+  const blocks=parseDocument('A | B\n--- | ---\n`x|y` | a\\|b\n# 标题 | 内容\nC | D\n--- | ---\n1 | 2');
+  assert.deepEqual(blocks.map(b=>b.type),['table','heading','table']);
+  assert.deepEqual(blocks[0].rows[1],['`x|y`','a|b']);
+  const even=parseDocument('A | B\n--- | ---\nx\\\\|y')[0];assert.deepEqual(even.rows[1],['x\\\\','y']);
+});
+test('带外侧竖线的表格保留单列表和后面的竖线正文',()=>{
+  const blocks=parseDocument('| 表头 |\n| --- |\n| 内容 |\n正文 x | y\n| A | B |\n| --- | --- |\n| a | b |\n| 列数不符 |');
+  assert.deepEqual(blocks.map(block=>block.type),['table','paragraph','table','paragraph']);
+  assert.deepEqual(blocks[0].rows,[['表头'],['内容']]);
+  assert.deepEqual(blocks[2].rows,[['A','B'],['a','b']]);
+  assert.equal(blocks[1].text,'正文 x | y');
+  assert.equal(blocks[3].text,'| 列数不符 |');
+});
+test('表格内未闭合的反引号保留为普通文本',()=>{
+  const [table]=parseDocument('| A | B |\n| --- | --- |\n| 写法 ` | 说明 |');
+  assert.deepEqual(table.rows[1],['写法 `','说明']);
+});
+test('空行后仍可连接同级和缩进的列表项',()=>{
+ const [list]=parseDocument('1. 父\n\n  1. 子\n\n2. 后');assert.equal(list.items.length,2);assert.equal(list.items[0].children[0].items[0].text,'子');
+});
+test('过深引用和列表不会耗尽调用栈',()=>{
+ assert.doesNotThrow(()=>parseDocument('>'.repeat(4000)+' text'));
+ assert.doesNotThrow(()=>parseDocument(Array.from({length:100},(_,i)=>' '.repeat(i)+'- x').join('\n')));
 });
