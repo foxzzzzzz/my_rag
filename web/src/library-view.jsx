@@ -1,6 +1,9 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {filterSources, isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {classificationTopicRequired, formatDate} from './helpers';
+import {compareTime, TimeSortButton} from './time-sort';
+
+const importTime=source=>source.created_at||source.updated_at;
 
 const batchStatus = {
   success:'已完成',
@@ -26,13 +29,15 @@ function Choices({catalog,kind,value,onChange}) {
 
 export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,filters,setFilters,onResetFilters,onImport,onTrash,listRef,displayTimezone}) {
   const [selection,setSelection]=useState({});
+  const [timeDirection,setTimeDirection]=useState('asc');
   const [batchOpen,setBatchOpen]=useState(false);
   const [topics,setTopics]=useState([]), [tags,setTags]=useState([]), [operation,setOperation]=useState('add');
   const [results,setResults]=useState([]), [working,setWorking]=useState(false), [message,setMessage]=useState('');
   const selectionScope=useRef(0);
   const previousScope=useRef({topicId,filters});
   const unclassified=topicId===UNCLASSIFIED_TOPIC;
-  const visible=filterSources(sources,{...filters,unclassified,topics:topicId&&!unclassified?[topicId]:[]});
+  const visible=filterSources(sources,{...filters,unclassified,topics:topicId&&!unclassified?[topicId]:[]})
+    .sort((a,b)=>compareTime(importTime(a),importTime(b),timeDirection));
   const selected=visible.filter(source=>Object.hasOwn(selection,source.id));
   const allSelected=visible.length>0&&selected.length===visible.length;
   const hasBatchFeedback=results.length>0||!!message;
@@ -58,6 +63,10 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
 
   function filter(key,value) {
     setFilters(previous=>({...previous,[key]:value}));
+  }
+  function toggleTimeDirection(){
+    setTimeDirection(value=>value==='asc'?'desc':'asc');
+    if(listRef.current)listRef.current.scrollTop=0;
   }
   function toggleSource(source,checked) {
     if(!checked&&selected.length===1){clearSelection();return}
@@ -138,6 +147,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
         全选匹配结果
       </label>
       <span className="muted" role="status">匹配 {visible.length} 份{selected.length>0&&`，已选 ${selected.length} 份`}</span>
+      {!!visible.length&&<TimeSortButton label="导入时间" direction={timeDirection} onClick={toggleTimeDirection} mobile/>}
       {(selected.length>0||hasBatchFeedback)&&<div className="library-selection-actions">
         <button aria-expanded={batchOpen} aria-controls="library-batch-classification"
           onClick={()=>setBatchOpen(!batchOpen)}>{selected.length?'批量分类':'批量分类结果'}</button>
@@ -165,13 +175,14 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
       </div>
     </div>
     {!visible.length&&<p>没有匹配的资料，请清空筛选或导入资料。</p>}
-    {!!visible.length&&<div className="library-list-columns library-column-head" aria-hidden="true">
-      <span/><span>资料名称</span><span>主题 / 标签</span><span>审核状态</span><span>导入时间</span>
+    {!!visible.length&&<div className="library-list-columns library-column-head">
+      <span/><span>资料名称</span><span>主题 / 标签</span><span>审核状态</span>
+      <TimeSortButton label="导入时间" direction={timeDirection} onClick={toggleTimeDirection}/>
     </div>}
     {visible.map(source=>{
       const topicNames=source.classification?.topics?.map(item=>item.name).join('、')||'未分类';
       const tagNames=source.classification?.tags?.map(item=>item.name).join('、');
-      const date=source.created_at||source.updated_at;
+      const date=importTime(source);
       return <div className="source-row library-list-columns library-source-row" key={source.id}>
         <input aria-label={'选择 '+source.original_name} type="checkbox" disabled={working}
           checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>

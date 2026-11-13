@@ -207,6 +207,18 @@ dialog::backdrop { background:#0006; }
 .library-identity small,.library-taxonomy small { margin-top:1px }
 .library-taxonomy,.library-review,.library-source-row .source-date { font-size:var(--sidebar-meta-size) }
 .library-review,.library-source-row .source-date { color:var(--muted) }
+.time-sort-button {
+  display:inline-flex; align-items:center; gap:6px; justify-self:start; align-self:flex-start;
+  padding:0; border:0; color:var(--accent); background:transparent;
+}
+.time-sort-button:hover { text-decoration:underline }
+.time-sort-mobile { display:none; padding:4px 8px; border:1px solid var(--border); background:var(--surface) }
+@media(max-width:860px) {
+  .library-list-head .time-sort-mobile { display:inline-flex }
+}
+@media(max-width:940px) {
+  .task-list-summary .time-sort-mobile { display:inline-flex }
+}
 .library-review[data-review="approve"] { color:var(--connection-online); font-weight:600 }
 .library-review[data-review="reject"],.library-review[data-review="rework"] { color:var(--danger) }
 .library-source-row .source-date { font-variant-numeric:tabular-nums }

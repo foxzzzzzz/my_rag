@@ -1,4 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {compareTime, TimeSortButton} from './time-sort';
 import {errorText, formatDate, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
 
 const emptyFilters={query:'',status:'',kind:''};
@@ -78,6 +79,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
 
 export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}) {
   const [archived,setArchived]=useState(false);
+  const [timeDirection,setTimeDirection]=useState('desc');
   const [filters,setFilters]=useState(emptyFilters);
   const [paid,setPaid]=useState(false);
   const [htmlMode,setHtmlMode]=useState('preview');
@@ -97,8 +99,8 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
         &&(!filters.kind||kind===filters.kind)
         &&(!query||[item?.title,item?.original_name,task.id].some(text=>text?.toLocaleLowerCase().includes(query)));
     })
-    .sort((a,b)=>(b.task.created_at||'').localeCompare(a.task.created_at||'')||b.task.id.localeCompare(a.task.id)),
-    [tasks,sourcesById,archived,htmlMode,filters.status,filters.kind,query]);
+    .sort((a,b)=>compareTime(a.task.updated_at,b.task.updated_at,timeDirection)||b.task.id.localeCompare(a.task.id)),
+    [tasks,sourcesById,archived,htmlMode,filters.status,filters.kind,query,timeDirection]);
   const filtering=!!(query||filters.status||filters.kind);
 
   useEffect(()=>{
@@ -106,6 +108,10 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
   },[archived,filters]);
 
   function setFilter(key,value){setFilters(previous=>({...previous,[key]:value}));}
+  function toggleTimeDirection(){
+    setTimeDirection(value=>value==='asc'?'desc':'asc');
+    if(listRef.current)listRef.current.scrollTop=0;
+  }
 
   return <section className="list-page" hidden={!active}>
     <div className="list-page-controls task-list-controls">
@@ -130,6 +136,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
       </div>
       <div className="task-list-summary">
         <span className="muted" role="status">{loaded?`匹配 ${filtered.length} 条任务`:'正在读取任务…'}</span>
+        {!!filtered.length&&<TimeSortButton label="更新时间" direction={timeDirection} onClick={toggleTimeDirection} mobile/>}
         {!archived&&<details className="task-processing">
           <summary>处理设置{paid?' · 已同意模型费用':''}</summary>
           <div className="actions task-processing-options">
@@ -145,8 +152,10 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
       </div>
     </div>
     <div className="list-scroll task-list" ref={listRef} role="region" aria-label={archived?'已归档任务列表':'未归档任务列表'} tabIndex={0}>
-      {filtered.length>0&&<div className="task-grid task-table-heading" aria-hidden="true">
-        <span>资料名称</span><span>状态 / 进度</span><span>更新时间</span><span>操作</span>
+      {filtered.length>0&&<div className="task-grid task-table-heading">
+        <span>资料名称</span><span>状态 / 进度</span>
+        <TimeSortButton label="更新时间" direction={timeDirection} onClick={toggleTimeDirection}/>
+        <span>操作</span>
       </div>}
       {loaded&&!filtered.length&&<p>{filtering?'没有符合筛选条件的任务。':archived?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}
       {filtered.map(({task,item,controls})=><TaskRow key={task.id} task={task} item={item} controls={controls}
