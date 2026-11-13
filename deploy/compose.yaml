@@ -30,7 +30,10 @@ services:
     read_only: true
     mem_limit: ${WORKER_MEMORY:-1g}
     cpus: ${WORKER_CPUS:-2}
-    pids_limit: ${PIDS_LIMIT:-128}
+    pids_limit: ${WORKER_PIDS_LIMIT:-256}
+    environment:
+      XDG_CONFIG_HOME: /tmp/personalkb-chromium/config
+      XDG_CACHE_HOME: /tmp/personalkb-chromium/cache
     volumes: *volumes
     logging: *logging
     command: ["python", "-m", "tools.worker", "--config", "/app/config/web.json"]
