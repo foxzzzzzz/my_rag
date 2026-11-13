@@ -33,6 +33,10 @@ def load_config(path):
             amount = Decimal(str(config[key]))
             if not amount.is_finite() or amount < 0:
                 raise ValueError()
+        manual_budget = Decimal(str(config.get('manual_video_budget_cny', config['video_budget_cny'])))
+        if not manual_budget.is_finite() or manual_budget < 0 or manual_budget != manual_budget.quantize(Decimal('.01')):
+            raise ValueError()
+        config['manual_video_budget_cny'] = format(manual_budget, '.2f') if manual_budget else None
         if config['conversion_enabled'] and not (
             config['auto_download'] and 0 < Decimal(str(config['video_budget_cny'])) <= Decimal(str(config['daily_budget_cny']))
         ):
@@ -68,6 +72,8 @@ class FavoritesSync:
                 status TEXT NOT NULL DEFAULT 'queued');
             CREATE TABLE IF NOT EXISTS favorites_conversion (
                 task_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, day TEXT NOT NULL, amount TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS favorites_manual_consent (
+                queue_seq INTEGER PRIMARY KEY, video_budget_cny TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS favorites_conversion_slots (
                 task_id TEXT NOT NULL, day TEXT NOT NULL, amount TEXT NOT NULL, PRIMARY KEY(task_id,day));
             CREATE TABLE IF NOT EXISTS favorites_download_slots (
@@ -95,12 +101,18 @@ class FavoritesSync:
 
     def can_claim_conversion(self, db, reservation, cookie):
         s = self._state(db)
+        if (not cookie or s['state'] != 'ready' or s['scan_requested'] or
+                s['active'] != reservation['account_id'] or self._credential(cookie) != s['credential']):
+            return False
+        manual = db.execute("""SELECT 1 FROM favorites_manual_consent m
+                            JOIN favorites_queue q ON q.seq=m.queue_seq WHERE q.task_id=?""",
+                            (reservation['task_id'],)).fetchone()
+        if manual:
+            return True
         now = datetime.now(ZoneInfo(self.config['timezone']))
         day = now.date().isoformat()
         needs_scan = self.config['schedule_enabled'] and s['last_day'] != day
-        if (not self.config['conversion_enabled'] or not cookie or s['state'] != 'ready' or
-                s['scan_requested'] or needs_scan or s['active'] != reservation['account_id'] or
-                self._credential(cookie) != s['credential']):
+        if not self.config['conversion_enabled'] or needs_scan:
             return False
         amount = Decimal(reservation['amount'])
         if amount > Decimal(str(self.config['video_budget_cny'])):
@@ -117,7 +129,7 @@ class FavoritesSync:
         db.execute('UPDATE favorites_conversion SET day=? WHERE task_id=?', (day, reservation['task_id']))
         return True
 
-    def status(self, cookie):
+    def status(self, cookie, *, manual_conversion_available=False):
         with self.store._tx() as db:
             s = self._state(db)
             account = db.execute('SELECT * FROM favorites_accounts WHERE id=?', (s['active'],)).fetchone()
@@ -128,15 +140,20 @@ class FavoritesSync:
             elif state == 'ready' and not ready:
                 state = 'paused'
             items = []
-            for row in db.execute("""SELECT i.work_id,i.title,q.status
+            for row in db.execute("""SELECT i.work_id,i.title,q.status,
+                  (m.queue_seq IS NOT NULL AND q.account_id=i.account_id) AS paid
                   FROM favorites_items i LEFT JOIN favorites_queue q USING(work_id)
+                  LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
                   WHERE i.account_id=? AND i.baseline=1 ORDER BY i.position""", (s['active'],)):
                 status = row['status']
                 if self._existing(db, row['work_id']):
                     removed = db.execute("""SELECT 1 FROM sources WHERE deleted=1 AND (
                         original_name=? OR id=(SELECT source_id FROM douyin_cache WHERE work_id=?))""",
                         (f"douyin-{row['work_id']}.mp4", row['work_id'])).fetchone()
-                    status = 'deleted' if removed else 'imported'
+                    if removed:
+                        status = 'deleted'
+                    elif not row['paid'] or status not in ('downloaded', 'conversion_queued', 'converted', 'conversion_failed'):
+                        status = 'imported'
                 items.append(dict(work_id=row['work_id'], title=row['title'], status=status,
                                   selectable=bool(ready and not status)))
             counts = dict(db.execute('SELECT status, COUNT(*) FROM favorites_queue WHERE account_id=? GROUP BY status',
@@ -149,6 +166,8 @@ class FavoritesSync:
                         items=items, download_limit=self.config['download_limit'], baseline_limit=self.config['baseline_limit'],
                         queue_counts=counts,
                         last_scan=dict(scan) if scan else None,
+                        manual_conversion_available=manual_conversion_available and self.config['manual_video_budget_cny'] is not None,
+                        manual_video_budget_cny=self.config['manual_video_budget_cny'],
                         conversion_enabled=self.config['conversion_enabled'])
 
     def _enabled(self):
@@ -172,10 +191,17 @@ class FavoritesSync:
                        state='baseline_pending',scan_requested=1 WHERE id=1""", (account_id,))
         return {'confirmed': True}
 
-    def select(self, account_id, work_ids, cookie, *, rights_confirmed):
+    def select(self, account_id, work_ids, cookie, *, rights_confirmed, allow_paid=False, video_budget_cny=None):
         self._enabled()
         if rights_confirmed is not True:
             raise WorkflowError('rights_required')
+        if allow_paid is not True:
+            raise WorkflowError('paid_consent_required')
+        amount = self.config['manual_video_budget_cny']
+        if amount is None:
+            raise WorkflowError('favorites_manual_disabled')
+        if video_budget_cny != amount:
+            raise WorkflowError('favorites_price_changed')
         if not isinstance(work_ids, list) or not work_ids or len(work_ids) > self.config['baseline_limit'] or any(
             not isinstance(item, str) or not re.fullmatch(r'[0-9]+', item) for item in work_ids
         ):
@@ -191,7 +217,11 @@ class FavoritesSync:
             count = 0
             for work in available:
                 if work in wanted and not self._existing(db, work):
-                    count += db.execute('INSERT OR IGNORE INTO favorites_queue(account_id,work_id,automatic) VALUES (?,?,0)', (account_id, work)).rowcount
+                    row = db.execute('INSERT OR IGNORE INTO favorites_queue(account_id,work_id,automatic) VALUES (?,?,0)',
+                                     (account_id, work))
+                    if row.rowcount:
+                        db.execute('INSERT INTO favorites_manual_consent VALUES (?,?)', (row.lastrowid, amount))
+                        count += 1
         return {'queued': count}
 
     def _pause(self, db, code):
@@ -294,8 +324,7 @@ class FavoritesSync:
                 return None
             with self.store._tx() as db:
                 s = self._state(db)
-                if (not cookie or credential != s['credential'] or s['state'] != 'ready' or
-                        s['scan_requested'] or (self.config['schedule_enabled'] and s['last_day'] != day)):
+                if not cookie or credential != s['credential'] or s['state'] != 'ready' or s['scan_requested']:
                     return None
                 account = s['active']
             return self._dispatch(account, day, credential, downloader, dispatcher)
@@ -315,18 +344,24 @@ class FavoritesSync:
                        WHERE account_id=? AND status='downloading' AND job_id IN
                        (SELECT id FROM douyin_jobs WHERE status IN ('failed','needs_attention'))""", (account,))
             db.execute("""UPDATE favorites_queue SET status='converted' WHERE account_id=?
-                       AND status='conversion_queued' AND task_id IN (SELECT id FROM tasks WHERE status='succeeded')""", (account,))
+                       AND status IN ('conversion_queued','conversion_failed')
+                       AND task_id IN (SELECT id FROM tasks WHERE status='succeeded')""", (account,))
             db.execute("""UPDATE favorites_queue SET status='conversion_failed' WHERE account_id=?
                        AND status='conversion_queued' AND task_id IN
                        (SELECT task_id FROM web_dispatch WHERE state IN ('error','cancelled'))""", (account,))
-            if self._enqueue_conversion(db, account, day, dispatcher):
+            scheduled_ready = not self.config['schedule_enabled'] or s['last_day'] == day
+            if self._enqueue_conversion(db, account, day, dispatcher, scheduled_ready):
                 return {'favorites': 'conversion_queued'}
             if not all(downloader.status().values()):
                 return None
-            pending = db.execute("""SELECT q.job_id,q.work_id FROM favorites_queue q JOIN douyin_jobs j ON j.id=q.job_id
-                    WHERE q.account_id=? AND q.status='downloading' AND j.status='queued'
-                    AND (q.automatic=0 OR ?=1) ORDER BY q.seq LIMIT 1""", (account, self.config['auto_download'])).fetchone()
             count = db.execute('SELECT COUNT(*) FROM favorites_download_slots WHERE day=?', (day,)).fetchone()[0]
+            has_slot = count < self.config['download_limit']
+            pending = db.execute("""SELECT q.job_id,q.work_id,q.download_day,m.queue_seq AS paid
+                    FROM favorites_queue q JOIN douyin_jobs j ON j.id=q.job_id
+                    LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                    WHERE q.account_id=? AND q.status='downloading' AND j.status='queued'
+                    AND (m.queue_seq IS NOT NULL OR (? AND (q.automatic=0 OR ?) AND (q.download_day=? OR ?)))
+                    ORDER BY q.seq LIMIT 1""", (account, scheduled_ready, self.config['auto_download'], day, has_slot)).fetchone()
             if pending:
                 job_id = pending[0]
                 if self._existing(db, pending['work_id']):
@@ -335,17 +370,15 @@ class FavoritesSync:
                                (pending['work_id'], job_id))
                     return {'favorites': 'skipped'}
                 # The original reservation follows a queued job across restarts. Moving to a new day consumes today's slot.
-                old_day = db.execute('SELECT download_day FROM favorites_queue WHERE job_id=?', (job_id,)).fetchone()[0]
-                if old_day != day:
-                    if count >= self.config['download_limit']:
-                        return None
+                if pending['paid'] is None and pending['download_day'] != day:
                     db.execute('UPDATE favorites_queue SET download_day=? WHERE job_id=?', (day, job_id))
                     db.execute('INSERT INTO favorites_download_slots(job_id,day) VALUES (?,?)', (job_id, day))
             else:
-                if count >= self.config['download_limit']:
-                    return None
-                row = db.execute("""SELECT * FROM favorites_queue WHERE account_id=? AND status='queued'
-                            AND (automatic=0 OR ?=1) ORDER BY seq LIMIT 1""", (account, self.config['auto_download'])).fetchone()
+                row = db.execute("""SELECT q.*,m.queue_seq AS paid FROM favorites_queue q
+                            LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                            WHERE q.account_id=? AND q.status='queued'
+                            AND (m.queue_seq IS NOT NULL OR (? AND (q.automatic=0 OR ?)))
+                            ORDER BY q.seq LIMIT 1""", (account, scheduled_ready and has_slot, self.config['auto_download'])).fetchone()
                 if row is None:
                     return None
                 work = row['work_id']
@@ -358,31 +391,36 @@ class FavoritesSync:
                              VALUES (?,?,?,'queued',?,?)""", (job_id, f'https://www.douyin.com/video/{work}', work, now, now))
                 db.execute("UPDATE favorites_queue SET job_id=?,download_day=?,status='downloading' WHERE seq=?",
                            (job_id, day, row['seq']))
-                db.execute('INSERT INTO favorites_download_slots(job_id,day) VALUES (?,?)', (job_id, day))
+                if row['paid'] is None:
+                    db.execute('INSERT INTO favorites_download_slots(job_id,day) VALUES (?,?)', (job_id, day))
         job = downloader.process_next(job_id=job_id)
         if job and job['error_code'] in ('douyin_resolver_failed', 'douyin_http_failed'):
             with self.store._tx() as db:
                 self._pause(db, job['error_code'])
         return job
 
-    def _enqueue_conversion(self, db, account, day, dispatcher):
-        if not self.config['conversion_enabled'] or not dispatcher.config['live_video_enabled']:
+    def _enqueue_conversion(self, db, account, day, dispatcher, scheduled_ready):
+        if not dispatcher.config['live_video_enabled']:
             return False
         used = [Decimal(row[0]) for row in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
         amount = Decimal(str(self.config['video_budget_cny']))
-        if len(used) >= self.config['conversion_limit'] or sum(used, Decimal(0)) + amount > Decimal(str(self.config['daily_budget_cny'])):
-            return False
-        row = db.execute("""SELECT q.seq,t.id FROM favorites_queue q
+        can_schedule = (scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
+                        and sum(used, amount) <= Decimal(str(self.config['daily_budget_cny'])))
+        row = db.execute("""SELECT q.seq,t.id,m.video_budget_cny FROM favorites_queue q
                 JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
                 JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
                 LEFT JOIN web_task_archive a ON a.task_id=t.id
-                WHERE q.account_id=? AND q.status='downloaded' AND q.automatic=1
+                LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                WHERE q.account_id=? AND q.status='downloaded'
+                AND (m.queue_seq IS NOT NULL OR (? AND q.automatic=1))
                 AND s.deleted=0 AND s.current_version_id IS NULL AND t.status='queued'
-                AND d.task_id IS NULL AND a.task_id IS NULL ORDER BY q.seq,t.rowid LIMIT 1""", (account,)).fetchone()
+                AND d.task_id IS NULL AND a.task_id IS NULL ORDER BY q.seq,t.rowid LIMIT 1""", (account, can_schedule)).fetchone()
         if row is None:
             return False
-        db.execute('INSERT INTO favorites_conversion VALUES (?,?,?,?)', (row['id'], account, day, str(amount)))
-        db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (row['id'], day, str(amount)))
+        manual_amount = row['video_budget_cny']
+        db.execute('INSERT INTO favorites_conversion VALUES (?,?,?,?)', (row['id'], account, day, manual_amount or str(amount)))
+        if manual_amount is None:
+            db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (row['id'], day, str(amount)))
         db.execute("INSERT INTO web_dispatch(task_id,mode,state,requested) VALUES (?,'run','pending',?)", (row['id'], time.time()))
         db.execute("UPDATE favorites_queue SET task_id=?,status='conversion_queued' WHERE seq=?", (row['id'], row['seq']))
         return True

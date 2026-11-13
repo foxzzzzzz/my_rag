@@ -6,12 +6,13 @@
     "daily_at": "每日开始时间 HH:MM",
     "baseline_limit": "账号首次展示和记录的最近收藏视频条数",
     "scan_limit": "每日扫描最多读取的视频条数，用来寻找上次快照",
-    "download_limit": "每日最多派发的下载项，含手动选择及重试",
+    "download_limit": "每日同步最多派发的下载项，含定时重试和旧版下载队列",
     "auto_download": "授权下载符合条件的新增收藏，手动选择另行确认",
     "conversion_enabled": "授权对自动下载的新增视频发起付费转换",
     "conversion_limit": "每日最多派发的自动转换任务数",
     "daily_budget_cny": "自动转换每日预算，按已派发任务的保守上限累计",
     "video_budget_cny": "单条自动转换的费用预留上限",
+    "manual_video_budget_cny": "手动回补单条转换的费用预留上限。旧配置缺少此项时沿用 video_budget_cny",
     "browser_settings": "Chromium 收藏读取配置路径",
     "max_pages": "定时同步的收藏翻页上限"
   },
@@ -27,6 +28,7 @@
   "conversion_limit": 3,
   "daily_budget_cny": "12.15",
   "video_budget_cny": "4.05",
+  "manual_video_budget_cny": "4.05",
   "browser_settings": "config/douyin-favorites.json",
   "max_pages": 30
 }

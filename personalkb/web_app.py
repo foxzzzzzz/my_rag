@@ -185,7 +185,10 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.get('/api/douyin/favorites/sync')
     def favorites_sync():
         sync = service.favorites_sync
-        return sync.status(service.favorites_cookie()) if sync else {'enabled': False, 'items': []}
+        if not sync:
+            return {'enabled': False, 'items': []}
+        available = service.webcfg['live_video_enabled'] and all(service.douyin.status().values())
+        return sync.status(service.favorites_cookie(), manual_conversion_available=available)
     @app.post('/api/douyin/favorites/{action}')
     async def favorites_action(action:str, req:Request):
         payload = await read_object(req)
@@ -195,8 +198,12 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         cookie = service.favorites_cookie()
         if action == 'confirm': return sync.confirm(payload.get('account_id'), cookie)
         if action == 'import':
+            if not service.webcfg['live_video_enabled']:
+                raise WorkflowError('video_disabled')
+            service.douyin._ready()
             return sync.select(payload.get('account_id'), payload.get('work_ids'), cookie,
-                               rights_confirmed=payload.get('rights_confirmed'))
+                               rights_confirmed=payload.get('rights_confirmed'), allow_paid=payload.get('allow_paid'),
+                               video_budget_cny=payload.get('video_budget_cny'))
         raise WorkflowError('favorites_action_not_found')
     @app.get('/api/douyin/jobs')
     def douyin_jobs(): return {'items':service.douyin.jobs()}
