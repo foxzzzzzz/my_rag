@@ -27,4 +27,11 @@
  --list-controls-max-height:60%; /* 顶部操作区最多占列表页高度的比例，短屏时内部滚动 */
  --task-grid-columns:minmax(0,2fr) minmax(0,1.45fr) minmax(8.5rem,1fr) minmax(0,1.55fr); /* 宽屏任务列表的四列 */
  --catalog-width:68rem; --catalog-editor-width:28rem; /* 分类列表和编辑抽屉宽度上限 */
+ --favorites-list-width:68rem; /* 收藏列表的宽度上限 */
+ --favorites-columns:1.25rem minmax(0,1fr) 11rem; /* 宽屏收藏列表的勾选、标题和状态列 */
+ --favorites-title-lines:2; /* 收藏标题折叠时的行数 */
+ --favorites-available-bg:#e7effb; /* 可导入状态与选中筛选按钮的背景 */
+ --favorites-selected-bg:#f4f8fe; /* 已勾选行的背景 */
+ --favorites-pending-text:#81501d; --favorites-pending-bg:#fff0dc; /* 排队及处理中的状态色 */
+ --favorites-failed-bg:#faecec; /* 下载和转换异常状态的背景 */
 }
