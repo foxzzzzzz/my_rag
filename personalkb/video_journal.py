@@ -2,6 +2,22 @@ import hashlib, json, secrets, time, math, re
 from contextlib import contextmanager
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError, _json
 
+CHAT_ATTEMPTS_SCHEMA = """CREATE TABLE IF NOT EXISTS video_chat_attempts (
+    task_id TEXT NOT NULL, stage TEXT NOT NULL, attempt INTEGER NOT NULL,
+    amount TEXT, response TEXT, response_sha256 TEXT, diagnostic TEXT, provider_request_id TEXT,
+    started INTEGER NOT NULL DEFAULT 0, automatic INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(task_id,stage,attempt))"""
+
+
+def initialize_chat_attempts(connection):
+    connection.execute(CHAT_ATTEMPTS_SCHEMA)
+    if 'automatic' not in {row[1] for row in connection.execute('PRAGMA table_info(video_chat_attempts)')}:
+        connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0')
+
+
+def is_chat_stage(name):
+    return name == 'text' or re.fullmatch(r'vision-[0-9]+', name) is not None
+
 
 def legacy_upload_interruption(connection, task, stages):
     # Older workers only emitted this storage error before registering the
@@ -23,6 +39,7 @@ class VideoJournal:
             c.execute('CREATE TABLE IF NOT EXISTS video_runs (task_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS video_stages (task_id TEXT, name TEXT, input_sha256 TEXT, status TEXT, remote_task_id TEXT, result TEXT, result_sha256 TEXT, PRIMARY KEY(task_id,name))')
             c.execute('CREATE TABLE IF NOT EXISTS video_assets (asset_id TEXT PRIMARY KEY, task_id TEXT, metadata TEXT, status TEXT)')
+            initialize_chat_attempts(c)
     def _lease(self,c,t,token): self.store._lease(c,t,token,time.time())
     def _claim(self, *args, **kwargs):
         from .execution_guard import execution_guard
@@ -57,6 +74,54 @@ class VideoJournal:
             return d
     def list_stages(self,task_id):
         with self.store._tx() as c: return [dict(r) for r in c.execute('SELECT name,input_sha256,status,remote_task_id,result_sha256 FROM video_stages WHERE task_id=?',(task_id,))]
+
+    def chat_attempt(self, task_id, name):
+        with self.store._tx() as c:
+            return c.execute("""SELECT * FROM video_chat_attempts WHERE task_id=? AND stage=?
+                       ORDER BY (response_sha256 IS NOT NULL) DESC, attempt DESC LIMIT 1""", (task_id, name)).fetchone()
+
+    def start_chat_retry(self, task_id, token, name, attempt):
+        with self.store._tx() as c:
+            self._lease(c, task_id, token)
+            if c.execute("""SELECT 1 FROM video_chat_attempts WHERE task_id=? AND stage=?
+                AND response_sha256 IS NOT NULL""", (task_id, name)).fetchone():
+                raise WorkflowError('chat_response_available')
+            if c.execute("""UPDATE video_chat_attempts SET started=1
+                WHERE task_id=? AND stage=? AND attempt=? AND amount IS NOT NULL AND started=0""",
+                         (task_id, name, attempt)).rowcount != 1:
+                raise WorkflowError('unknown_submission')
+            c.execute('UPDATE tasks SET stage=? WHERE id=?', (name, task_id))
+
+    def automatic_retry_count(self, task_id, name):
+        with self.store._tx() as c:
+            return c.execute("""SELECT COUNT(*) FROM video_chat_attempts
+                WHERE task_id=? AND stage=? AND automatic=1""", (task_id, name)).fetchone()[0]
+
+    def authorize_timeout_retry(self, task_id, token, name, amount, maximum):
+        with self.store._tx() as c:
+            self._lease(c, task_id, token)
+            attempts = c.execute("""SELECT attempt,automatic,diagnostic,response_sha256 FROM video_chat_attempts
+                WHERE task_id=? AND stage=? ORDER BY attempt DESC""", (task_id, name)).fetchall()
+            if (not attempts or attempts[0]['diagnostic'] != 'provider_timeout'
+                    or any(row['response_sha256'] for row in attempts)
+                    or sum(row['automatic'] for row in attempts) >= maximum):
+                return None
+            attempt = attempts[0]['attempt'] + 1
+            c.execute("""INSERT INTO video_chat_attempts(task_id,stage,attempt,amount,automatic)
+                VALUES(?,?,?,?,1)""", (task_id, name, attempt, str(amount)))
+            return attempt
+
+    def record_chat_outcome(self, task_id, name, attempt, *, response=None, diagnostic=None, provider_request_id=None):
+        raw = _json(response) if response is not None else None
+        digest = hashlib.sha256(raw.encode()).hexdigest() if raw is not None else None
+        # A provider reply can arrive after lease loss. Keep it with the
+        # exact attempt so that recovery can check it without sending again.
+        with self.store._tx() as c:
+            c.execute("""INSERT INTO video_chat_attempts(task_id,stage,attempt,response,response_sha256,diagnostic,provider_request_id)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id,stage,attempt) DO UPDATE SET
+                response=excluded.response,response_sha256=excluded.response_sha256,diagnostic=excluded.diagnostic,
+                provider_request_id=excluded.provider_request_id
+                WHERE video_chat_attempts.response IS NULL""", (task_id, name, attempt, raw, digest, diagnostic, provider_request_id))
     def begin(self,task_id,token,name,input_sha256):
         with self.store._tx() as c:
             self._lease(c,task_id,token)
@@ -105,6 +170,9 @@ class VideoJournal:
             r=c.execute('SELECT status,result_sha256 FROM video_stages WHERE task_id=? AND name=?',(task_id,name)).fetchone()
             if not r or r[0] not in ('in_flight','completed') or (r[0]=='completed' and r[1]!=sha): raise WorkflowError('invalid_state')
             c.execute("UPDATE video_stages SET status='completed',result=?,result_sha256=? WHERE task_id=? AND name=?",(raw,sha,task_id,name))
+            if is_chat_stage(name):
+                c.execute("""UPDATE video_chat_attempts SET response=NULL,response_sha256=NULL
+                    WHERE task_id=? AND stage=?""", (task_id, name))
     def register_asset(self,task_id,token,metadata):
         allowed=('asset_id','backend','object_key','source_sha256','size_bytes','model','expires_at','scope')
         if not isinstance(metadata,dict) or set(metadata)!=set(allowed): raise WorkflowError('invalid_asset')

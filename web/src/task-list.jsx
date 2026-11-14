@@ -18,6 +18,14 @@ const failureReasons={
   invalid_summary_json:'模型返回格式无效',
   invalid_size:'文件大小超出限制',
   disk_low:'磁盘空间不足',
+  recovery_media_missing:'原任务的音频和画面缓存缺失，无法继续。',
+  provider_timeout:'等待模型响应超时',
+  provider_network_error:'模型请求连接中断',
+  provider_dns_failed:'无法解析模型服务地址',
+  provider_response_invalid:'模型响应无法解析',
+  budget_invalid_or_exceeded:'任务或累计预算不足，无法自动重试。',
+  favorites_budget_exceeded:'收藏转换预算不足，无法自动重试。',
+  empty_or_truncated_model_output:'模型输出为空或被截断',
 };
 
 function taskStatus(task, queuedForProcessing) {
@@ -28,6 +36,7 @@ function taskStatus(task, queuedForProcessing) {
 }
 
 function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,toggle}) {
+  const [recoveryAgreement,setRecoveryAgreement]=useState(null);
   const {mode,action,queuedForProcessing}=controls;
   const video=['video','mp4'].includes(item?.kind);
   const kind=video?'视频':item?.kind==='html'?'网页':'';
@@ -42,6 +51,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const summary=problem?(reason.startsWith('操作失败：')?'查看详情了解原因':reason):'';
   const detailId='task-detail-'+task.id;
+  const recovery=task.model_recovery;
+  const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode]);
   return <article className="task-grid task-item">
     <div className="task-identity">
       <strong>{title}</strong>
@@ -58,6 +69,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
       {task.updated_at?<time dateTime={task.updated_at}>{formatDate(task.updated_at,config.display_timezone)}</time>:'—'}
     </div>
     <div className="task-actions">
+      {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>处理模型请求</button>}
       {action&&(action==='cancel'||item&&!item.deleted)&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
         onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{taskActionLabel(task,action)||actionNames[action]}</button>}
       {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id,{versionId:task.view_version_id})}>{task.viewing_history?'查看旧版本':task.view_version_id||task.status!=='succeeded'?'查看资料':'查看当前资料'}</button>}
@@ -70,9 +82,23 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
       <dt>任务 ID</dt><dd>{task.id}</dd>
       <dt>创建时间</dt><dd>{formatDate(task.created_at,config.display_timezone)||'—'}</dd>
       {stage&&<><dt>阶段</dt><dd>{stage}</dd></>}
-      <dt>进度</dt><dd>{queuedForProcessing?'已加入处理队列':progress}</dd>
+      <dt>进度</dt><dd>{queuedForProcessing||task.dispatch?.state==='pending'?'已加入处理队列':progress}</dd>
       {item?.kind==='html'&&<><dt>处理方式</dt><dd>{htmlModes[mode]}</dd></>}
       {problem&&<><dt>原因</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {recovery&&item&&!item.deleted&&!task.archived&&<><dt>继续处理</dt><dd>
+        <p>中断步骤 {statusText(recovery.stage)}{recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
+        {['budget_invalid_or_exceeded','favorites_budget_exceeded'].includes(task.error_code)&&<p>{failureReasons[task.error_code]}</p>}
+        {recovery.mode==='restore'?<p>{recovery.authorized_amount
+          ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`
+          :'已保存模型结果，可以从该步骤继续。后续步骤按原预算处理。'}</p>:<>
+          <p>当前没有可用的模型结果，原请求可能已计费。重试此步骤会增加最高 ¥{recovery.amount} 的费用预留，后续步骤按原预算处理。</p>
+          <label><input type="checkbox" checked={recoveryAgreement===recoveryKey} onChange={event=>setRecoveryAgreement(event.target.checked?recoveryKey:null)}/> 我同意重新请求此步骤产生的费用</label>
+        </>}
+        <button type="button" disabled={busy||!enabled||(recovery.mode==='retry'&&recoveryAgreement!==recoveryKey)} onClick={()=>{
+          setRecoveryAgreement(null);
+          onAction(task.id,'recover-model',{stage:recovery.stage,attempt:recovery.attempt,mode:recovery.mode,allow_paid:recovery.mode==='retry',amount:recovery.amount});
+        }}>{recovery.mode==='restore'?(recovery.authorized_amount?'继续已授权的重试':'使用已保存结果继续'):'确认费用并重试此步骤'}</button>
+      </dd></>}
     </dl>}
   </article>;
 }

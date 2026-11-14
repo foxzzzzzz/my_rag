@@ -3,9 +3,10 @@ import os
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
-from .video_journal import legacy_upload_interruption
+from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
 
 
 def task_stages(connection, task_id):
@@ -47,6 +48,60 @@ class WebDispatcher:
                 c.execute('ALTER TABLE web_dispatch ADD COLUMN error_code TEXT')
             if 'processing_mode' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
                 c.execute("ALTER TABLE web_dispatch ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'preview'")
+            initialize_chat_attempts(c)
+
+    def model_recovery(self, c, task, stages):
+        blocked = [r['name'] for r in stages
+                   if r['status'] == 'in_flight' and r['name'] not in (*ASR_UPLOAD_STAGES, 'asr_result')
+                   and not (r['name'] == 'asr_submit' and r['remote_task_id'])]
+        if (not self.config['live_video_enabled'] or task['status'] != 'needs_attention'
+                or task['error_code'] == 'version_conflict' or len(blocked) != 1 or not is_chat_stage(blocked[0])):
+            return None
+        stage = blocked[0]
+        prior = c.execute("""SELECT attempt,response_sha256,diagnostic,amount,started FROM video_chat_attempts
+                    WHERE task_id=? AND stage=? ORDER BY (response_sha256 IS NOT NULL) DESC, attempt DESC LIMIT 1""",
+                          (task['id'], stage)).fetchone()
+        if prior and prior['response_sha256']:
+            return dict(stage=stage, mode='restore', attempt=prior['attempt'], amount=None, reason=prior['diagnostic'])
+        kind = 'text' if stage == 'text' else 'vision'
+        try:
+            amount = Decimal(str(self.service.pc['strategy']['reserve_cny'][kind]))
+            if not amount.is_finite() or amount <= 0:
+                return None
+        except (AttributeError, KeyError, TypeError, InvalidOperation):
+            return None
+        if prior and prior['amount'] == str(amount) and not prior['started']:
+            return dict(stage=stage, mode='restore', attempt=prior['attempt'], amount=None, reason=prior['diagnostic'],
+                        authorized_amount=prior['amount'])
+        return dict(stage=stage, mode='retry', attempt=(prior['attempt'] if prior else 0) + 1,
+                    amount=str(amount), reason=prior['diagnostic'] if prior else None)
+
+    def recover_model(self, task_id, payload):
+        with self.store._tx() as c:
+            task = self.store._row(c, 'tasks', task_id)
+            source = self.store._row(c, 'sources', task['source_id'])
+            if source['deleted']:
+                raise WorkflowError('source_deleted')
+            if task_is_archived(c, task_id):
+                raise WorkflowError('task_archived')
+            if source['kind'] not in ('video', 'mp4'):
+                raise WorkflowError('invalid_state')
+            dispatch = c.execute('SELECT state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
+            if dispatch and dispatch['state'] in ('pending', 'working'):
+                raise WorkflowError('dispatch_conflict')
+            recovery = self.model_recovery(c, task, task_stages(c, task_id))
+            if (not recovery or type(payload.get('attempt')) is not int
+                    or any(payload.get(key) != recovery[key] for key in ('stage', 'attempt', 'mode', 'amount'))):
+                raise WorkflowError('model_recovery_conflict')
+            if recovery['mode'] == 'retry':
+                if payload.get('allow_paid') is not True:
+                    raise WorkflowError('paid_consent_required')
+                c.execute('INSERT INTO video_chat_attempts(task_id,stage,attempt,amount) VALUES(?,?,?,?)',
+                          (task_id, recovery['stage'], recovery['attempt'], recovery['amount']))
+            c.execute("""INSERT INTO web_dispatch(task_id,mode,state,requested) VALUES(?,'recover-model','pending',?)
+                ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,
+                claimed=NULL,owner=NULL,error_code=NULL""", (task_id, time.time()))
+            return {'task_id': task_id, 'dispatch_state': 'pending'}
 
     def enqueue(self, task_id, mode='run', allow_paid=False, processing_mode='preview'):
         if mode not in ('run', 'resume') or type(allow_paid) is not bool or processing_mode not in ('preview','model'):
@@ -104,14 +159,17 @@ class WebDispatcher:
             # Only a stale dispatch whose domain task never began can requeue.
             c.execute("UPDATE web_dispatch SET state='pending',owner=NULL WHERE state='working' AND claimed<=? AND task_id IN (SELECT id FROM tasks WHERE status='queued')", (now-self.config['dispatch_recovery_seconds'],))
             c.execute("UPDATE web_dispatch SET state='done' WHERE state='working' AND task_id IN (SELECT id FROM tasks WHERE status='succeeded')")
-            c.execute("UPDATE web_dispatch SET state='error' WHERE state='working' AND task_id IN (SELECT id FROM tasks WHERE status IN ('failed','needs_attention','cancelled'))")
+            # With the execution lock held, a working dispatch whose task is
+            # still interrupted can expose recovery again without resending.
+            c.execute("""UPDATE web_dispatch SET state='error' WHERE state='working' AND task_id IN
+                (SELECT id FROM tasks WHERE status IN ('failed','needs_attention','cancelled'))""")
             if c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone():
                 return None
             has_favorites = c.execute("SELECT 1 FROM sqlite_master WHERE name='favorites_conversion' AND type='table'").fetchone()
             row = None
             for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
                 reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
-                if not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                if pending['mode'] == 'recover-model' or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
                     row = pending
                     break
             if not row: return None
@@ -235,7 +293,8 @@ class WebDispatcher:
             task = self.store.get_task(tid)
             source = self.store.get_source(task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
-            expected = 'needs_attention' if job['mode']=='resume' else 'queued'
+            resume = job['mode'] in ('resume', 'recover-model')
+            expected = 'needs_attention' if resume else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
             if source['kind'] == 'html':
                 if job['processing_mode']=='model':
@@ -261,7 +320,7 @@ class WebDispatcher:
                     keys.update(os.environ)
                 else:
                     keys = {}  # Injected offline tests do not read secrets.
-                runner(self.service.wc, self.service.pc, keys, task_id=tid, resume=job['mode']=='resume')
+                runner(self.service.wc, self.service.pc, keys, task_id=tid, resume=resume)
             else:
                 raise WorkflowError('unsupported_format')
         except Exception as exc:

@@ -9,6 +9,14 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError
+from urllib.error import URLError
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, code, request_id=None):
+        self.code = code
+        self.request_id = request_id if isinstance(request_id, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,256}', request_id) else None
+        super().__init__(code)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -26,7 +34,7 @@ class _Transport:
             if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
                 raise ValueError()
         except Exception:
-            raise RuntimeError('provider_dns_forbidden') from None
+            raise ProviderError('provider_dns_failed') from None
         hdr = dict(headers or {})
         if key:
             hdr['Authorization'] = 'Bearer ' + key
@@ -38,13 +46,22 @@ class _Transport:
             with build_opener(_NoRedirect()).open(Request(url, data=data, headers=hdr), timeout=self.cfg['request_timeout_seconds']) as response:
                 raw = response.read(self.cfg['response_max_bytes'] + 1)
                 if len(raw) > self.cfg['response_max_bytes']:
-                    raise RuntimeError('response_too_large')
-                return response.status, json.loads(raw)
+                    raise ProviderError('response_too_large', response.headers.get('x-request-id'))
+                try:
+                    return response.status, json.loads(raw)
+                except (ValueError, UnicodeError):
+                    raise ProviderError('provider_response_invalid', response.headers.get('x-request-id')
+                                        or response.headers.get('x-dashscope-request-id')) from None
         except HTTPError as exc:
+            request_id = (exc.headers.get('x-request-id') or exc.headers.get('x-dashscope-request-id')) if exc.headers else None
             exc.close()
-            raise RuntimeError('provider_request_failed') from None
-        except Exception:
-            raise RuntimeError('provider_request_failed') from None
+            raise ProviderError(f'provider_http_{exc.code}', request_id) from None
+        except URLError as exc:
+            raise ProviderError('provider_timeout' if isinstance(exc.reason, TimeoutError) else 'provider_network_error') from None
+        except TimeoutError:
+            raise ProviderError('provider_timeout') from None
+        except OSError:
+            raise ProviderError('provider_network_error') from None
 
 
 class ProviderClient:
@@ -64,6 +81,8 @@ class ProviderClient:
             raise RuntimeError('provider_url_forbidden')
         try:
             status, data = self.transport.request(url, key=key, payload=payload, headers=headers)
+        except ProviderError:
+            raise
         except Exception:
             raise RuntimeError('provider_request_failed') from None
         if not 200 <= status < 300 or not isinstance(data, dict):
@@ -120,13 +139,14 @@ class ProviderClient:
             if not isinstance(content, str) or not content.strip() or choice.get('finish_reason') == 'length':
                 raise ValueError()
         except (KeyError, IndexError, TypeError, ValueError):
-            raise RuntimeError('empty_or_truncated_model_output') from None
+            raise ProviderError('empty_or_truncated_model_output', data.get('id') or data.get('request_id')) from None
         usage = {k: v for k, v in data.get('usage', {}).items() if k in ('prompt_tokens', 'completion_tokens', 'total_tokens') and type(v) is int and v >= 0}
         prices = self.config['prices'][kind]
         cost = None
         if 'prompt_tokens' in usage and 'completion_tokens' in usage:
             cost = str((Decimal(usage['prompt_tokens']) * Decimal(str(prices[0])) + Decimal(usage['completion_tokens']) * Decimal(str(prices[1]))) / Decimal(1000000))
-        return {'content': content, 'model': data.get('model', model['model']), 'usage': usage, 'estimated_cost_cny': cost}
+        return {'content': content, 'model': data.get('model', model['model']), 'usage': usage,
+                'estimated_cost_cny': cost, 'provider_request_id': data.get('id') or data.get('request_id')}
 
     def vision(self, image_path):
         data = base64.b64encode(Path(image_path).read_bytes()).decode('ascii')
@@ -142,6 +162,6 @@ class ProviderClient:
             if not isinstance(structured, dict) or not all(isinstance(structured.get(k), str) and structured[k].strip() for k in ('summary', 'notes')):
                 raise ValueError()
         except (ValueError, TypeError):
-            raise RuntimeError('invalid_summary_json') from None
+            raise ProviderError('invalid_summary_json', result.get('provider_request_id')) from None
         result['structured'] = structured
         return result

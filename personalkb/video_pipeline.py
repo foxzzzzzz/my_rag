@@ -10,9 +10,12 @@ from pathlib import Path
 from contextlib import closing
 from .workflow import ROOT, make_store
 from .workflow_store import ASR_UPLOAD_STAGES, ASR_UPLOAD_TASK_STAGES, WorkflowError
-from .video_journal import VideoJournal
+from .video_journal import VideoJournal, is_chat_stage
 from tools.api_smoke import reserve
 from .asr_storage import PreparedAudio, StorageError, create_storage
+from .video_services import ProviderError
+
+DEFAULT_CHAT_TIMEOUT_RETRIES = 1
 
 
 def _positive(value):
@@ -72,6 +75,9 @@ def load_pipeline_config(path=None):
         if config['default_profile'] not in config['strategy']['profiles']: raise ValueError()
         _legacy_text_prompt(config['strategy'])
         t = config['transport']
+        retries = config.setdefault('chat_timeout_retries', DEFAULT_CHAT_TIMEOUT_RETRIES)
+        if type(retries) is not int or retries < 0:
+            raise ValueError()
         if not isinstance(t['allowed_api_hosts'], list) or not t['allowed_api_hosts'] or any(not isinstance(h, str) or not h for h in t['allowed_api_hosts']): raise ValueError()
         if not isinstance(t['allowed_oss_suffix'], str) or not t['allowed_oss_suffix']: raise ValueError()
         for k in ('request_timeout_seconds','response_max_bytes'): _positive(t[k])
@@ -93,7 +99,7 @@ def video_status(workflow_config, pipeline_config, task_id):
     return {'task_id': task_id, 'status': task['status'], 'stages': [{k: row[k] for k in ('name','status','result_sha256')} for row in journal.list_stages(task_id)], 'assets': [{k: a[k] for k in ('asset_id','backend','status')} for a in journal.assets(task_id)]}
 
 
-def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call):
+def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call, *, retry_attempt=None):
     """Execute a non-resumable paid stage once, preserving unknown submissions."""
     try:
         amount = _positive(amount)
@@ -102,10 +108,11 @@ def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call
         journal.begin(task_id, token, name, input_sha256)
         stage = journal.stage(task_id, name)
         if stage['status'] == 'completed': return stage['result']
-        if stage['status'] != 'prepared': raise WorkflowError('unknown_submission')
+        expected = 'in_flight' if retry_attempt is not None else 'prepared'
+        if stage['status'] != expected: raise WorkflowError('unknown_submission')
         ledger = ROOT / b['ledger']
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        request_id = task_id + ':' + name
+        request_id = _stage_request_id(task_id, name, retry_attempt)
         with closing(sqlite3.connect(ledger)) as db:
             db.execute('CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, amount TEXT NOT NULL)')
             existing = db.execute('SELECT run_id,amount FROM reservations WHERE request_id=?', (request_id,)).fetchone()
@@ -116,7 +123,10 @@ def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call
             except sqlite3.IntegrityError:
                 with closing(sqlite3.connect(ledger)) as db: existing = db.execute('SELECT run_id,amount FROM reservations WHERE request_id=?', (request_id,)).fetchone()
                 if not existing or existing[0] != task_id or Decimal(existing[1]) != amount: raise WorkflowError('reservation_conflict')
-        journal.mark_started(task_id, token, name)
+        if retry_attempt is None:
+            journal.mark_started(task_id, token, name)
+        else:
+            journal.start_chat_retry(task_id, token, name, retry_attempt)
         result = call()
         journal.complete(task_id, token, name, result)
         return result
@@ -182,19 +192,86 @@ def _scope_storage(journal, task_id, token, config, secrets):
     return create_storage(config, secrets, ownership=owner)
 
 
-def _record_call(journal, tid, token, name, digest, amount, config, call, heartbeat):
+def _stage_request_id(task_id, name, attempt):
+    base = task_id + ':' + name
+    return base if attempt is None else base + ':retry:' + str(attempt)
+
+
+def _chat_recovery(journal, tid, name, amount):
+    attempt = journal.chat_attempt(tid, name)
+    if attempt and attempt['response'] is not None:
+        raw = attempt['response']
+        if hashlib.sha256(raw.encode()).hexdigest() != attempt['response_sha256']:
+            raise WorkflowError('stage_corrupt')
+        return json.loads(raw), None
+    if attempt and attempt['amount'] is not None and not attempt['started'] and Decimal(attempt['amount']) == amount:
+        return None, attempt['attempt']
+    raise WorkflowError('unknown_submission')
+
+
+def _record_call(journal, tid, token, name, digest, amount, config, call, heartbeat, *, video_amounts=None):
+    chat = is_chat_stage(name)
+    retry_attempt = None
+    attempt = 0
+    manually_authorized = False
+    if chat:
+        journal.begin(tid, token, name, digest)
+        stage = journal.stage(tid, name)
+        if stage['status'] == 'in_flight':
+            saved, retry_attempt = _chat_recovery(journal, tid, name, amount)
+            if saved is not None:
+                journal.complete(tid, token, name, saved)
+                return saved
+            attempt = retry_attempt
+            manually_authorized = not journal.chat_attempt(tid, name)['automatic']
+
     def guarded():
         heartbeat.check()
-        value = call()
+        try:
+            value = call()
+        except Exception as exc:
+            if chat:
+                journal.record_chat_outcome(tid, name, attempt,
+                    diagnostic=exc.code if isinstance(exc, ProviderError) else 'model_result_not_saved',
+                    provider_request_id=exc.request_id if isinstance(exc, ProviderError) else None)
+            raise
+        result = dict(value, reserved_upper_cny=str(amount), request_id=_stage_request_id(tid, name, retry_attempt))
+        if result.get('estimated_cost_cny') is not None and Decimal(str(result['estimated_cost_cny'])) > amount:
+            if chat:
+                journal.record_chat_outcome(tid, name, attempt, diagnostic='observed_cost_exceeds_reservation')
+            raise WorkflowError('observed_cost_exceeds_reservation')
+        if chat:
+            journal.record_chat_outcome(tid, name, attempt, response=result, provider_request_id=result.get('provider_request_id'))
         heartbeat.check()
-        return dict(value, reserved_upper_cny=str(amount), request_id=tid + ':' + name)
-    result = paid_stage(journal, tid, token, name, digest, amount, config, guarded)
-    if result.get('estimated_cost_cny') is not None and Decimal(str(result['estimated_cost_cny'])) > Decimal(str(amount)):
-        raise WorkflowError('observed_cost_exceeds_reservation')
-    return result
+        return result
+    maximum = config.get('chat_timeout_retries', DEFAULT_CHAT_TIMEOUT_RETRIES)
+    while True:
+        try:
+            result = paid_stage(journal, tid, token, name, digest, amount, config, guarded, retry_attempt=retry_attempt)
+            if result.get('estimated_cost_cny') is not None and Decimal(str(result['estimated_cost_cny'])) > amount:
+                raise WorkflowError('observed_cost_exceeds_reservation')
+            return result
+        except WorkflowError as exc:
+            if exc.code != 'chat_response_available':
+                raise
+            saved, _ = _chat_recovery(journal, tid, name, amount)
+            journal.complete(tid, token, name, saved)
+            return saved
+        except ProviderError as exc:
+            if not chat or exc.code != 'provider_timeout' or not maximum or manually_authorized:
+                raise
+            heartbeat.check()
+            if journal.automatic_retry_count(tid, name) >= maximum:
+                raise
+            _favorites_budget_preflight(journal.store, tid, video_amounts, extra=amount)
+            _preflight(journal, tid, config, video_amounts, extra=amount)
+            retry_attempt = journal.authorize_timeout_retry(tid, token, name, amount, maximum)
+            if retry_attempt is None:
+                raise
+            attempt = retry_attempt
 
 
-def _preflight(journal, tid, pc, amounts):
+def _preflight(journal, tid, pc, amounts, retries=None, restored=(), *, extra=Decimal(0)):
     """Check the whole remaining batch, retaining every historical reservation."""
     ledger = ROOT / pc['budget']['ledger']
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -202,23 +279,29 @@ def _preflight(journal, tid, pc, amounts):
         db.execute('CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, amount TEXT NOT NULL)')
         rows = db.execute('SELECT request_id,run_id,amount FROM reservations').fetchall()
     existing = {r[0]:r for r in rows}
-    remaining = sum((value for name,value in amounts.items() if tid + ':' + name not in existing), Decimal(0))
+    remaining = sum((value for name,value in amounts.items()
+                     if name not in restored and tid + ':' + name not in existing), Decimal(0))
+    remaining += sum((amounts[name] for name, attempt in (retries or {}).items()
+                      if _stage_request_id(tid, name, attempt) not in existing), Decimal(0))
     total = sum((Decimal(r[2]) for r in rows), Decimal(0))
     run_total = sum((Decimal(r[2]) for r in rows if r[1]==tid), Decimal(0))
-    if total + remaining > Decimal(str(pc['budget']['research_limit'])) or run_total + remaining > Decimal(str(pc['budget']['run_limit'])):
+    if total + remaining + extra > Decimal(str(pc['budget']['research_limit'])) or run_total + remaining + extra > Decimal(str(pc['budget']['run_limit'])):
         raise WorkflowError('budget_invalid_or_exceeded')
 
 
-def _favorites_budget_preflight(store, task_id, amounts):
+def _favorites_budget_preflight(store, task_id, amounts, *, extra=Decimal(0)):
     """Enforce the durable per-video ceiling reserved by automatic dispatch."""
     with closing(sqlite3.connect(store.db_path)) as db:
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='favorites_conversion'").fetchone()
         row = db.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (task_id,)).fetchone() if exists else None
-    if row is None:
-        return
+        if row is None:
+            return
+        has_attempts = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='video_chat_attempts'").fetchone()
+        retry_amounts = db.execute('SELECT amount FROM video_chat_attempts WHERE task_id=? AND automatic=1',
+                                   (task_id,)).fetchall() if has_attempts else []
     try:
         ceiling = Decimal(row[0])
-        required = sum(amounts.values(), Decimal(0))
+        required = sum((Decimal(row[0]) for row in retry_amounts), sum(amounts.values(), extra))
         if not ceiling.is_finite() or ceiling <= 0 or not required.is_finite() or required > ceiling:
             raise WorkflowError('favorites_budget_exceeded')
     except (InvalidOperation, TypeError, ValueError):
@@ -263,10 +346,23 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     try:
         fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
         legacy_upload = resume and journal.restore_legacy_upload(task_id, token)
-        # Refuse all unqueryable in-flight calls before preparing media or uploads.
+        retries = {}
+        restored = set()
+        recovering_chat = False
+        # Resolve all unknown requests before preparing media or uploading.
         for row in journal.list_stages(task_id):
             if row['status'] == 'in_flight' and row['name'] not in ASR_UPLOAD_STAGES and (row['name'] != 'asr_submit' or not row['remote_task_id']):
-                if row['name'] != 'asr_result': raise WorkflowError('unknown_submission')
+                name = row['name']
+                if is_chat_stage(name):
+                    recovering_chat = True
+                    saved, attempt = _chat_recovery(journal, task_id, name,
+                        Decimal(str(pc['strategy']['reserve_cny']['text' if name == 'text' else 'vision'])))
+                    if saved is not None:
+                        restored.add(name)
+                    if attempt is not None:
+                        retries[name] = attempt
+                elif name != 'asr_result':
+                    raise WorkflowError('unknown_submission')
         source = store.get_source(task['source_id'])
         with store._tx() as db:
             base = db.execute('SELECT base_version_id FROM video_reprocess WHERE task_id=?', (task_id,)).fetchone()
@@ -279,6 +375,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             raise WorkflowError('source_integrity')
         work = root / 'video-work' / task_id
         if any(p.is_symlink() for p in (work, *work.parents)): raise WorkflowError('invalid_work_path')
+        if recovering_chat and not (work / 'media-manifest.json').is_file():
+            raise WorkflowError('recovery_media_missing')
         work.mkdir(parents=True, exist_ok=True)
         provider = services or ProviderClient(pc['models'], pc, secrets)
         with _Heartbeat(store, task_id, token, pc['heartbeat_seconds']) as beat:
@@ -299,7 +397,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             amounts = {'asr_submit':asr_amount, 'text':Decimal(str(pc['strategy']['reserve_cny']['text']))}
             amounts.update({'vision-' + str(f['index']):Decimal(str(pc['strategy']['reserve_cny']['vision'])) for f in frames})
             _favorites_budget_preflight(store, task_id, amounts)
-            _preflight(journal, task_id, pc, amounts)
+            _preflight(journal, task_id, pc, amounts, retries, restored)
             voice_digest = _digest({'audio': audio_hash, 'model': pc['models']['models']['asr']})
             journal.begin(task_id, token, 'asr_submit', voice_digest)
             row = journal.stage(task_id, 'asr_submit')
@@ -386,7 +484,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                 upper = (Decimal(pc['vision_input_token_bound']) * Decimal(str(pc['prices']['vision'][0])) + Decimal(pc['strategy']['vision_max_tokens']) * Decimal(str(pc['prices']['vision'][1]))) / 1000000
                 if amount < upper: raise WorkflowError('vision_reservation_too_small')
                 name = 'vision-' + str(frame['index'])
-                val = _record_call(journal, task_id, token, name, _digest({'frame':frame['sha256'], 'seconds':frame['seconds']}), amount, pc, lambda: provider.vision(path), beat)
+                val = _record_call(journal, task_id, token, name, _digest({'frame':frame['sha256'], 'seconds':frame['seconds']}), amount, pc,
+                                   lambda: provider.vision(path), beat, video_amounts=amounts)
                 visual.append(f'## [{frame["seconds"]:.3f}s]\n' + val['content'])
                 evidence.append({'type':'visual', 'seconds':frame['seconds'], 'text':val['content'], 'image_sha256':frame['sha256']})
             visual_text = '\n\n'.join(visual)
@@ -394,7 +493,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             amount = Decimal(str(pc['strategy']['reserve_cny']['text']))
             upper = (Decimal(len((body + source['original_name'] + pc['strategy']['text_system_prompt']).encode('utf8'))) * Decimal(str(pc['prices']['text'][0])) + Decimal(pc['strategy']['text_max_tokens']) * Decimal(str(pc['prices']['text'][1]))) / 1000000
             if upper > amount: raise WorkflowError('text_reservation_too_small')
-            notes = _record_call(journal, task_id, token, 'text', _digest({'body':body, 'title':source['original_name']}), amount, pc, lambda: provider.summarize(body, source['original_name']), beat)
+            notes = _record_call(journal, task_id, token, 'text', _digest({'body':body, 'title':source['original_name']}), amount, pc,
+                                 lambda: provider.summarize(body, source['original_name']), beat, video_amounts=amounts)
             result = dict(title=source['original_name'], body=body, transcript=asr['text'], visual=visual_text,
                 summary=notes['structured']['summary'], notes=notes['structured']['notes'], evidence=evidence,
                 provenance='provider', output_kind='machine_initial', scheme_id='video-pipeline', scheme_version=fingerprint,
@@ -402,7 +502,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             beat.check()
         version = store.finish(task_id, token, result)
     except Exception as exc:
-        code = exc.code if isinstance(exc, (WorkflowError, StorageError)) else 'video_processing_failed'
+        code = exc.code if isinstance(exc, (WorkflowError, StorageError, ProviderError)) else 'video_processing_failed'
         try: store.fail(task_id, token, code, needs_attention=preparing_upload)
         except WorkflowError: pass
         if code == 'version_conflict':

@@ -5,6 +5,7 @@
     "storage_file": "音频存储配置",
     "budget": "同一研究账本及单任务和累计人民币上限",
     "transport": "网络请求的主机和资源限制",
+    "chat_timeout_retries": "视觉分析和生成文本每个步骤允许自动重试的次数，只在明确记录网络超时时生效，0 为关闭",
     "prices": "人民币价格：文本与视觉输入/输出每百万 token，ASR 每秒；核对日期 2026-11-03",
     "resources": "ffmpeg_threads：编解码线程；filter_threads：滤镜线程；min_free_bytes：最小剩余磁盘；min_available_bytes：最小可用内存；max_host_used_bytes：宿主机内存使用上限；sample_interval_seconds：资源采样间隔秒；terminate_grace_seconds：进程终止宽限秒",
     "poll_seconds": "ASR轮询间隔秒",
@@ -51,6 +52,7 @@
     "terminate_grace_seconds": 3
   },
   "heartbeat_seconds": 5,
+  "chat_timeout_retries": 1,
   "poll_seconds": 5,
   "poll_timeout": 3600,
   "default_profile": "screen_tutorial",

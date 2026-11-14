@@ -229,6 +229,9 @@ class WebService:
                     d['resume_blocked_reason'] = 'version_conflict'
                 else:
                     d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows, legacy_upload=legacy_upload) else None
+                if (d['resume_blocked_reason'] == 'unknown_submission' and not d['archived']
+                        and (not dispatch or dispatch['state'] not in ('pending', 'working'))):
+                    d['model_recovery'] = self.dispatcher.model_recovery(c, t, rows)
             upload_stages = sum(row['name'] in ASR_UPLOAD_STAGES for row in rows)
             if rows:
                 if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1

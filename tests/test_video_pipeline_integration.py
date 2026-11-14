@@ -6,6 +6,7 @@ from personalkb.asr_storage_temporary import TemporaryStorage
 from personalkb.workflow import make_store
 from personalkb.workflow_store import WorkflowError
 from personalkb.video_journal import VideoJournal
+from personalkb.video_services import ProviderError
 from personalkb.video_pipeline import _bind_strategy, _digest, load_pipeline_config, run_video, cleanup_video, video_status
 from tools.api_smoke import reserve
 
@@ -197,6 +198,149 @@ class PipelineIntegration(unittest.TestCase):
         with self.assertRaises(WorkflowError): self.run_pipeline()
         with self.assertRaises(WorkflowError): self.run_pipeline(True)
         self.assertEqual(self.s.vision_count,1)
+
+    def test_default_timeout_retry_once_for_vision_and_text(self):
+        from unittest.mock import Mock
+        for name in ('vision', 'summarize'):
+            call = getattr(self.s, name)
+            setattr(self.s, name, Mock(side_effect=[ProviderError('provider_timeout'), call(None) if name == 'vision' else call('', '')]))
+        self.run_pipeline()
+        self.assertEqual(self.s.submit_count, 1)
+        self.assertEqual((self.s.vision.call_count, self.s.summarize.call_count), (2, 2))
+        with closing(sqlite3.connect(self.pc['budget']['ledger'])) as ledger:
+            self.assertEqual(ledger.execute("SELECT COUNT(*) FROM reservations WHERE request_id LIKE '%:retry:1'").fetchone()[0], 2)
+
+    def test_timeout_retry_limit_and_no_implicit_resend_after_restart(self):
+        from unittest.mock import Mock
+        self.s.vision = Mock(side_effect=ProviderError('provider_timeout'))
+        with self.assertRaisesRegex(WorkflowError, '^provider_timeout$'):
+            self.run_pipeline()
+        self.assertEqual(self.s.vision.call_count, 2)
+        with self.assertRaisesRegex(WorkflowError, 'unknown_submission'):
+            self.run_pipeline(True)
+        self.assertEqual(self.s.vision.call_count, 2)
+
+    def test_auto_retry_respects_original_favorites_ceiling(self):
+        from unittest.mock import Mock
+        self.s.vision = Mock(side_effect=ProviderError('provider_timeout'))
+        with make_store(self.wc)._tx() as db:
+            db.execute('CREATE TABLE favorites_conversion(task_id TEXT, amount TEXT)')
+            db.execute('INSERT INTO favorites_conversion VALUES(?,?)', (self.task, '0.95'))
+        with self.assertRaisesRegex(WorkflowError, 'favorites_budget_exceeded'):
+            self.run_pipeline()
+        self.assertEqual(self.s.vision.call_count, 1)
+        self.assertEqual(VideoJournal(make_store(self.wc)).automatic_retry_count(self.task, 'vision-0'), 0)
+
+    def test_zero_disables_timeout_retry(self):
+        from unittest.mock import Mock
+        self.pc['chat_timeout_retries'] = 0
+        self.s.vision = Mock(side_effect=ProviderError('provider_timeout'))
+        with self.assertRaisesRegex(WorkflowError, 'provider_timeout'):
+            self.run_pipeline()
+        self.assertEqual(self.s.vision.call_count, 1)
+
+    def test_confirmed_manual_retry_only_sends_once_on_timeout(self):
+        from unittest.mock import Mock
+        self.s.vision = Mock(side_effect=ProviderError('provider_timeout'))
+        self.pc['chat_timeout_retries'] = 0
+        with self.assertRaisesRegex(WorkflowError, 'provider_timeout'):
+            self.run_pipeline()
+        self.pc['chat_timeout_retries'] = 1
+        dispatcher = self._recovery_dispatcher()
+        dispatcher.recover_model(self.task, dict(self._recovery_quote(dispatcher), allow_paid=True))
+        self.assertEqual(dispatcher.process_next()['error'], 'provider_timeout')
+        self.assertEqual(self.s.vision.call_count, 2)
+
+    def _recovery_dispatcher(self):
+        from types import SimpleNamespace
+        from personalkb.web_dispatch import WebDispatcher
+        return WebDispatcher(SimpleNamespace(store=make_store(self.wc), pc=self.pc, wc=self.wc,
+            webcfg={'live_video_enabled': True, 'dispatch_recovery_seconds': 60},
+            douyin=SimpleNamespace(status=lambda: {'enabled': False}),
+            video_runner=lambda wc, pc, keys, *, task_id, resume: self.run_pipeline(resume)))
+
+    def _recovery_quote(self, dispatcher):
+        from personalkb.web_dispatch import task_stages
+        with dispatcher.store._tx() as db:
+            task = dispatcher.store._row(db, 'tasks', self.task)
+            return dispatcher.model_recovery(db, task, task_stages(db, self.task))
+
+    def test_saved_reply_continues_without_second_request(self):
+        from unittest.mock import patch
+        complete = VideoJournal.complete
+
+        def lose_lease_before_completion(journal, task, token, stage, result):
+            if stage == 'vision-0':
+                raise WorkflowError('lease_lost')
+            return complete(journal, task, token, stage, result)
+
+        with patch.object(VideoJournal, 'complete', lose_lease_before_completion):
+            with self.assertRaisesRegex(WorkflowError, 'lease_lost'):
+                self.run_pipeline()
+        dispatcher = self._recovery_dispatcher()
+        quote = self._recovery_quote(dispatcher)
+        self.assertEqual((quote['mode'], quote['amount']), ('restore', None))
+        dispatcher.recover_model(self.task, quote)
+        self.assertEqual(dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual((self.s.submit_count, self.s.vision_count), (1, 1))
+
+    def test_paid_stage_retry_binds_quote_and_preserves_reservations(self):
+        self.s.mode = 'vision'
+        with self.assertRaises(WorkflowError):
+            self.run_pipeline()
+        dispatcher = self._recovery_dispatcher()
+        quote = self._recovery_quote(dispatcher)
+        self.assertEqual((quote['stage'], quote['mode'], quote['attempt']), ('vision-0', 'retry', 1))
+        with self.assertRaisesRegex(WorkflowError, 'paid_consent_required'):
+            dispatcher.recover_model(self.task, quote)
+        with self.assertRaisesRegex(WorkflowError, 'model_recovery_conflict'):
+            dispatcher.recover_model(self.task, dict(quote, amount='0.01', allow_paid=True))
+        self.assertEqual(self.s.vision_count, 1)
+        dispatcher.recover_model(self.task, dict(quote, allow_paid=True))
+        with self.assertRaisesRegex(WorkflowError, 'dispatch_conflict'):
+            dispatcher.recover_model(self.task, dict(quote, allow_paid=True))
+        self.assertEqual(dispatcher.process_next()['dispatch_state'], 'error')
+        self.assertEqual(self.s.vision_count, 2)
+        next_quote = self._recovery_quote(dispatcher)
+        self.assertEqual(next_quote['attempt'], 2)
+        with self.assertRaisesRegex(WorkflowError, 'model_recovery_conflict'):
+            dispatcher.recover_model(self.task, dict(quote, allow_paid=True))
+        self.s.mode = ''
+        dispatcher.recover_model(self.task, dict(next_quote, allow_paid=True))
+        self.assertEqual(dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual((self.s.submit_count, self.s.vision_count), (1, 3))
+        with closing(sqlite3.connect(self.pc['budget']['ledger'])) as ledger:
+            self.assertEqual(ledger.execute('SELECT count(*) FROM reservations WHERE request_id LIKE ?',
+                                            (self.task + ':vision-0%',)).fetchone()[0], 3)
+
+    def test_recovery_dispatch_interrupted_before_task_claim(self):
+        self.s.mode = 'vision'
+        with self.assertRaises(WorkflowError):
+            self.run_pipeline()
+        dispatcher = self._recovery_dispatcher()
+        quote = self._recovery_quote(dispatcher)
+        dispatcher.recover_model(self.task, dict(quote, allow_paid=True))
+        self.assertEqual(dispatcher._claim()['mode'], 'recover-model')
+        self.assertIsNone(dispatcher.process_next())
+        quote = self._recovery_quote(dispatcher)
+        self.assertEqual(quote['authorized_amount'], self.pc['strategy']['reserve_cny']['vision'])
+        dispatcher.recover_model(self.task, quote)
+        self.s.mode = ''
+        self.assertEqual(dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual(self.s.vision_count, 2)
+
+    def test_unstarted_retry_requires_new_quote_after_config_change(self):
+        self.s.mode = 'vision'
+        with self.assertRaises(WorkflowError):
+            self.run_pipeline()
+        dispatcher = self._recovery_dispatcher()
+        quote = self._recovery_quote(dispatcher)
+        dispatcher.recover_model(self.task, dict(quote, allow_paid=True))
+        dispatcher._claim()
+        dispatcher.process_next()
+        self.pc['strategy']['reserve_cny']['vision'] = '0.2'
+        changed = self._recovery_quote(dispatcher)
+        self.assertEqual((changed['mode'], changed['attempt'], changed['amount']), ('retry', 2, '0.2'))
     def test_budget_prevents_post(self):
         self.pc['budget']['run_limit']='0.00000001'
         with self.assertRaises(WorkflowError): self.run_pipeline()

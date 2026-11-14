@@ -371,6 +371,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         payload=await read_object(req)
         if action in ('archive', 'unarchive'): return service.dispatcher.set_archived(task_id, action == 'archive')
         if action=='cancel': return service.dispatcher.cancel(task_id)
+        if action=='recover-model': return service.dispatcher.recover_model(task_id, payload)
         if action=='retry': return service.dispatcher.retry(task_id,allow_paid=payload.get('allow_paid',False),processing_mode=payload.get('processing_mode'))
         elif action not in ('start','resume'): raise WorkflowError('task_not_found')
         return service.dispatcher.enqueue(task_id,mode='resume' if action=='resume' else 'run',allow_paid=payload.get('allow_paid',False),processing_mode=payload.get('processing_mode','preview'))
