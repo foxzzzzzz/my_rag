@@ -199,6 +199,67 @@ class PipelineIntegration(unittest.TestCase):
         with self.assertRaises(WorkflowError): self.run_pipeline(True)
         self.assertEqual(self.s.vision_count,1)
 
+    def test_resume_legacy_vision_limit_keeps_media_strategy_and_uses_current_request_limit(self):
+        from unittest.mock import patch
+
+        current = self.pc['strategy']['vision_max_tokens']
+        legacy = self.pc['legacy_vision_max_tokens']
+        self.pc['strategy']['vision_max_tokens'] = legacy
+        self.s.mode = 'vision'
+        with self.assertRaises(WorkflowError):
+            self.run_pipeline()
+        self.pc['strategy']['vision_max_tokens'] = current
+        dispatcher = self._recovery_dispatcher()
+        dispatcher.recover_model(self.task, dict(self._recovery_quote(dispatcher), allow_paid=True))
+
+        def verify_media(source, work, wc, pc, *, heartbeat):
+            self.assertEqual(pc['strategy']['vision_max_tokens'], legacy)
+            self.assertTrue((work / 'media-manifest.json').is_file())
+            return media(source, work, wc, pc, heartbeat=heartbeat)
+
+        def provider(models, pc, secrets):
+            self.assertEqual(pc['strategy']['vision_max_tokens'], 3072)
+            return self.s
+
+        self.s.mode = ''
+        keys = {spec['api_key_env']: 'fixture' for spec in self.pc['models']['providers'].values()}
+        dispatcher.service.video_runner = lambda wc, pc, _, *, task_id, resume: run_video(
+            wc, pc, keys, task_id=task_id, resume=resume, storage=self.storage, media=verify_media)
+        with patch('personalkb.video_services.ProviderClient', side_effect=provider):
+            self.assertEqual(dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual((self.s.submit_count, self.s.vision_count), (1, 2))
+
+    def test_model_diagnostics_in_task_api_and_legacy_records(self):
+        from unittest.mock import Mock
+        from fastapi.testclient import TestClient
+        from personalkb.web_app import create_app, load_web_config
+        from personalkb.web_service import WebService
+
+        metrics = {'finish_reason':'length', 'output_chars':231, 'usage':{'completion_tokens':1536}}
+        self.s.vision = Mock(side_effect=ProviderError('model_output_truncated', 'chatcmpl-fixture', metrics=metrics))
+        with self.assertRaisesRegex(WorkflowError, 'model_output_truncated'):
+            self.run_pipeline()
+        self.assertEqual(self.s.vision.call_count, 1)
+        config = load_web_config()
+        config.update(dispatch_enabled=False, live_video_enabled=True)
+        config['trusted_hosts'].append('testserver')
+        service = WebService(self.wc, self.pc, config)
+        with TestClient(create_app(self.wc, self.pc, config, service)) as client:
+            client.get('/api/session')
+            row = next(t for t in client.get('/api/tasks').json()['items'] if t['id'] == self.task)
+            self.assertEqual(row['resume_blocked_reason'], 'unknown_submission')
+            self.assertEqual(row['model_diagnostic'], dict(metrics, code='model_output_truncated',
+                stage='vision-0', provider_request_id='chatcmpl-fixture'))
+            with service.store._tx() as db:
+                saved = db.execute('SELECT response,response_metrics FROM video_chat_attempts WHERE task_id=?', (self.task,)).fetchone()
+                self.assertIsNone(saved['response'])
+                self.assertEqual(json.loads(saved['response_metrics']), metrics)
+                db.execute("""UPDATE video_chat_attempts SET diagnostic='empty_or_truncated_model_output',
+                    response_metrics=NULL WHERE task_id=?""", (self.task,))
+            row = next(t for t in client.get('/api/tasks').json()['items'] if t['id'] == self.task)
+            self.assertEqual(row['model_diagnostic'], {'code':'empty_or_truncated_model_output',
+                'stage':'vision-0', 'provider_request_id':'chatcmpl-fixture'})
+
     def test_default_timeout_retry_once_for_vision_and_text(self):
         from unittest.mock import Mock
         for name in ('vision', 'summarize'):

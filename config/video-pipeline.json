@@ -1,5 +1,6 @@
 {
   "说明": {
+    "legacy_vision_max_tokens": "用于匹配已绑定旧视觉输出上限的任务和媒体清单，后续视觉请求使用当前上限",
     "strategy_file": "抽帧及提示策略配置",
     "models_file": "服务及模型配置",
     "storage_file": "音频存储配置",
@@ -15,6 +16,7 @@
     "heartbeat_seconds": "模型或上传调用期间续租间隔秒"
   },
   "strategy_file": "config/demo-run.json",
+  "legacy_vision_max_tokens": 1536,
   "models_file": "config/demo-models.json",
   "storage_file": "config/asr-storage.json",
   "budget": {

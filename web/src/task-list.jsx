@@ -25,7 +25,10 @@ const failureReasons={
   provider_response_invalid:'模型响应无法解析',
   budget_invalid_or_exceeded:'任务或累计预算不足，无法自动重试。',
   favorites_budget_exceeded:'收藏转换预算不足，无法自动重试。',
-  empty_or_truncated_model_output:'模型输出为空或被截断',
+  empty_or_truncated_model_output:'模型输出为空或被截断，旧记录无法区分',
+  model_output_empty:'模型输出为空',
+  model_output_truncated:'模型输出被截断',
+  model_output_invalid:'模型响应格式无效',
 };
 
 function taskStatus(task, queuedForProcessing) {
@@ -49,7 +52,9 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   const stage=task.stage?statusText(task.stage):'';
   const problem=task.resume_blocked_reason||task.error_code||task.dispatch?.error_code;
   const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
-  const summary=problem?(reason.startsWith('操作失败：')?'查看详情了解原因':reason):'';
+  const diagnostic=task.model_diagnostic;
+  const diagnosticReason=diagnostic && (failureReasons[diagnostic.code] || errorText(400,diagnostic.code));
+  const summary=diagnosticReason||(problem?(reason.startsWith('操作失败：')?'查看详情了解原因':reason):'');
   const detailId='task-detail-'+task.id;
   const recovery=task.model_recovery;
   const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode]);
@@ -85,8 +90,17 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
       <dt>进度</dt><dd>{queuedForProcessing||task.dispatch?.state==='pending'?'已加入处理队列':progress}</dd>
       {item?.kind==='html'&&<><dt>处理方式</dt><dd>{htmlModes[mode]}</dd></>}
       {problem&&<><dt>原因</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {diagnosticReason&&<><dt>模型失败原因</dt><dd>{diagnosticReason}</dd></>}
+      {diagnostic&&<><dt>结束原因</dt><dd>{diagnostic.finish_reason??'未记录'}</dd>
+        <dt>输出字符数</dt><dd>{diagnostic.output_chars??'未记录'}</dd>
+        <dt>Token 用量</dt><dd>{[
+          diagnostic.usage?.prompt_tokens!=null&&`输入 ${diagnostic.usage.prompt_tokens}`,
+          diagnostic.usage?.completion_tokens!=null&&`输出 ${diagnostic.usage.completion_tokens}`,
+          diagnostic.usage?.total_tokens!=null&&`合计 ${diagnostic.usage.total_tokens}`,
+        ].filter(Boolean).join(' · ')||'未记录'}</dd></>}
+      {diagnostic?.provider_request_id&&<><dt>模型请求号</dt><dd>{diagnostic.provider_request_id}</dd></>}
       {recovery&&item&&!item.deleted&&!task.archived&&<><dt>继续处理</dt><dd>
-        <p>中断步骤 {statusText(recovery.stage)}{recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
+        <p>中断步骤 {statusText(recovery.stage)}{!diagnosticReason&&recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
         {['budget_invalid_or_exceeded','favorites_budget_exceeded'].includes(task.error_code)&&<p>{failureReasons[task.error_code]}</p>}
         {recovery.mode==='restore'?<p>{recovery.authorized_amount
           ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`

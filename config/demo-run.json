@@ -45,7 +45,7 @@
   "frame_merge_gap_seconds":0.35,"audio_sample_rate":16000,"audio_channels":1,
   "media_timeout_seconds":300,"request_timeout_seconds":90,
   "asr_poll_timeout_seconds":600,"asr_poll_interval_seconds":2,"audio_duration_tolerance_seconds":1.5,
-  "vision_max_tokens":1536,"text_max_tokens":8192,
+  "vision_max_tokens":3072,"text_max_tokens":8192,
   "reserve_cny":{"asr":"0.1","vision":"0.1","text":"0.75"},
   "max_context_utf8_bytes":300000,
   "vision_prompt":"只依据此帧，逐项提取可读的原文字、标题、数字、单位、表格、代码标识，以及箭头方向/流程/曲线关系。按【字幕】【画面正文】【图表与步骤】【不清晰或缺失】分段；没有该项写无。文字尽量原样保留，不补全看不清的内容，不引入常识和建议，不替作者验证外部事实。保留对知识理解重要的细节与限定条件。",

@@ -13,9 +13,10 @@ from urllib.error import URLError
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, code, request_id=None):
+    def __init__(self, code, request_id=None, *, metrics=None):
         self.code = code
         self.request_id = request_id if isinstance(request_id, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,256}', request_id) else None
+        self.metrics = metrics
         super().__init__(code)
 
 
@@ -133,20 +134,30 @@ class ProviderClient:
         payload = {'model': model['model'], 'messages': messages, 'max_tokens': strategy[kind + '_max_tokens']}
         payload.update({'thinking': {'type': 'disabled'}, 'response_format': {'type': 'json_object'}} if kind == 'text' else {'enable_thinking': False})
         data = self._request(provider['compatible_base_url'].rstrip('/') + '/chat/completions', key, payload)
-        try:
-            choice = data['choices'][0]
-            content = choice['message']['content']
-            if not isinstance(content, str) or not content.strip() or choice.get('finish_reason') == 'length':
-                raise ValueError()
-        except (KeyError, IndexError, TypeError, ValueError):
-            raise ProviderError('empty_or_truncated_model_output', data.get('id') or data.get('request_id')) from None
-        usage = {k: v for k, v in data.get('usage', {}).items() if k in ('prompt_tokens', 'completion_tokens', 'total_tokens') and type(v) is int and v >= 0}
+        choices = data.get('choices')
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        finish_reason = choice.get('finish_reason')
+        if not isinstance(finish_reason, str) or not re.fullmatch(r'[a-z][a-z_0-9]{0,63}', finish_reason):
+            finish_reason = None
+        raw_usage = data.get('usage')
+        usage = {key: raw_usage[key] for key in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+                 if isinstance(raw_usage, dict) and type(raw_usage.get(key)) is int and raw_usage[key] >= 0}
+        metrics = dict(finish_reason=finish_reason, output_chars=len(content) if isinstance(content, str) else None, usage=usage)
+        request_id = data.get('id') or data.get('request_id')
+        if finish_reason == 'length':
+            raise ProviderError('model_output_truncated', request_id, metrics=metrics)
+        if not isinstance(message, dict) or 'content' not in message or (content is not None and not isinstance(content, str)):
+            raise ProviderError('model_output_invalid', request_id, metrics=metrics)
+        if content is None or not content.strip():
+            raise ProviderError('model_output_empty', request_id, metrics=metrics)
         prices = self.config['prices'][kind]
         cost = None
         if 'prompt_tokens' in usage and 'completion_tokens' in usage:
             cost = str((Decimal(usage['prompt_tokens']) * Decimal(str(prices[0])) + Decimal(usage['completion_tokens']) * Decimal(str(prices[1]))) / Decimal(1000000))
         return {'content': content, 'model': data.get('model', model['model']), 'usage': usage,
-                'estimated_cost_cny': cost, 'provider_request_id': data.get('id') or data.get('request_id')}
+                'estimated_cost_cny': cost, 'provider_request_id': request_id, 'response_metrics': metrics}
 
     def vision(self, image_path):
         data = base64.b64encode(Path(image_path).read_bytes()).decode('ascii')
@@ -162,6 +173,6 @@ class ProviderClient:
             if not isinstance(structured, dict) or not all(isinstance(structured.get(k), str) and structured[k].strip() for k in ('summary', 'notes')):
                 raise ValueError()
         except (ValueError, TypeError):
-            raise ProviderError('invalid_summary_json', result.get('provider_request_id')) from None
+            raise ProviderError('invalid_summary_json', result.get('provider_request_id'), metrics=result['response_metrics']) from None
         result['structured'] = structured
         return result

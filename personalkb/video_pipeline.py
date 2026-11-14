@@ -47,11 +47,16 @@ def _bind_strategy(journal, task_id, token, config, keys):
                            'upload_timeout_seconds', 'upload_timeout_seconds说明'}
         inputs['storage'] = {key: value for key, value in inputs['storage'].items() if key not in timeout_options}
     fingerprint = _digest(inputs)
-    old_strategy = {**strategy, 'text_system_prompt': old_prompt} if old_prompt is not None else None
-    old_fingerprint = _digest({**inputs, 'strategy': old_strategy}) if old_strategy is not None else None
-    bound = journal.bind(task_id, token, fingerprint, old_fingerprint)
-    if old_fingerprint is not None and bound == old_fingerprint:
-        config['strategy'] = old_strategy
+    compatible = []
+    if old_prompt is not None:
+        compatible.append({**strategy, 'text_system_prompt': old_prompt})
+    old_vision_limit = config.get('legacy_vision_max_tokens') if 'storage' in keys else None
+    if old_vision_limit is not None:
+        compatible.extend({**candidate, 'vision_max_tokens': old_vision_limit}
+                          for candidate in [strategy, *compatible])
+    alternatives = {_digest({**inputs, 'strategy': candidate}): candidate for candidate in compatible}
+    bound = journal.bind(task_id, token, fingerprint, *alternatives)
+    config['strategy'] = alternatives.get(bound, strategy)
     return bound
 
 
@@ -74,6 +79,9 @@ def load_pipeline_config(path=None):
         if config['poll_seconds'] > config['poll_timeout']: raise ValueError()
         if config['default_profile'] not in config['strategy']['profiles']: raise ValueError()
         _legacy_text_prompt(config['strategy'])
+        if 'legacy_vision_max_tokens' in config:
+            value = config['legacy_vision_max_tokens']
+            if type(value) is not int or value <= 0: raise ValueError()
         t = config['transport']
         retries = config.setdefault('chat_timeout_retries', DEFAULT_CHAT_TIMEOUT_RETRIES)
         if type(retries) is not int or retries < 0:
@@ -233,15 +241,18 @@ def _record_call(journal, tid, token, name, digest, amount, config, call, heartb
             if chat:
                 journal.record_chat_outcome(tid, name, attempt,
                     diagnostic=exc.code if isinstance(exc, ProviderError) else 'model_result_not_saved',
-                    provider_request_id=exc.request_id if isinstance(exc, ProviderError) else None)
+                    provider_request_id=exc.request_id if isinstance(exc, ProviderError) else None,
+                    metrics=exc.metrics if isinstance(exc, ProviderError) else None)
             raise
         result = dict(value, reserved_upper_cny=str(amount), request_id=_stage_request_id(tid, name, retry_attempt))
         if result.get('estimated_cost_cny') is not None and Decimal(str(result['estimated_cost_cny'])) > amount:
             if chat:
-                journal.record_chat_outcome(tid, name, attempt, diagnostic='observed_cost_exceeds_reservation')
+                journal.record_chat_outcome(tid, name, attempt, diagnostic='observed_cost_exceeds_reservation',
+                    provider_request_id=result.get('provider_request_id'), metrics=result.get('response_metrics'))
             raise WorkflowError('observed_cost_exceeds_reservation')
         if chat:
-            journal.record_chat_outcome(tid, name, attempt, response=result, provider_request_id=result.get('provider_request_id'))
+            journal.record_chat_outcome(tid, name, attempt, response=result,
+                provider_request_id=result.get('provider_request_id'), metrics=result.get('response_metrics'))
         heartbeat.check()
         return result
     maximum = config.get('chat_timeout_retries', DEFAULT_CHAT_TIMEOUT_RETRIES)
@@ -344,6 +355,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     token = task['lease_token']
     preparing_upload = False
     try:
+        vision_limit = pc['strategy']['vision_max_tokens']
         fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
         legacy_upload = resume and journal.restore_legacy_upload(task_id, token)
         retries = {}
@@ -378,7 +390,10 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         if recovering_chat and not (work / 'media-manifest.json').is_file():
             raise WorkflowError('recovery_media_missing')
         work.mkdir(parents=True, exist_ok=True)
-        provider = services or ProviderClient(pc['models'], pc, secrets)
+        # The manifest is validated against the bound strategy. Only new
+        # provider calls use the current output limit.
+        provider_config = {**pc, 'strategy': {**pc['strategy'], 'vision_max_tokens': vision_limit}}
+        provider = services or ProviderClient(pc['models'], provider_config, secrets)
         with _Heartbeat(store, task_id, token, pc['heartbeat_seconds']) as beat:
             # Preserve the durable upload phase until a resumed upload starts.
             if not legacy_upload and not (resume and task['stage'] in ASR_UPLOAD_TASK_STAGES):
@@ -481,7 +496,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                 if not path.resolve().is_relative_to(work) or _hash(path) != frame['sha256']: raise WorkflowError('frame_integrity')
                 amount = Decimal(str(pc['strategy']['reserve_cny']['vision']))
                 # Explicit upper token allowance for the configured image limits.
-                upper = (Decimal(pc['vision_input_token_bound']) * Decimal(str(pc['prices']['vision'][0])) + Decimal(pc['strategy']['vision_max_tokens']) * Decimal(str(pc['prices']['vision'][1]))) / 1000000
+                upper = (Decimal(pc['vision_input_token_bound']) * Decimal(str(pc['prices']['vision'][0])) + Decimal(vision_limit) * Decimal(str(pc['prices']['vision'][1]))) / 1000000
                 if amount < upper: raise WorkflowError('vision_reservation_too_small')
                 name = 'vision-' + str(frame['index'])
                 val = _record_call(journal, task_id, token, name, _digest({'frame':frame['sha256'], 'seconds':frame['seconds']}), amount, pc,

@@ -4,15 +4,18 @@ from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError, _json
 
 CHAT_ATTEMPTS_SCHEMA = """CREATE TABLE IF NOT EXISTS video_chat_attempts (
     task_id TEXT NOT NULL, stage TEXT NOT NULL, attempt INTEGER NOT NULL,
-    amount TEXT, response TEXT, response_sha256 TEXT, diagnostic TEXT, provider_request_id TEXT,
+    amount TEXT, response TEXT, response_sha256 TEXT, diagnostic TEXT, provider_request_id TEXT, response_metrics TEXT,
     started INTEGER NOT NULL DEFAULT 0, automatic INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(task_id,stage,attempt))"""
 
 
 def initialize_chat_attempts(connection):
     connection.execute(CHAT_ATTEMPTS_SCHEMA)
-    if 'automatic' not in {row[1] for row in connection.execute('PRAGMA table_info(video_chat_attempts)')}:
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(video_chat_attempts)')}
+    if 'automatic' not in columns:
         connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0')
+    if 'response_metrics' not in columns:
+        connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN response_metrics TEXT')
 
 
 def is_chat_stage(name):
@@ -56,11 +59,11 @@ class VideoJournal:
             return self.store._row(c,'tasks',task_id)
     def claim_task(self,task_id,worker_id): return self._claim(task_id,worker_id,'queued')
     def resume_claim(self,task_id,worker_id): return self._claim(task_id,worker_id,'needs_attention')
-    def bind(self,task_id,token,fingerprint,legacy_fingerprint=None):
+    def bind(self,task_id,token,fingerprint,legacy_fingerprint=None,*compatible_fingerprints):
         with self.store._tx() as c:
             self._lease(c,task_id,token)
             r=c.execute('SELECT fingerprint FROM video_runs WHERE task_id=?',(task_id,)).fetchone()
-            if r and r[0] not in (fingerprint, legacy_fingerprint): raise WorkflowError('fingerprint_conflict')
+            if r and r[0] not in (fingerprint, legacy_fingerprint, *compatible_fingerprints): raise WorkflowError('fingerprint_conflict')
             c.execute('INSERT OR IGNORE INTO video_runs VALUES(?,?)',(task_id,fingerprint))
             return r[0] if r else fingerprint
     def stage(self,task_id,name):
@@ -111,17 +114,18 @@ class VideoJournal:
                 VALUES(?,?,?,?,1)""", (task_id, name, attempt, str(amount)))
             return attempt
 
-    def record_chat_outcome(self, task_id, name, attempt, *, response=None, diagnostic=None, provider_request_id=None):
+    def record_chat_outcome(self, task_id, name, attempt, *, response=None, diagnostic=None, provider_request_id=None, metrics=None):
         raw = _json(response) if response is not None else None
         digest = hashlib.sha256(raw.encode()).hexdigest() if raw is not None else None
         # A provider reply can arrive after lease loss. Keep it with the
         # exact attempt so that recovery can check it without sending again.
         with self.store._tx() as c:
-            c.execute("""INSERT INTO video_chat_attempts(task_id,stage,attempt,response,response_sha256,diagnostic,provider_request_id)
-                VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id,stage,attempt) DO UPDATE SET
+            c.execute("""INSERT INTO video_chat_attempts(task_id,stage,attempt,response,response_sha256,diagnostic,provider_request_id,response_metrics)
+                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(task_id,stage,attempt) DO UPDATE SET
                 response=excluded.response,response_sha256=excluded.response_sha256,diagnostic=excluded.diagnostic,
-                provider_request_id=excluded.provider_request_id
-                WHERE video_chat_attempts.response IS NULL""", (task_id, name, attempt, raw, digest, diagnostic, provider_request_id))
+                provider_request_id=excluded.provider_request_id,response_metrics=excluded.response_metrics
+                WHERE video_chat_attempts.response IS NULL""",
+                      (task_id, name, attempt, raw, digest, diagnostic, provider_request_id, _json(metrics) if metrics is not None else None))
     def begin(self,task_id,token,name,input_sha256):
         with self.store._tx() as c:
             self._lease(c,task_id,token)

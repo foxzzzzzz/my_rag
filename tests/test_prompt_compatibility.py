@@ -6,8 +6,8 @@ from personalkb.workflow_store import WorkflowError
 
 class Journal:
     def __init__(self, bound=None): self.bound = bound
-    def bind(self, task, token, current, legacy=None):
-        if self.bound is not None and self.bound not in (current, legacy): raise WorkflowError('fingerprint_conflict')
+    def bind(self, task, token, current, *compatible):
+        if self.bound is not None and self.bound not in (current, *compatible): raise WorkflowError('fingerprint_conflict')
         self.bound = self.bound or current
         return self.bound
 

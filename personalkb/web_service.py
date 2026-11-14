@@ -229,6 +229,14 @@ class WebService:
                     d['resume_blocked_reason'] = 'version_conflict'
                 else:
                     d['resume_blocked_reason'] = 'unknown_submission' if has_unknown_submission(t, rows, legacy_upload=legacy_upload) else None
+                if d['resume_blocked_reason'] == 'unknown_submission':
+                    diagnostic = c.execute("""SELECT stage,diagnostic,provider_request_id,response_metrics
+                        FROM video_chat_attempts WHERE task_id=? AND stage=? AND diagnostic IS NOT NULL
+                        ORDER BY attempt DESC LIMIT 1""", (t['id'], t['stage'])).fetchone()
+                    if diagnostic:
+                        metrics = json.loads(diagnostic['response_metrics']) if diagnostic['response_metrics'] else {}
+                        d['model_diagnostic'] = dict(code=diagnostic['diagnostic'], stage=diagnostic['stage'],
+                            provider_request_id=diagnostic['provider_request_id'], **metrics)
                 if (d['resume_blocked_reason'] == 'unknown_submission' and not d['archived']
                         and (not dispatch or dispatch['state'] not in ('pending', 'working'))):
                     d['model_recovery'] = self.dispatcher.model_recovery(c, t, rows)

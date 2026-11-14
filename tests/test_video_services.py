@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from personalkb.video_services import ProviderClient
+from personalkb.video_services import ProviderClient, ProviderError
 
 class Transport:
     def __init__(self, response): self.response, self.calls = response, []
@@ -38,9 +38,22 @@ class ProviderTests(unittest.TestCase):
     def test_summary_invalid(self):
         c,_ = self.client({'choices':[{'message':{'content':'bad'},'finish_reason':'stop'}]})
         with self.assertRaises(RuntimeError): c.summarize('body','title')
-    def test_truncated(self):
-        c,_ = self.client({'choices':[{'message':{'content':'x'},'finish_reason':'length'}]})
-        with self.assertRaises(RuntimeError): c.summarize('body','title')
+    def test_failed_chat_output_preserves_only_diagnostic_fields(self):
+        cases = [
+            ({'message': {'content': '截断'}, 'finish_reason': 'length'}, 'model_output_truncated', 'length', 2),
+            ({'message': {'content': ''}, 'finish_reason': 'stop'}, 'model_output_empty', 'stop', 0),
+            ({'message': {'content': None}, 'finish_reason': 'stop'}, 'model_output_empty', 'stop', None),
+            ({'message': {}, 'finish_reason': 'stop'}, 'model_output_invalid', 'stop', None),
+        ]
+        for choice, code, reason, chars in cases:
+            with self.subTest(code=code, chars=chars):
+                c,_ = self.client({'id':'chatcmpl-test', 'choices':[choice],
+                                   'usage':{'prompt_tokens':20, 'completion_tokens':0, 'private':'ignored'}})
+                with self.assertRaises(ProviderError) as result:
+                    c.summarize('body','title')
+                self.assertEqual((result.exception.code, result.exception.request_id), (code,'chatcmpl-test'))
+                self.assertEqual(result.exception.metrics, {'finish_reason':reason, 'output_chars':chars,
+                    'usage':{'prompt_tokens':20, 'completion_tokens':0}})
     def test_vision(self):
         c,t = self.client({'choices':[{'message':{'content':'画面'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':100,'completion_tokens':20}})
         with TemporaryDirectory(dir='tmp') as directory:
@@ -49,6 +62,7 @@ class ProviderTests(unittest.TestCase):
             result = c.vision(image)
         self.assertEqual(result['content'], '画面')
         self.assertFalse(t.calls[0][2]['enable_thinking'])
+        self.assertEqual(t.calls[0][2]['max_tokens'], 3072)
         self.assertEqual(result['estimated_cost_cny'], '0.0003')
     def test_insecure_url_rejected_before_transport(self):
         c,t = self.client({})
