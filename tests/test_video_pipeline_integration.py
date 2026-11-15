@@ -32,7 +32,9 @@ class FakeServices:
         self.vision_count+=1
         if self.mode=='vision': raise TimeoutError()
         return {'content':'visual','model':'fake','estimated_cost_cny':0}
-    def summarize(self,body,title): return {'structured':{'summary':'summary','notes':'notes'},'content':'notes','model':'fake','estimated_cost_cny':0}
+    def summarize(self,body,title):
+        summary = 'summary' if self.mode=='legacy' else {'overview':'summary','key_points':['point'],'limitations':''}
+        return {'structured':{'summary':summary,'notes':'notes'},'content':'notes','model':'fake','estimated_cost_cny':0}
 
 def media(source,work,wc,pc,*,heartbeat):
     heartbeat(); audio=work/'audio.wav'; audio.write_bytes(b'audio'); frame=work/'frame.jpg'
@@ -119,11 +121,11 @@ class PipelineIntegration(unittest.TestCase):
         self.s.mode='query'
         strategy = self.pc['strategy']
         legacy = strategy['legacy_text_prompt']['value']
-        self.pc['strategy'] = {key: value for key, value in strategy.items() if key != 'legacy_text_prompt'}
+        self.pc['strategy'] = {key: value for key, value in strategy.items() if key not in ('legacy_text_prompt','previous_text_prompt','summary_format','summary_format说明')}
         self.pc['strategy']['text_system_prompt'] = legacy
         with self.assertRaises(WorkflowError): self.run_pipeline()
         self.pc['strategy'] = strategy
-        self.assertEqual(self.status(),'needs_attention'); self.run_pipeline(True); self.assertEqual(self.s.submit_count,1); self.assertEqual(self.s.query_count,2)
+        self.assertEqual(self.status(),'needs_attention'); self.s.mode='legacy'; self.run_pipeline(True); self.assertEqual(self.s.submit_count,1); self.assertEqual(self.s.query_count,2)
         c=sqlite3.connect(self.pc['budget']['ledger']); self.addCleanup(c.close); self.assertEqual(c.execute("SELECT count(*) FROM reservations WHERE request_id=?",(self.task+':asr_submit',)).fetchone()[0],1)
     def test_failed_subtask_cleanup(self):
         self.s.mode='subtask_failed'

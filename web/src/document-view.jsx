@@ -1,5 +1,5 @@
 import React from 'react';
-import {parseDocument,parseInline} from './document-layout';
+import {parseDocument,parseInline,structuredSummaryBlocks} from './document-layout';
 function renderInline(tokens) {
   return tokens.map((token,index)=>{
     if(token.type==='strong')return <strong key={index}>{renderInline(token.children)}</strong>;
@@ -10,7 +10,9 @@ function renderInline(tokens) {
 function Inline({text}) {return renderInline(parseInline(text));}
 function List({block}) {
   const Tag=block.ordered?'ol':'ul';
-  return <Tag start={block.ordered?block.start:undefined}>{block.items.map((item,i)=>
+  const circled=block.marker==='circled';
+  return <Tag start={block.ordered?block.start:undefined} className={circled?'circled-list':undefined}
+    role={circled?'list':undefined}>{block.items.map((item,i)=>
     <li key={i}><Inline text={item.text}/>{item.children.map((child,j)=><List key={j} block={child}/>)}</li>)}</Tag>;
 }
 function Blocks({blocks}) {
@@ -41,6 +43,7 @@ function Blocks({blocks}) {
 </p>;
   });
 }
-export function DocumentView({value,structureSummary}) {
-  return <div className="document-reader"><Blocks blocks={parseDocument(value,{structureSummary})}/></div>;
+export function DocumentView({value,structureSummary,summaryStructure}) {
+  const blocks=structureSummary && structuredSummaryBlocks(summaryStructure);
+  return <div className="document-reader"><Blocks blocks={blocks||parseDocument(value,{structureSummary})}/></div>;
 }

@@ -11,11 +11,12 @@ from personalkb.html_pipeline import load_html_config, run_html
 
 
 class FakeProvider:
-    def __init__(self): self.calls = 0; self.action = None
+    def __init__(self): self.calls = 0; self.action = None; self.legacy = False
     def summarize(self, body, title):
         self.calls += 1
         if self.action: self.action()
-        return {'structured': {'summary': '摘要', 'notes': '笔记'}, 'model': 'fake',
+        summary = '摘要' if self.legacy else {'overview':'摘要','key_points':['要点'],'limitations':''}
+        return {'structured': {'summary': summary, 'notes': '笔记'}, 'model': 'fake',
                 'usage': {'input_tokens': 12, 'output_tokens': 3}, 'estimated_cost_cny': '0.001'}
 
 
@@ -38,6 +39,16 @@ class HtmlPipelineTests(unittest.TestCase):
         self.assertEqual(self.status(), 'succeeded')
         content = json.dumps(version, ensure_ascii=False)
         for expected in ('正文', '证据', '摘要', 'input_tokens'): self.assertIn(expected, content)
+        self.assertEqual(version['result']['summary'], '摘要\n\n- 要点')
+        self.assertEqual(version['result']['summary_structure']['key_points'], ['要点'])
+        exported = self.store().content_root / self.sid / 'versions' / version['id'] / 'content.md'
+        self.assertIn('## Summary\n\n摘要\n\n- 要点', exported.read_text(encoding='utf-8'))
+        self.assertEqual(self.provider.calls, 1)
+    def test_invalid_summary_does_not_publish_version(self):
+        self.provider.legacy = True
+        with self.assertRaisesRegex(WorkflowError, 'invalid_summary_json'):
+            self.run_html()
+        self.assertEqual(self.store().list_versions(self.sid), [])
         self.assertEqual(self.provider.calls, 1)
     def test_missing_key_before_claim(self):
         with self.assertRaises(WorkflowError): run_html(self.wc, self.config, {}, task_id=self.task)
@@ -80,8 +91,9 @@ class HtmlPipelineTests(unittest.TestCase):
         from personalkb.workflow_store import WorkflowStore
         strategy = self.config['strategy']
         legacy = strategy['legacy_text_prompt']['value']
-        self.config['strategy'] = {key: value for key, value in strategy.items() if key != 'legacy_text_prompt'}
+        self.config['strategy'] = {key: value for key, value in strategy.items() if key not in ('legacy_text_prompt','previous_text_prompt','summary_format','summary_format说明')}
         self.config['strategy']['text_system_prompt'] = legacy
+        self.provider.legacy = True
         with patch.object(WorkflowStore, 'finish', side_effect=WorkflowError('injected_failure')):
             with self.assertRaises(WorkflowError): self.run_html()
         self.config['strategy'] = strategy

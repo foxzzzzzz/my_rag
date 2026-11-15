@@ -9,8 +9,9 @@ from pathlib import Path
 from .workflow import ROOT, _root, _hash, make_store
 from .workflow_store import WorkflowError
 from .video_journal import VideoJournal
-from .video_pipeline import _digest, _bind_strategy, _legacy_text_prompt, _Heartbeat, _preflight, paid_stage
-from .video_services import ProviderClient
+from .video_pipeline import _digest, _bind_strategy, _legacy_text_prompts, _Heartbeat, _preflight, paid_stage
+from .video_services import ProviderClient, ProviderError
+from .summary_structure import summary_fields
 
 
 def load_html_config(path=None):
@@ -37,7 +38,7 @@ def validate_config(c):
         if not Decimal(str(c['reserve_cny'])) <= Decimal(str(c['budget']['run_limit'])) <= Decimal(str(c['budget']['research_limit'])) <= 100: raise ValueError()
         if any(not isinstance(c[k], str) or not c[k].strip() for k in ('scheme_id', 'extractor_version')): raise ValueError()
         if not isinstance(c['strategy']['text_system_prompt'], str) or not c['strategy']['text_system_prompt'].strip(): raise ValueError()
-        _legacy_text_prompt(c['strategy'])
+        _legacy_text_prompts(c['strategy'])
         if not isinstance(c['budget']['ledger'], str) or not c['budget']['ledger'].strip(): raise ValueError()
         m = c['models']['models']['text']; p = c['models']['providers'][m['provider']]
         if any(not isinstance(x, str) or not x.strip() for x in (m['model'], p['api_key_env'], p['compatible_base_url'])): raise ValueError()
@@ -117,9 +118,11 @@ def _guarded_run_html(workflow_config, html_config, keys, *, task_id, resume=Fal
             if result.get('estimated_cost_cny') is not None and Decimal(str(result['estimated_cost_cny'])) > amount:
                 raise WorkflowError('observed_cost_exceeds_reservation')
             beat.check()
-            structured = result.get('structured',{})
-            if not all(isinstance(structured.get(k),str) and structured[k].strip() for k in ('summary','notes')): raise WorkflowError('invalid_summary_json')
-            output = dict(title=title,body=body,summary=structured['summary'],notes=structured['notes'],
+            try:
+                summary = summary_fields(result.get('structured'), c['strategy'])
+            except ValueError:
+                raise WorkflowError('invalid_summary_json') from None
+            output = dict(title=title,body=body,**summary,
                           evidence=[{'type':'html','locator':'static-extraction','text':body}],warnings=extracted['warnings'],
                           provenance='provider',output_kind='machine_initial',scheme_id=c['scheme_id'],scheme_version=fingerprint,
                           processing={'mode':'model','model':result.get('model',c['models']['models']['text']['model']),
@@ -129,7 +132,7 @@ def _guarded_run_html(workflow_config, html_config, keys, *, task_id, resume=Fal
             version = store.finish(task_id,token,output,expected_version_id=base_version)
         return version
     except Exception as exc:
-        code = exc.code if isinstance(exc,WorkflowError) else 'html_processing_failed'
+        code = exc.code if isinstance(exc, (WorkflowError, ProviderError)) else 'html_processing_failed'
         try: store.fail(task_id,token,code)
         except WorkflowError: pass
         raise WorkflowError(code) from None

@@ -1,6 +1,7 @@
 import hashlib, json, math, os, re, secrets, sqlite3, time, uuid
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from .summary_structure import summary_markdown
 
 class WorkflowError(Exception):
     def __init__(self, code):
@@ -173,7 +174,10 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         if not isinstance(result,dict) or any(not isinstance(result.get(k),str) or not result[k].strip() for k in ('title','body','summary','notes','scheme_id','scheme_version','output_kind')) or result.get('output_kind') != ('human_edited' if human else 'machine_initial') or result.get('provenance') not in (('human_edited',) if human else ('local_extraction','provider')) or not isinstance(result.get('evidence'),list) or not result['evidence'] or any(not isinstance(e,dict) or not isinstance(e.get('text'),str) or not e['text'].strip() for e in result['evidence']): raise WorkflowError('invalid_result')
         s=self._row(c,'sources',sid)
         if s['kind'] in ('video','mp4') and any(not isinstance(result.get(k),str) or not result[k].strip() for k in ('transcript','visual')): raise WorkflowError('invalid_result')
-        try: raw=_json(result)
+        try:
+            if 'summary_structure' in result and summary_markdown(result['summary_structure']) != result['summary']:
+                raise ValueError('summary text does not match structure')
+            raw=_json(result)
         except (ValueError,TypeError): raise WorkflowError('invalid_result')
         vid=_id(); sha=hashlib.sha256(raw.encode()).hexdigest()
         c.execute('INSERT INTO versions(id,source_id,content_sha256,result,output_kind,parent_version_id) VALUES(?,?,?,?,?,?)',(vid,sid,sha,raw,result['output_kind'],parent)); c.execute('UPDATE sources SET current_version_id=? WHERE id=?',(vid,sid))

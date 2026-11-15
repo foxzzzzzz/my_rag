@@ -69,9 +69,18 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): c.download_asr('http://bucket.aliyuncs.com/a', 2)
         self.assertEqual(t.calls, [])
     def test_summary_success_and_thinking_disabled(self):
-        c,t = self.client({'choices':[{'message':{'content':'{"summary":"s","notes":"n"}'},'finish_reason':'stop'}]})
-        self.assertEqual(c.summarize('body','title')['structured']['notes'], 'n')
+        output = {'summary': {'overview':'s', 'key_points':['point'], 'limitations':''}, 'notes':'n'}
+        c,t = self.client({'choices':[{'message':{'content':json.dumps(output)},'finish_reason':'stop'}]})
+        self.assertEqual(c.summarize('body','title')['structured'], output)
         self.assertEqual(t.calls[0][2]['thinking'], {'type':'disabled'})
+    def test_summary_string_requires_legacy_strategy(self):
+        output = {'summary':'s', 'notes':'n'}
+        c,t = self.client({'choices':[{'message':{'content':json.dumps(output)},'finish_reason':'stop'}]})
+        with self.assertRaisesRegex(ProviderError, 'invalid_summary_json'):
+            c.summarize('body','title')
+        self.strategy.pop('summary_format')
+        self.assertEqual(c.summarize('body','title')['structured'], output)
+        self.assertEqual(len(t.calls), 2)
     def test_managed_headers(self):
         c,t = self.client({'output': {'task_id':'abc'}})
         c.submit_asr(SimpleNamespace(file_url='https://test', asr_headers=lambda: {'X-DashScope-Async':'enable'}))

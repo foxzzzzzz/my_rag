@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError
 from urllib.error import URLError
+from .summary_structure import summary_fields
 
 
 class ProviderError(RuntimeError):
@@ -170,8 +171,7 @@ class ProviderClient:
         result = self._chat('text', [{'role': 'system', 'content': strategy['text_system_prompt']}, {'role': 'user', 'content': title + '\n\n' + body}])
         try:
             structured = json.loads(result['content'])
-            if not isinstance(structured, dict) or not all(isinstance(structured.get(k), str) and structured[k].strip() for k in ('summary', 'notes')):
-                raise ValueError()
+            summary_fields(structured, strategy)
         except (ValueError, TypeError):
             raise ProviderError('invalid_summary_json', result.get('provider_request_id'), metrics=result['response_metrics']) from None
         result['structured'] = structured

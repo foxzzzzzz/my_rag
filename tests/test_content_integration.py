@@ -12,7 +12,7 @@ class Provider:
     def __init__(self): self.calls=0
     def summarize(self, body, title):
         self.calls+=1
-        return {'structured':{'summary':'摘要','notes':'笔记'},'model':'fake','usage':{'input_tokens':1},'estimated_cost_cny':'0.001'}
+        return {'structured':{'summary':{'overview':'摘要','key_points':['要点'],'limitations':''},'notes':'笔记'},'model':'fake','usage':{'input_tokens':1},'estimated_cost_cny':'0.001'}
 
 class ContentIntegration(unittest.TestCase):
     def setUp(self):

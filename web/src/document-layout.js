@@ -71,7 +71,9 @@ export function parseInline(text) {
 const brackets = {'(':')','（':'）','[':']','［':'］','【':'】','{':'}','｛':'｝','《':'》','〈':'〉','〔':'〕'};
 const quotes = {'“':'”','‘':'’','「':'」','『':'』','"':'"',"'":"'"};
 const ordinals = '一二三四五六七八九十';
+const circledOrdinals = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
 const caveat = /^(?:\*\*)?(?:作者(?:特别|还|同时)?强调|(?:需要|值得)注意|(?:取证边界|局限(?:性)?)(?:\*\*)?[：:]|材料(?:存在|仍有)(?:多处)?(?:字幕与画面不一致|文字遮挡|拼写异常|不确定性|局限|限制|缺失))/;
+const speculativeCaveat = /^作者对[^。！？；;\n]+等设想多为暗示性表述/;
 
 function summaryBlocks(paragraph) {
   const text=paragraph.text;
@@ -80,9 +82,16 @@ function summaryBlocks(paragraph) {
   const closers=[];
   const quoteClosers=[];
   let code='';
-  if(text.trimStart().startsWith('一是')){
-    markers.push({offset:text.length-text.trimStart().length,ordinal:0,separator:''});
+  function readMarker(offset, separator) {
+    const circled=circledOrdinals.indexOf(text[offset]||' ');
+    const chinese=ordinals.indexOf(text[offset]||' ');
+    if(markers.at(-1)?.offset===offset)return;
+    if(circled>=0)markers.push({offset,ordinal:circled,separator,style:'circled'});
+    else if(separator!=='\n'&&chinese>=0&&text[offset+1]==='是'&&offset+2<text.length){
+      markers.push({offset,ordinal:chinese,separator,style:'chinese'});
+    }
   }
+  readMarker(text.length-text.trimStart().length,'');
 
   for(let index=0;index<text.length;index++){
     const char=text[index];
@@ -111,27 +120,27 @@ function summaryBlocks(paragraph) {
       continue;
     }
     if(char===closers.at(-1)){closers.pop();continue;}
-    if(closers.length||!/[：:；;。！？]/.test(char))continue;
+    if(closers.length||!/[：:；;。！？\n]/.test(char))continue;
 
     const rest=text.slice(index+1);
     const next=rest.trimStart();
     const offset=index+1+rest.length-next.length;
-    if(/[；;。！？]/.test(char)&&caveat.test(next))limits.push(offset);
-    if(next[1]==='是'&&ordinals.includes(next[0]||' ')&&next.length>2){
-      markers.push({offset,ordinal:ordinals.indexOf(next[0]),separator:char});
-    }
+    if(/[；;。！？]/.test(char)&&(caveat.test(next)||speculativeCaveat.test(next)))limits.push(offset);
+    readMarker(offset,char);
   }
 
   const first=markers.findIndex(marker=>marker.ordinal===0&&(!marker.separator||/[：:]/.test(marker.separator)));
   if(first<0||!markers[first+1]||quoteClosers.length||code||closers.length)return [paragraph];
   const listEnd=limits.find(offset=>offset>markers[first+1].offset)??text.length;
   const entries=markers.slice(first).filter(marker=>marker.offset<listEnd);
-  if(entries.length<2||entries.some((marker,index)=>marker.ordinal!==index||index>0&&/[：:]/.test(marker.separator)))return [paragraph];
+  const style=entries[0].style;
+  if(entries.length<2||entries.some((marker,index)=>marker.style!==style||marker.ordinal!==index||index>0&&/[：:]/.test(marker.separator)))return [paragraph];
   const intro=text.slice(0,entries[0].offset).trimEnd();
   const items=entries.map((marker,index)=>text.slice(marker.offset,entries[index+1]?.offset??listEnd).trimEnd());
+  if(style==='circled'&&items.some(item=>!item.slice(1).replace(/[\s：:；;。！？、，,.!?]/g,'')))return [paragraph];
   const blocks=[];
   if(intro)blocks.push({type:'paragraph',text:intro});
-  blocks.push({type:'list',ordered:false,items:items.map(text=>({text,children:[]}))});
+  blocks.push({type:'list',ordered:false,...(style==='circled'?{marker:'circled'}:{}),items:items.map(text=>({text,children:[]}))});
   if(listEnd<text.length)blocks.push({type:'paragraph',text:text.slice(listEnd)});
   return blocks;
 }
@@ -181,6 +190,18 @@ function readList(lines, start, indent, depth=0) {
   }
   return {block:{type:'list',ordered,start:ordered?Number(first[3]):undefined,items},next:i};
 }
+export function structuredSummaryBlocks(summary) {
+  if (!summary || typeof summary.overview!=='string' || !summary.overview.trim() ||
+      !Array.isArray(summary.key_points) || !summary.key_points.every(point=>typeof point==='string' && point.trim()) ||
+      typeof summary.limitations!=='string') return null;
+  const blocks=parseDocument(summary.overview);
+  if (summary.key_points.length) {
+    blocks.push({type:'list',ordered:false,items:summary.key_points.map(text=>({text,children:[]}))});
+  }
+  if (summary.limitations.trim()) blocks.push(...parseDocument(summary.limitations));
+  return blocks;
+}
+
 export function parseDocument(value, {structureSummary=false, depth=0}={}) {
   const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
   const blocks = []; let i = 0;

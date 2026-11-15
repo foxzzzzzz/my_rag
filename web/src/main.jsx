@@ -377,6 +377,7 @@ function App() {
               {selectedTab==='visual'&&<h2 className="visual-text-heading">画面识别文字</h2>}
               <div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
                 <DocumentView structureSummary={selectedTab==='summary'&&!preview}
+                  summaryStructure={result.summary_structure}
                   value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               </div>

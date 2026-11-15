@@ -67,7 +67,7 @@ def test_delete_during_html_provider_blocks_other_work(tmp_path):
     class Provider:
         def summarize(self, body, title):
             started.set(); assert release.wait(10)
-            return {'structured':{'summary':'summary','notes':'notes'},'model':'fake','usage':{'input_tokens':1,'output_tokens':1},'estimated_cost_cny':'0.001'}
+            return {'structured':{'summary':{'overview':'summary','key_points':['point'],'limitations':''},'notes':'notes'},'model':'fake','usage':{'input_tokens':1,'output_tokens':1},'estimated_cost_cny':'0.001'}
     def run():
         try: run_html(wc,hc,{},task_id=first['task']['id'],services=Provider())
         except WorkflowError as e: errors.append(e.code)

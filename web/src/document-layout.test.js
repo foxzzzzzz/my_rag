@@ -1,6 +1,16 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {parseDocument,parseInline,safeLink} from './document-layout.js';
+import {parseDocument,parseInline,safeLink,structuredSummaryBlocks} from './document-layout.js';
+test('结构化摘要按字段渲染并校验旧数据',()=>{
+  assert.deepEqual(structuredSummaryBlocks({overview:'概述',key_points:['要点一','要点二'],limitations:'范围说明'}),[
+    {type:'paragraph',text:'概述'},
+    {type:'list',ordered:false,items:[{text:'要点一',children:[]},{text:'要点二',children:[]}]},
+    {type:'paragraph',text:'范围说明'},
+  ]);
+  assert.deepEqual(structuredSummaryBlocks({overview:'概述',key_points:[],limitations:''}),[{type:'paragraph',text:'概述'}]);
+  for(const value of [null,{}, {overview:'',key_points:[],limitations:''},{overview:'概述',key_points:[''],limitations:''}])
+    assert.equal(structuredSummaryBlocks(value),null);
+});
 test('dangerous links are rejected',()=>{assert.equal(safeLink('javascript:alert(1)'),null);assert.equal(safeLink('data:text/html,x'),null);assert.equal(safeLink('https://example.com/a'),'https://example.com/a')});
 test('HTML remains plain text and common blocks preserve structure',()=>{const b=parseDocument('# Title\n\n<script>alert(1)</script>\n\n- one\n- two\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```\n<x>\n```');assert.deepEqual(b.map(x=>x.type),['heading','paragraph','list','table','code']);assert.equal(b[1].text,'<script>alert(1)</script>');assert.equal(b[4].text,'<x>')});
 
@@ -45,6 +55,46 @@ test('段首枚举和带粗体或分号的取证边界仍可分开',()=>{
       {type:'paragraph',text:limit}
     ]);
   }
+});
+
+test('Pachat 摘要保留原有圈号和文字，按五项结论及作者说明排版',()=>{
+  const intro='作者介绍并演示网页工具 Pachat：把多个 AI agent（含本人电脑上的 Cloud Code/Codex、Personal agent 如 Muse/WorkBuddy）拉进同一群聊，集中派活、协同完成任务。核心结论包括：';
+  const items=[
+    '①可在群内同时调度不同 agent 完成生图、做 PPT、查 GitHub 榜单并交叉核验；',
+    '②作者设想把 agent 当"员工"互相借用（需对方允许），并认为存在付费/共享账号等商业想象空间；',
+    '③作者更推荐 personal agent，因为不需要电脑保持开机，手机即可用；',
+    '④作者批评当前"邀请本地 agent 仍需复制一段码"的交互不完善、反人类；',
+    '⑤作者质疑官方指南里团餐报价、鲜花订阅等小场景是否需要多个 agent，认为会费 token 且混乱。',
+  ];
+  const tail='作者对借用 agent、共享账号等设想多为暗示性表述，并多次称"言尽于此"，自认机制"超模"、打破硬件壁垒；同时承认工具"还不是很完备"。';
+  const text=intro+' '+items.join(' ')+tail;
+  assert.deepEqual(parseDocument(text,{structureSummary:true}),[
+    {type:'paragraph',text:intro},
+    {type:'list',ordered:false,marker:'circled',items:items.map(text=>({text,children:[]}))},
+    {type:'paragraph',text:tail},
+  ]);
+  assert.deepEqual(parseDocument(text),[{type:'paragraph',text}]);
+});
+
+test('圈号支持段首和逐行排版，跳号、混用编号和引用内圈号保持原样',()=>{
+  for(const text of ['①第一项\n②第二项；③第三项','要点：\n①第一项\n②第二项\n③第三项']){
+    const list=parseDocument(text,{structureSummary:true}).at(-1);
+    assert.equal(list.marker,'circled');
+    assert.deepEqual(list.items.map(item=>item.text),['①第一项','②第二项'+(text.includes('；')?'；':''),'③第三项']);
+  }
+  for(const text of [
+    '单项：①仅一条。','要点：①第一项；③跳号。','要点：①第一项；二是第二项。',
+    '说明见①；②处有示例。','引述：“要点：①甲；②乙。”',
+    '括注（要点：①甲；②乙）。','引用 `要点：①甲；②乙`。',
+    '要点：①；②第二项。','要点：①；②第二项；③第三项。',
+  ]){
+    assert.deepEqual(parseDocument(text,{structureSummary:true}),parseDocument(text));
+  }
+  const protectedMarks='要点：①示例（符号：②）；②引用“提示：③”；③读取 `示例：④`。';
+  const [intro,list]=parseDocument(protectedMarks,{structureSummary:true});
+  assert.equal(intro.text,'要点：');
+  assert.equal(list.items.length,3);
+  assert.equal(list.items.map(item=>item.text).join(''),protectedMarks.slice(intro.text.length));
 });
 
 test('行内粗体正确显示，代码、普通星号及不安全链接仍按原规则处理',()=>{

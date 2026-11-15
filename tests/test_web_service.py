@@ -22,6 +22,24 @@ class WebServiceTests(unittest.TestCase):
     def test_sources_and_hidden_fields(self):
         self.finish(); text=json.dumps(self.s.detail(self.sid))+json.dumps(self.s.tasks())+json.dumps(self.s.sources())
         for field in ('lease_token','blob_relpath','worker_id','remote_task_id'): self.assertNotIn(field,text)
+    def test_summary_structure_follows_version_and_manual_summary_edit(self):
+        from personalkb.summary_structure import summary_fields
+        store = self.s.store
+        task = store.claim_specific(self.tid, 'test')
+        summary = {'overview':'概述','key_points':['要点'],'limitations':'边界'}
+        fields = summary_fields({'summary':summary,'notes':'笔记'}, {'summary_format':'structured'})
+        v = store.finish(self.tid, task['lease_token'], {
+            **fields, 'title':'标题', 'body':'正文', 'scheme_id':'tests', 'scheme_version':'1',
+            'output_kind':'machine_initial', 'provenance':'provider', 'evidence':[{'text':'正文'}],
+        })
+        self.assertEqual(self.s.detail(self.sid)['current']['result']['summary_structure'], summary)
+        title_edit = self.s.revise(self.sid, {'expected_version_id':v['id'], 'title':'新标题'})
+        self.assertEqual(self.s.detail(self.sid)['current']['result']['summary_structure'], summary)
+        self.s.revise(self.sid, {'expected_version_id':title_edit['id'], 'summary':'人工修改'})
+        revised = self.s.detail(self.sid)['current']['result']
+        self.assertEqual(revised['summary'], '人工修改')
+        self.assertNotIn('summary_structure', revised)
+        self.assertEqual(self.s.detail(self.sid, v['id'])['current']['result']['summary_structure'], summary)
     def test_task_source_metadata_survives_trash(self):
         self.finish()
         before = self.s.tasks()['items'][0]

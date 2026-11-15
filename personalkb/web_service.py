@@ -339,7 +339,7 @@ class WebService:
                     'review_status':review['decision'] if review else 'pending',
                     'review_revision':review['seq'] if review else None}
         allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at')
-        result_fields=('title','body','summary','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','processing')
+        result_fields=('title','body','summary','summary_structure','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','processing')
         if current: current={**{k:current[k] for k in allowed},'result':{k:current['result'][k] for k in result_fields if k in current['result']}}
         if current:
             result=current['result']
@@ -363,6 +363,8 @@ class WebService:
         s=self.store.get_source(source_id)
         if not s['current_version_id']: raise WorkflowError('version_conflict')
         result=self.store.get_version(s['current_version_id'])['result'].copy()
+        if 'summary' in p and p['summary'] != result.get('summary'):
+            result.pop('summary_structure', None)
         changed = {k for k in ('body','transcript','visual') if k in p and p[k] != result.get(k, '')}
         evidence = list(result.get('evidence') or [])
         if 'body' in changed:

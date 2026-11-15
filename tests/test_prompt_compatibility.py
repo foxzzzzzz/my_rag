@@ -12,11 +12,13 @@ class Journal:
         return self.bound
 
 @pytest.mark.parametrize('loader,keys', [(load_pipeline_config, ('models','strategy','storage','prices','default_profile')), (load_html_config, ('models','strategy','prices','scheme_id','extractor_version'))])
-def test_prompt_fingerprint_compatibility(loader, keys):
+@pytest.mark.parametrize('prompt_key', ['legacy_text_prompt', 'previous_text_prompt'])
+def test_prompt_fingerprint_compatibility(loader, keys, prompt_key):
     config = loader()
-    original = {'text_system_prompt': config['strategy']['legacy_text_prompt']['value']}
+    original = {'text_system_prompt': config['strategy'][prompt_key]['value']}
     old = copy.deepcopy(config)
-    old['strategy'].pop('legacy_text_prompt')
+    for key in ('legacy_text_prompt','previous_text_prompt','summary_format','summary_format说明'):
+        old['strategy'].pop(key, None)
     old['strategy']['text_system_prompt'] = original['text_system_prompt']
     if 'storage' in keys:
         # The saved pre-upgrade fingerprint predates the split upload timeouts.

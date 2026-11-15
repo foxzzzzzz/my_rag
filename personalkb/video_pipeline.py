@@ -14,6 +14,7 @@ from .video_journal import VideoJournal, is_chat_stage
 from tools.api_smoke import reserve
 from .asr_storage import PreparedAudio, StorageError, create_storage
 from .video_services import ProviderError
+from .summary_structure import summary_fields
 
 DEFAULT_CHAT_TIMEOUT_RETRIES = 1
 
@@ -25,20 +26,25 @@ def _positive(value):
     return n
 
 
-def _legacy_text_prompt(strategy):
-    if 'legacy_text_prompt' not in strategy:
-        return None
-    legacy = strategy['legacy_text_prompt']
-    if not isinstance(legacy, dict) or not isinstance(legacy.get('value'), str) or not legacy['value'].strip():
-        raise ValueError('invalid legacy prompt')
-    return legacy['value']
+def _legacy_text_prompts(strategy):
+    prompts = []
+    for key in ('legacy_text_prompt', 'previous_text_prompt'):
+        if key in strategy:
+            entry = strategy[key]
+            if not isinstance(entry, dict) or not isinstance(entry.get('value'), str) or not entry['value'].strip():
+                raise ValueError('invalid legacy prompt')
+            prompts.append(entry['value'])
+    if 'summary_format' in strategy and strategy['summary_format'] != 'structured':
+        raise ValueError('invalid summary format')
+    return prompts
 
 
 def _bind_strategy(journal, task_id, token, config, keys):
     """Keep the prompt of a previously bound task when the full strategy still matches."""
     strategy = dict(config['strategy'])
-    old_prompt = _legacy_text_prompt(strategy)
+    old_prompts = _legacy_text_prompts(strategy)
     strategy.pop('legacy_text_prompt', None)
+    strategy.pop('previous_text_prompt', None)
     config['strategy'] = strategy
     inputs = {key: config[key] for key in keys}
     if 'storage' in inputs:
@@ -47,9 +53,8 @@ def _bind_strategy(journal, task_id, token, config, keys):
                            'upload_timeout_seconds', 'upload_timeout_seconds说明'}
         inputs['storage'] = {key: value for key, value in inputs['storage'].items() if key not in timeout_options}
     fingerprint = _digest(inputs)
-    compatible = []
-    if old_prompt is not None:
-        compatible.append({**strategy, 'text_system_prompt': old_prompt})
+    legacy_strategy = {key: value for key, value in strategy.items() if key not in ('summary_format', 'summary_format说明')}
+    compatible = [{**legacy_strategy, 'text_system_prompt': prompt} for prompt in old_prompts]
     old_vision_limit = config.get('legacy_vision_max_tokens') if 'storage' in keys else None
     if old_vision_limit is not None:
         compatible.extend({**candidate, 'vision_max_tokens': old_vision_limit}
@@ -78,7 +83,7 @@ def load_pipeline_config(path=None):
             if type(value) is not int or value <= 0: raise ValueError()
         if config['poll_seconds'] > config['poll_timeout']: raise ValueError()
         if config['default_profile'] not in config['strategy']['profiles']: raise ValueError()
-        _legacy_text_prompt(config['strategy'])
+        _legacy_text_prompts(config['strategy'])
         if 'legacy_vision_max_tokens' in config:
             value = config['legacy_vision_max_tokens']
             if type(value) is not int or value <= 0: raise ValueError()
@@ -510,8 +515,12 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             if upper > amount: raise WorkflowError('text_reservation_too_small')
             notes = _record_call(journal, task_id, token, 'text', _digest({'body':body, 'title':source['original_name']}), amount, pc,
                                  lambda: provider.summarize(body, source['original_name']), beat, video_amounts=amounts)
+            try:
+                summary = summary_fields(notes.get('structured'), pc['strategy'])
+            except ValueError:
+                raise WorkflowError('invalid_summary_json') from None
             result = dict(title=source['original_name'], body=body, transcript=asr['text'], visual=visual_text,
-                summary=notes['structured']['summary'], notes=notes['structured']['notes'], evidence=evidence,
+                **summary, evidence=evidence,
                 provenance='provider', output_kind='machine_initial', scheme_id='video-pipeline', scheme_version=fingerprint,
                 duration_seconds=material['duration_seconds'], frames=[{k:f[k] for k in ('index','seconds','sha256')} for f in frames])
             beat.check()
