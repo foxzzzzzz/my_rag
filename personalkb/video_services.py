@@ -160,9 +160,9 @@ class ProviderClient:
         return {'content': content, 'model': data.get('model', model['model']), 'usage': usage,
                 'estimated_cost_cny': cost, 'provider_request_id': request_id, 'response_metrics': metrics}
 
-    def vision(self, image_path):
+    def vision(self, image_path, *, mime='image/jpeg'):
         data = base64.b64encode(Path(image_path).read_bytes()).decode('ascii')
-        return self._chat('vision', [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + data}}, {'type': 'text', 'text': self.config['strategy']['vision_prompt']}]}])
+        return self._chat('vision', [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,' + data}}, {'type': 'text', 'text': self.config['strategy']['vision_prompt']}]}])
 
     def summarize(self, body, title):
         strategy = self.config['strategy']

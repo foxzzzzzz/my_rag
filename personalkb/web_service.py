@@ -170,6 +170,12 @@ class WebService:
             self._douyin_stamp=stamp
         return self._douyin
     @property
+    def douyin_album(self):
+        from .douyin_album import DouyinAlbum
+
+        return DouyinAlbum(self)
+
+    @property
     def favorites_sync(self):
         from .douyin_daily_sync import FavoritesSync, load_config
         from .workflow import ROOT
@@ -178,9 +184,13 @@ class WebService:
         stamp = path.stat().st_mtime_ns if path.is_file() else None
         if not hasattr(self, '_favorites_sync') or self._favorites_stamp != stamp:
             config = load_config(path) if stamp is not None else {'enabled': False}
-            self._favorites_sync = FavoritesSync(self.store, config) if config['enabled'] else None
+            self._favorites_sync = (FavoritesSync(self.store, config, image_quote=self._album_quote)
+                                    if config['enabled'] else None)
             self._favorites_stamp = stamp
         return self._favorites_sync
+
+    def _album_quote(self, image_count):
+        return self.douyin_album.quote(image_count)
 
     def favorites_cookie(self):
         import os
@@ -202,13 +212,27 @@ class WebService:
             return None
         from tools.douyin_favorites import browser_cookies, read_favorites
 
-        def read(cookie, limit, anchors, account):
+        def read(cookie, limit, anchors, account, *, minimum_items=0):
             path = ROOT / sync.config['browser_settings']
             settings = json.loads(path.read_text(encoding='utf-8-sig'))
             settings['max_pages'] = sync.config['max_pages']
             return read_favorites(browser_cookies(cookie), settings, limit,
-                                  settings['browser_channel'], require_account=True, stop_ids=anchors, stop_account=account)
-        return sync.tick(self.favorites_cookie(), read, self.douyin, self.dispatcher,
+                                  settings['browser_channel'], require_account=True, stop_ids=anchors, stop_account=account,
+                                  include_images=sync.config['mixed_enabled'], minimum_items=minimum_items)
+
+        cookie = self.favorites_cookie()
+
+        def refresh_image(account, work):
+            payload = read(cookie, sync.config['scan_limit'], [work], account)
+            if payload.get('status') == 'ok' and payload.get('account_id') == account:
+                item = next((v for v in payload['videos'] if v['id'] == work and v.get('kind') == 'image'), None)
+                if item and all(isinstance(url, str) for url in item['image_urls']):
+                    return item['image_urls']
+            return None
+
+        return sync.tick(cookie, read, self.douyin, self.dispatcher,
+                         album=self.douyin_album if sync.config['mixed_enabled'] else None,
+                         refresh_image=refresh_image,
                          stop_requested=self.stop_requested)
     def _task(self, t):
         from .web_dispatch import has_unknown_submission, task_can_archive, task_is_archived, task_stages
@@ -339,20 +363,22 @@ class WebService:
                     'review_status':review['decision'] if review else 'pending',
                     'review_revision':review['seq'] if review else None}
         allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at')
-        result_fields=('title','body','summary','summary_structure','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','processing')
+        result_fields=('title','body','summary','summary_structure','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','images','processing')
         if current: current={**{k:current[k] for k in allowed},'result':{k:current['result'][k] for k in result_fields if k in current['result']}}
         if current:
             result=current['result']
             if 'processing' in result and isinstance(result['processing'],dict): result['processing']={k:result['processing'][k] for k in ('mode','model','usage','estimated_cost_cny','reserved_cny','extractor_version','stats') if k in result['processing']}
-            if 'evidence' in result: result['evidence']=[{k:e[k] for k in ('type','locator','text','start','end','start_seconds','end_seconds','seconds','image_sha256') if k in e} for e in result['evidence'] if isinstance(e,dict)]
+            if 'evidence' in result: result['evidence']=[{k:e[k] for k in ('type','locator','text','start','end','start_seconds','end_seconds','seconds','image_sha256','page') if k in e} for e in result['evidence'] if isinstance(e,dict)]
             if 'frames' in result: result['frames']=[{k:f[k] for k in ('index','seconds','sha256') if k in f} for f in result['frames'] if isinstance(f,dict)]
+            if 'images' in result: result['images']=[{k:f[k] for k in ('page','index','text','sha256') if k in f} for f in result['images'] if isinstance(f,dict)]
         task=next((t for t in reversed(self.tasks()['items']) if t['source_id']==source_id),None)
         frames=[{'index':f['index'],'seconds':f['seconds'],'url':f"/api/sources/{source_id}/frames/{f['index']}?version_id={selected}"} for f in (current or {}).get('result',{}).get('frames',[])]
         from .maintenance import media_status
         media=media_status(self.store,source_id)
         if not (_root(self.wc) / self.store.get_source(source_id)['blob_relpath']).is_file():
             media={**media, 'available':False}
-        return dict(source=source,current=current,versions=list(catalog.values()),review=review,task=task,eligible=source['eligible'],viewing_history=history,frames=frames,media=media,original_url=f'/api/sources/{source_id}/original' if media['available'] else None)
+        original_url = f'/api/sources/{source_id}/original' if media['available'] and source['kind'] != 'douyin_album' else None
+        return dict(source=source,current=current,versions=list(catalog.values()),review=review,task=task,eligible=source['eligible'],viewing_history=history,frames=frames,media=media,original_url=original_url)
     def review(self, source_id, p):
         r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
         eligible=any(s['id']==source_id for s in self.store.eligible_sources())

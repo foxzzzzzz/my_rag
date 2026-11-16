@@ -54,7 +54,9 @@ class VideoJournal:
             self.store._recover(c,time.time())
             t=self.store._row(c,'tasks',task_id)
             source=self.store._row(c,'sources',t['source_id'])
-            if t['status']!=status or source['kind'] not in ('video','mp4') or (status=='queued' and t['attempts']>=self.store.max_attempts) or source['deleted'] or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone(): raise WorkflowError('invalid_state')
+            kind = 'douyin_album' if worker_id == 'douyin-album' else 'video'
+            allowed_kinds = ('video', 'mp4') if kind == 'video' else (kind,)
+            if t['status']!=status or source['kind'] not in allowed_kinds or (status=='queued' and t['attempts']>=self.store.max_attempts) or source['deleted'] or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone(): raise WorkflowError('invalid_state')
             c.execute("UPDATE tasks SET status='running',attempts=attempts+1,worker_id=?,lease_token=?,lease_until=? WHERE id=?",(worker_id,secrets.token_urlsafe(32),time.time()+self.store.lease_seconds,task_id))
             return self.store._row(c,'tasks',task_id)
     def claim_task(self,task_id,worker_id): return self._claim(task_id,worker_id,'queued')

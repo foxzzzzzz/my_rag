@@ -55,9 +55,19 @@ def collection_items(payload):
     return items, bool(has_more)
 
 
-def append_videos(items, videos):
+def append_videos(items, videos, *, include_images=False):
     for item in items:
-        if not isinstance(item, dict) or item.get('images') or not isinstance(item.get('video'), dict):
+        if not isinstance(item, dict):
+            continue
+        images = item.get('images')
+        if include_images and images is not None and not isinstance(images, list):
+            raise WorkflowError('collection_invalid')
+        is_image = isinstance(images, list) and bool(images)
+        if include_images and not is_image and not isinstance(item.get('video'), dict):
+            raise WorkflowError('collection_invalid')
+        if is_image and not include_images:
+            continue
+        if not is_image and not isinstance(item.get('video'), dict):
             continue
         work_id = str(item.get('aweme_id', ''))
         if not re.fullmatch(r'[0-9]+', work_id) or work_id in videos:
@@ -69,12 +79,25 @@ def append_videos(items, videos):
         if not isinstance(title, str) or not title.strip():
             caption = description.split('#', 1)[0].splitlines()
             title = caption[0].strip() if caption else ''
+        image_urls = []
+        if is_image:
+            for image in images:
+                candidates = []
+                if isinstance(image, dict):
+                    display = image.get('display_image')
+                    direct = image.get('url_list')
+                    fallback = display.get('url_list') if isinstance(display, dict) else None
+                    for urls in (direct, fallback):
+                        if isinstance(urls, list):
+                            candidates.extend(urls)
+                image_urls.append(next((url for url in candidates if isinstance(url, str) and url.startswith('https://')), None))
         videos[work_id] = {
             'id': work_id,
             'title': title,
+            **({'kind': 'image', 'image_urls': image_urls} if is_image else {}),
             'description': description,
             'author': author.get('nickname') if isinstance(author, dict) else None,
-            'url': f'{ORIGIN}/video/{work_id}',
+            'url': f'{ORIGIN}/{"note" if is_image else "video"}/{work_id}',
         }
 
 
@@ -88,7 +111,7 @@ def scroll_for_collection(page, responses, index, settings):
     return index < len(responses)
 
 
-def read_favorites(cookies, settings, limit, browser_channel, *, require_account=False, stop_ids=(), stop_account=None):
+def read_favorites(cookies, settings, limit, browser_channel, *, require_account=False, stop_ids=(), stop_account=None, include_images=False, minimum_items=0):
     try:
         from playwright.sync_api import Error, TimeoutError, sync_playwright
     except ImportError:
@@ -146,9 +169,9 @@ def read_favorites(cookies, settings, limit, browser_channel, *, require_account
                     if response.status != 200:
                         return result('collection_http_error')
                     items, has_more = collection_items(response.json())
-                    append_videos(items, videos)
+                    append_videos(items, videos, include_images=True) if include_images else append_videos(items, videos)
                     exhausted = not has_more and len(videos) <= limit
-                    if len(videos) >= limit or not has_more or (use_boundary and not stop_ids.isdisjoint(videos)):
+                    if len(videos) >= limit or not has_more or (use_boundary and len(videos) >= minimum_items and not stop_ids.isdisjoint(videos)):
                         return result('ok')
                 return result('pagination_incomplete')
             finally:

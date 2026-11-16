@@ -140,6 +140,10 @@ class RagIndex:
                 for key in ('start','end','start_seconds','end_seconds','seconds','image_sha256'):
                     if key in e: loc[key]=e[key]
             if typ == 'visual' and (not isinstance(e.get('seconds'),(int,float)) or isinstance(e.get('seconds'),bool) or not math.isfinite(e['seconds']) or e['seconds']<0 or not isinstance(e.get('image_sha256'),str) or not re.fullmatch('[0-9a-f]{64}',e['image_sha256'])): continue
+            if typ == 'image':
+                if type(e.get('page')) is not int or e['page'] < 1:
+                    continue
+                loc['page'] = e['page']
             if typ in ('audio','transcript') and not (('start' in e and 'end' in e) or ('start_seconds' in e and 'end_seconds' in e)): continue
             if typ in ('audio','transcript'):
                 a=e.get('start_seconds',e.get('start')); b=e.get('end_seconds',e.get('end'))

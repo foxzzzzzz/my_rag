@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 def load_config(path):
     try:
         config = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-        for key in ('enabled', 'schedule_enabled', 'auto_download', 'conversion_enabled'):
+        config.setdefault('mixed_enabled', False)
+        for key in ('enabled', 'schedule_enabled', 'auto_download', 'conversion_enabled', 'mixed_enabled'):
             if type(config[key]) is not bool:
                 raise ValueError()
         for key in ('baseline_limit', 'scan_limit', 'download_limit', 'conversion_limit', 'max_pages'):
@@ -49,7 +50,8 @@ def load_config(path):
 
 
 class FavoritesSync:
-    def __init__(self, store, config):
+    def __init__(self, store, config, *, image_quote=None):
+        self.image_quote = image_quote
         self.store = store
         self.config = config
         with store._tx() as db:
@@ -83,6 +85,18 @@ class FavoritesSync:
                 account_id TEXT, state TEXT NOT NULL, error_code TEXT, read_count INTEGER NOT NULL,
                 queued_count INTEGER NOT NULL);
             """)
+            columns = {row[1] for row in db.execute('PRAGMA table_info(favorites_items)')}
+            if 'kind' not in columns:
+                db.execute("ALTER TABLE favorites_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
+            if 'image_urls' not in columns:
+                db.execute("ALTER TABLE favorites_items ADD COLUMN image_urls TEXT")
+            if 'author' not in columns:
+                db.execute("ALTER TABLE favorites_items ADD COLUMN author TEXT NOT NULL DEFAULT ''")
+            if 'description' not in columns:
+                db.execute("ALTER TABLE favorites_items ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(favorites_accounts)')}
+            if 'mixed' not in columns:
+                db.execute("ALTER TABLE favorites_accounts ADD COLUMN mixed INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _state(db):
@@ -97,7 +111,7 @@ class FavoritesSync:
         # A successful import remains seen even if its source was later purged.
         return db.execute("""SELECT 1 FROM douyin_cache WHERE work_id=?
             UNION ALL SELECT 1 FROM douyin_jobs WHERE work_id=? AND status='succeeded'
-            UNION ALL SELECT 1 FROM sources WHERE original_name=? LIMIT 1""", (work, work, f'douyin-{work}.mp4')).fetchone()
+            UNION ALL SELECT 1 FROM sources WHERE original_name IN (?,?) LIMIT 1""", (work, work, f'douyin-{work}.mp4', f'douyin-{work}.album.json')).fetchone()
 
     def can_claim_conversion(self, db, reservation, cookie):
         s = self._state(db)
@@ -115,7 +129,13 @@ class FavoritesSync:
         if not self.config['conversion_enabled'] or needs_scan:
             return False
         amount = Decimal(reservation['amount'])
-        if amount > Decimal(str(self.config['video_budget_cny'])):
+        kind = db.execute("""SELECT i.kind FROM favorites_queue q JOIN favorites_items i
+                          ON i.account_id=q.account_id AND i.work_id=q.work_id WHERE q.task_id=?""",
+                          (reservation['task_id'],)).fetchone()
+        if kind and kind[0] == 'image':
+            if not self.config.get('mixed_enabled'):
+                return False
+        elif amount > Decimal(str(self.config['video_budget_cny'])):
             return False
         used = [Decimal(row[0]) for row in db.execute(
             'SELECT amount FROM favorites_conversion_slots WHERE day=? AND task_id<>?', (day, reservation['task_id'])
@@ -140,22 +160,33 @@ class FavoritesSync:
             elif state == 'ready' and not ready:
                 state = 'paused'
             items = []
-            for row in db.execute("""SELECT i.work_id,i.title,q.status,
+            mixed = self.config.get('mixed_enabled', False)
+            for row in db.execute("""SELECT i.work_id,i.title,i.kind,i.image_urls,i.baseline,q.status,j.error_code AS image_download_error,
                   (m.queue_seq IS NOT NULL AND q.account_id=i.account_id) AS paid
                   FROM favorites_items i LEFT JOIN favorites_queue q USING(work_id)
+                  LEFT JOIN douyin_jobs j ON j.id=q.job_id
                   LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
-                  WHERE i.account_id=? AND i.baseline=1 ORDER BY i.position""", (s['active'],)):
+                  WHERE i.account_id=? AND (i.baseline=1 OR (? AND i.kind='image' AND i.account_id=q.account_id))
+                  ORDER BY i.baseline DESC,CASE WHEN i.baseline=1 THEN i.position ELSE q.seq END""", (s['active'], mixed)):
                 status = row['status']
                 if self._existing(db, row['work_id']):
                     removed = db.execute("""SELECT 1 FROM sources WHERE deleted=1 AND (
-                        original_name=? OR id=(SELECT source_id FROM douyin_cache WHERE work_id=?))""",
-                        (f"douyin-{row['work_id']}.mp4", row['work_id'])).fetchone()
+                        original_name IN (?,?) OR id=(SELECT source_id FROM douyin_cache WHERE work_id=?))""",
+                        (f"douyin-{row['work_id']}.mp4", f"douyin-{row['work_id']}.album.json", row['work_id'])).fetchone()
                     if removed:
                         status = 'deleted'
-                    elif not row['paid'] or status not in ('downloaded', 'conversion_queued', 'converted', 'conversion_failed'):
+                    elif not (row['paid'] or row['kind'] == 'image') or status not in ('downloaded', 'conversion_queued', 'converted', 'conversion_failed'):
                         status = 'imported'
+                urls = json.loads(row['image_urls'] or '[]')
+                quote = None
+                if mixed and row['kind'] == 'image' and self.image_quote and urls:
+                    try:
+                        quote = format(Decimal(str(self.image_quote(len(urls)))), '.2f')
+                    except (WorkflowError, ValueError, InvalidOperation):
+                        pass
                 items.append(dict(work_id=row['work_id'], title=row['title'], status=status,
-                                  selectable=bool(ready and not status)))
+                                  kind=row['kind'], image_count=len(urls), image_quote_cny=quote, image_download_error=row['image_download_error'] if row['kind'] == 'image' else None,
+                                  selectable=bool(ready and row['baseline'] and not status and (row['kind'] != 'image' or quote is not None))))
             counts = dict(db.execute('SELECT status, COUNT(*) FROM favorites_queue WHERE account_id=? GROUP BY status',
                                      (s['active'],)).fetchall())
             scan = db.execute("""SELECT day, state, error_code, read_count, queued_count
@@ -191,7 +222,7 @@ class FavoritesSync:
                        state='baseline_pending',scan_requested=1 WHERE id=1""", (account_id,))
         return {'confirmed': True}
 
-    def select(self, account_id, work_ids, cookie, *, rights_confirmed, allow_paid=False, video_budget_cny=None):
+    def select(self, account_id, work_ids, cookie, *, rights_confirmed, allow_paid=False, video_budget_cny=None, image_quotes=None):
         self._enabled()
         if rights_confirmed is not True:
             raise WorkflowError('rights_required')
@@ -211,7 +242,18 @@ class FavoritesSync:
             if not cookie or account_id != s['active'] or s['state'] != 'ready' or s['scan_requested'] or self._credential(cookie) != s['credential']:
                 raise WorkflowError('favorites_account_conflict')
             wanted = set(work_ids)
-            available = [row[0] for row in db.execute('SELECT work_id FROM favorites_items WHERE account_id=? AND baseline=1 ORDER BY position', (account_id,))]
+            records = list(db.execute('SELECT work_id,kind,image_urls FROM favorites_items WHERE account_id=? AND baseline=1 ORDER BY position', (account_id,)))
+            available = [row['work_id'] for row in records]
+            amounts = {}
+            for item in records:
+                if item['work_id'] in wanted and item['kind'] == 'image':
+                    urls = json.loads(item['image_urls'] or '[]')
+                    if not self.image_quote or not urls:
+                        raise WorkflowError('favorites_price_changed')
+                    quote = format(Decimal(str(self.image_quote(len(urls)))), '.2f')
+                    if not isinstance(image_quotes, dict) or image_quotes.get(item['work_id']) != quote:
+                        raise WorkflowError('favorites_price_changed')
+                    amounts[item['work_id']] = quote
             if not wanted.issubset(available):
                 raise WorkflowError('invalid_request')
             count = 0
@@ -220,7 +262,7 @@ class FavoritesSync:
                     row = db.execute('INSERT OR IGNORE INTO favorites_queue(account_id,work_id,automatic) VALUES (?,?,0)',
                                      (account_id, work))
                     if row.rowcount:
-                        db.execute('INSERT INTO favorites_manual_consent VALUES (?,?)', (row.lastrowid, amount))
+                        db.execute('INSERT INTO favorites_manual_consent VALUES (?,?)', (row.lastrowid, amounts.get(work, amount)))
                         count += 1
         return {'queued': count}
 
@@ -250,9 +292,20 @@ class FavoritesSync:
         ):
             self._pause(db, 'collection_invalid')
             return
+        if any(item.get('kind', 'video') not in ('video', 'image') or
+               (item.get('kind') == 'image' and (
+                   not isinstance(item.get('image_urls'), list) or not item['image_urls'] or
+                   any(not isinstance(url, str) or not url.startswith('https://') for url in item['image_urls'])
+               )) for item in videos):
+            self._pause(db, 'collection_invalid')
+            return
+        if len({item['id'] for item in videos}) != len(videos):
+            self._pause(db, 'collection_invalid')
+            return
         items = {item['id']: item['title'] for item in videos}
         account = db.execute('SELECT * FROM favorites_accounts WHERE id=?', (account_id,)).fetchone()
         snapshot = json.loads(account['snapshot']) if account['snapshot'] is not None else None
+        migrating = self.config.get('mixed_enabled', False) and snapshot is not None and not account['mixed']
         known = set(snapshot or ())
         first_known = next((pos for pos, work in enumerate(items) if work in known), None)
         exhausted = payload.get('exhausted') is True
@@ -260,16 +313,35 @@ class FavoritesSync:
         if snapshot is None and len(items) < limit and not exhausted:
             self._pause(db, 'baseline_incomplete')
             return
-        if snapshot is not None and first_known is None and not exhausted:
+        if snapshot is not None and first_known is None and (migrating or not exhausted):
             self._pause(db, 'snapshot_gap')
             return
         # A complete but disjoint snapshot becomes the new baseline.
+        if migrating and len(items) < limit and not exhausted:
+            self._pause(db, 'baseline_incomplete')
+            return
         rebase = bool(snapshot and first_known is None)
         for pos, (work, title) in enumerate(items.items()):
-            row = db.execute("""INSERT OR IGNORE INTO favorites_items VALUES (?,?,?,?,?)""",
-                             (account_id, work, title or work, pos, int((snapshot is None or rebase) and pos < limit)))
-            if row.rowcount and snapshot is not None and not rebase and (first_known is None or pos < first_known) and not self._existing(db, work):
+            item = videos[pos]
+            kind = item.get('kind', 'video')
+            urls = item.get('image_urls', []) if kind == 'image' else []
+            baseline = (snapshot is None or rebase or (migrating and kind == 'image')) and pos < limit
+            metadata = (json.dumps(urls), str(item.get('description') or ''), str(item.get('author') or ''))
+            row = db.execute("""INSERT OR IGNORE INTO favorites_items(account_id,work_id,title,position,baseline,kind,image_urls,description,author) VALUES (?,?,?,?,?,?,?,?,?)""",
+                             (account_id, work, title or work, pos, int(baseline), kind, *metadata))
+            if not row.rowcount and kind == 'image':
+                db.execute('UPDATE favorites_items SET image_urls=?,description=?,author=?,title=? WHERE account_id=? AND work_id=? AND kind=?',
+                           (*metadata, title or work, account_id, work, 'image'))
+            if row.rowcount and snapshot is not None and not rebase and not (migrating and kind == 'image') and (first_known is None or pos < first_known) and not self._existing(db, work):
                 db.execute('INSERT OR IGNORE INTO favorites_queue(account_id,work_id,automatic) VALUES (?,?,1)', (account_id, work))
+        if migrating:
+            previous = [r[0] for r in db.execute(
+                'SELECT work_id FROM favorites_items WHERE account_id=? AND baseline=1 ORDER BY position,work_id',
+                (account_id,))]
+            ordered = [work for work in items if work in previous]
+            ordered.extend(work for work in previous if work not in items)
+            db.executemany('UPDATE favorites_items SET position=? WHERE account_id=? AND work_id=?',
+                           ((pos, account_id, work) for pos, work in enumerate(ordered)))
         if rebase:
             db.execute('UPDATE favorites_items SET baseline=0 WHERE account_id=?', (account_id,))
             db.executemany('UPDATE favorites_items SET baseline=1,position=? WHERE account_id=? AND work_id=?',
@@ -277,12 +349,12 @@ class FavoritesSync:
         boundary = list(items)
         if first_known is not None and not exhausted:
             boundary.extend(work for work in snapshot if work not in items)
-        db.execute('UPDATE favorites_accounts SET snapshot=? WHERE id=?',
-                   (json.dumps(boundary[:self.config['scan_limit']]), account_id))
+        db.execute('UPDATE favorites_accounts SET snapshot=?, mixed=? WHERE id=?',
+                   (json.dumps(boundary[:self.config['scan_limit']]), int(self.config.get('mixed_enabled', False)), account_id))
         db.execute("UPDATE favorites_state SET state='ready',credential=?,error_code=? WHERE id=1",
                    (credential, 'snapshot_rebased' if rebase else None))
 
-    def tick(self, cookie, reader, downloader, dispatcher, *, now=None, stop_requested=lambda: False):
+    def tick(self, cookie, reader, downloader, dispatcher, *, album=None, refresh_image=None, now=None, stop_requested=lambda: False):
         if not self.config['enabled']:
             return None
         if stop_requested():
@@ -296,7 +368,7 @@ class FavoritesSync:
                 due = (self.config['schedule_enabled'] and s['last_day'] != day and
                        now.strftime('%H:%M') >= self.config['daily_at'])
                 scan = bool(s['scan_requested'] or due or s['state'] == 'scanning')
-                account = db.execute('SELECT snapshot FROM favorites_accounts WHERE id=?', (s['active'],)).fetchone()
+                account = db.execute('SELECT snapshot,mixed FROM favorites_accounts WHERE id=?', (s['active'],)).fetchone()
                 snapshot = account['snapshot'] if account else None
                 limit = self.config['scan_limit'] if snapshot is not None else self.config['baseline_limit']
                 if scan:
@@ -304,7 +376,11 @@ class FavoritesSync:
             if scan:
                 try:
                     anchors = json.loads(snapshot) if snapshot is not None else []
-                    payload = reader(cookie, limit, anchors, s['active']) if cookie else {'status': 'missing_douyin_cookie'}
+                    if cookie and self.config.get('mixed_enabled', False):
+                        minimum = self.config['baseline_limit'] if account and snapshot is not None and not account['mixed'] else 0
+                        payload = reader(cookie, limit, anchors, s['active'], minimum_items=minimum)
+                    else:
+                        payload = reader(cookie, limit, anchors, s['active']) if cookie else {'status': 'missing_douyin_cookie'}
                 except (OSError, WorkflowError, ValueError, RuntimeError, KeyError, TypeError):
                     payload = {'status': 'collection_failed'}
                 with self.store._tx() as db:
@@ -327,9 +403,27 @@ class FavoritesSync:
                 if not cookie or credential != s['credential'] or s['state'] != 'ready' or s['scan_requested']:
                     return None
                 account = s['active']
-            return self._dispatch(account, day, credential, downloader, dispatcher)
+            return self._dispatch(account, day, credential, downloader, dispatcher, album=album, refresh_image=refresh_image)
 
-    def _dispatch(self, account, day, credential, downloader, dispatcher):
+    def retry_image_download(self, account_id, work_id, cookie):
+        self._enabled()
+        if not self.config.get('mixed_enabled') or not isinstance(work_id, str) or not re.fullmatch(r'[0-9]+', work_id):
+            raise WorkflowError('invalid_request')
+        with self.store._tx() as db:
+            state = self._state(db)
+            if not cookie or state['state'] != 'ready' or state['scan_requested'] or state['active'] != account_id or state['credential'] != self._credential(cookie):
+                raise WorkflowError('favorites_not_ready')
+            row = db.execute("""SELECT q.seq,q.job_id FROM favorites_queue q JOIN favorites_items i
+                             ON i.account_id=q.account_id AND i.work_id=q.work_id
+                             WHERE q.account_id=? AND q.work_id=? AND q.status='download_failed' AND i.kind='image'""",
+                             (account_id, work_id)).fetchone()
+            if not row or not db.execute("UPDATE douyin_jobs SET status='queued',error_code=NULL,updated_at=? WHERE id=? AND status='failed'",
+                                        (time.time(), row['job_id'])).rowcount:
+                raise WorkflowError('invalid_state')
+            db.execute("UPDATE favorites_queue SET status='downloading' WHERE seq=?", (row['seq'],))
+        return {'queued': True}
+
+    def _dispatch(self, account, day, credential, downloader, dispatcher, album=None, refresh_image=None):
         with self.store._tx() as db:
             s = self._state(db)
             if s['state'] != 'ready' or s['scan_requested'] or s['active'] != account or s['credential'] != credential:
@@ -356,15 +450,19 @@ class FavoritesSync:
                 return None
             count = db.execute('SELECT COUNT(*) FROM favorites_download_slots WHERE day=?', (day,)).fetchone()[0]
             has_slot = count < self.config['download_limit']
-            pending = db.execute("""SELECT q.job_id,q.work_id,q.download_day,m.queue_seq AS paid
+            pending = db.execute("""SELECT q.job_id,q.work_id,q.download_day,m.queue_seq AS paid,i.kind
                     FROM favorites_queue q JOIN douyin_jobs j ON j.id=q.job_id
+                    LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
                     LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
                     WHERE q.account_id=? AND q.status='downloading' AND j.status='queued'
+                    AND (? OR COALESCE(i.kind,'video')='video')
                     AND (m.queue_seq IS NOT NULL OR (? AND (q.automatic=0 OR ?) AND (q.download_day=? OR ?)))
-                    ORDER BY q.seq LIMIT 1""", (account, scheduled_ready, self.config['auto_download'], day, has_slot)).fetchone()
+                    ORDER BY q.seq LIMIT 1""", (account, album is not None, scheduled_ready, self.config['auto_download'], day, has_slot)).fetchone()
             if pending:
                 job_id = pending[0]
-                if self._existing(db, pending['work_id']):
+                kind = pending['kind']
+                work = pending['work_id']
+                if kind != 'image' and self._existing(db, work):
                     db.execute("UPDATE favorites_queue SET status='skipped' WHERE job_id=?", (job_id,))
                     db.execute("UPDATE douyin_jobs SET status='succeeded', source_id=(SELECT source_id FROM douyin_cache WHERE work_id=?) WHERE id=?",
                                (pending['work_id'], job_id))
@@ -374,53 +472,104 @@ class FavoritesSync:
                     db.execute('UPDATE favorites_queue SET download_day=? WHERE job_id=?', (day, job_id))
                     db.execute('INSERT INTO favorites_download_slots(job_id,day) VALUES (?,?)', (job_id, day))
             else:
-                row = db.execute("""SELECT q.*,m.queue_seq AS paid FROM favorites_queue q
+                row = db.execute("""SELECT q.*,m.queue_seq AS paid,i.kind FROM favorites_queue q
+                            LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
                             LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
                             WHERE q.account_id=? AND q.status='queued'
+                            AND (? OR COALESCE(i.kind,'video')='video')
                             AND (m.queue_seq IS NOT NULL OR (? AND (q.automatic=0 OR ?)))
-                            ORDER BY q.seq LIMIT 1""", (account, scheduled_ready and has_slot, self.config['auto_download'])).fetchone()
+                            ORDER BY q.seq LIMIT 1""", (account, album is not None, scheduled_ready and has_slot, self.config['auto_download'])).fetchone()
                 if row is None:
                     return None
                 work = row['work_id']
+                kind = row['kind']
                 if self._existing(db, work):
                     db.execute("UPDATE favorites_queue SET status='skipped' WHERE seq=?", (row['seq'],))
                     return {'favorites': 'skipped'}
                 job_id = uuid.uuid4().hex
                 now = time.time()
                 db.execute("""INSERT INTO douyin_jobs(id,canonical_url,work_id,status,created_at,updated_at)
-                             VALUES (?,?,?,'queued',?,?)""", (job_id, f'https://www.douyin.com/video/{work}', work, now, now))
+                             VALUES (?,?,?,'queued',?,?)""", (job_id, f'https://www.douyin.com/{"note" if kind == "image" else "video"}/{work}', work, now, now))
                 db.execute("UPDATE favorites_queue SET job_id=?,download_day=?,status='downloading' WHERE seq=?",
                            (job_id, day, row['seq']))
                 if row['paid'] is None:
                     db.execute('INSERT INTO favorites_download_slots(job_id,day) VALUES (?,?)', (job_id, day))
+        if kind == 'image':
+            return self._download_image(album, account, work, job_id, refresh_image)
         job = downloader.process_next(job_id=job_id)
         if job and job['error_code'] in ('douyin_resolver_failed', 'douyin_http_failed'):
             with self.store._tx() as db:
                 self._pause(db, job['error_code'])
         return job
 
+    def _download_image(self, album, account, work, job_id, refresh_image):
+        # The caller holds the shared worker lock. Leave the job queued until
+        # completion so a process interruption can resume its image checkpoints.
+        with self.store._tx() as db:
+            item = db.execute('SELECT * FROM favorites_items WHERE account_id=? AND work_id=?', (account, work)).fetchone()
+            db.execute('UPDATE douyin_jobs SET attempts=attempts+1,updated_at=? WHERE id=?', (time.time(), job_id))
+        error = source = None
+        try:
+            data = dict(item)
+            urls = json.loads(data['image_urls'])
+            try:
+                result = album.download(work, data['title'], urls, description=data['description'], author=data['author'])
+            except WorkflowError as exc:
+                if exc.code != 'douyin_http_failed' or refresh_image is None:
+                    raise
+                refreshed = refresh_image(account, work)
+                if not refreshed or refreshed == urls or len(refreshed) != len(urls):
+                    raise
+                with self.store._tx() as db:
+                    db.execute('UPDATE favorites_items SET image_urls=? WHERE account_id=? AND work_id=?',
+                               (json.dumps(refreshed), account, work))
+                result = album.download(work, data['title'], refreshed, description=data['description'], author=data['author'])
+            source = result['source']
+        except (WorkflowError, OSError, TypeError, ValueError) as exc:
+            error = exc.code if isinstance(exc, WorkflowError) else 'album_download_failed'
+        with self.store._tx() as db:
+            if source is not None:
+                db.execute('INSERT OR REPLACE INTO douyin_cache VALUES(?,?,?)', (work, source['id'], source['sha256']))
+            db.execute('UPDATE douyin_jobs SET status=?,error_code=?,source_id=?,updated_at=? WHERE id=?',
+                       ('failed' if error else 'succeeded', error, source['id'] if source else None, time.time(), job_id))
+            db.execute('UPDATE favorites_queue SET status=? WHERE job_id=?', ('download_failed' if error else 'downloaded', job_id))
+        return {'favorites': 'download_failed' if error else 'downloaded', 'error_code': error}
+
     def _enqueue_conversion(self, db, account, day, dispatcher, scheduled_ready):
         if not dispatcher.config['live_video_enabled']:
             return False
         used = [Decimal(row[0]) for row in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
-        amount = Decimal(str(self.config['video_budget_cny']))
-        can_schedule = (scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
-                        and sum(used, amount) <= Decimal(str(self.config['daily_budget_cny'])))
-        row = db.execute("""SELECT q.seq,t.id,m.video_budget_cny FROM favorites_queue q
+        remaining = Decimal(str(self.config['daily_budget_cny'])) - sum(used, Decimal(0))
+        can_schedule = scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
+        rows = db.execute("""SELECT q.seq,t.id,m.video_budget_cny,i.kind,i.image_urls FROM favorites_queue q
                 JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
                 JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
                 LEFT JOIN web_task_archive a ON a.task_id=t.id
+                LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
                 LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
                 WHERE q.account_id=? AND q.status='downloaded'
+                AND (? OR COALESCE(i.kind,'video')='video')
                 AND (m.queue_seq IS NOT NULL OR (? AND q.automatic=1))
                 AND s.deleted=0 AND s.current_version_id IS NULL AND t.status='queued'
-                AND d.task_id IS NULL AND a.task_id IS NULL ORDER BY q.seq,t.rowid LIMIT 1""", (account, can_schedule)).fetchone()
-        if row is None:
-            return False
-        manual_amount = row['video_budget_cny']
-        db.execute('INSERT INTO favorites_conversion VALUES (?,?,?,?)', (row['id'], account, day, manual_amount or str(amount)))
-        if manual_amount is None:
-            db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (row['id'], day, str(amount)))
-        db.execute("INSERT INTO web_dispatch(task_id,mode,state,requested) VALUES (?,'run','pending',?)", (row['id'], time.time()))
-        db.execute("UPDATE favorites_queue SET task_id=?,status='conversion_queued' WHERE seq=?", (row['id'], row['seq']))
-        return True
+                AND d.task_id IS NULL AND a.task_id IS NULL ORDER BY q.seq,t.rowid""",
+                          (account, self.config.get('mixed_enabled', False), can_schedule)).fetchall()
+        for row in rows:
+            manual_amount = row['video_budget_cny']
+            amount = Decimal(str(self.config['video_budget_cny']))
+            if row['kind'] == 'image':
+                try:
+                    amount = Decimal(self.image_quote(len(json.loads(row['image_urls']))))
+                except (TypeError, ValueError, InvalidOperation, WorkflowError):
+                    continue
+                if manual_amount is not None and amount > Decimal(manual_amount):
+                    continue
+            if manual_amount is None and amount > remaining:
+                continue
+            db.execute('INSERT INTO favorites_conversion VALUES (?,?,?,?)', (row['id'], account, day, manual_amount or str(amount)))
+            if manual_amount is None:
+                db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (row['id'], day, str(amount)))
+            db.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,processing_mode) VALUES (?,'run','pending',?,?)",
+                       (row['id'], time.time(), 'model' if row['kind'] == 'image' else 'preview'))
+            db.execute("UPDATE favorites_queue SET task_id=?,status='conversion_queued' WHERE seq=?", (row['id'], row['seq']))
+            return True
+        return False

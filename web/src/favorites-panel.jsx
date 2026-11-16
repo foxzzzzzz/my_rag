@@ -22,17 +22,21 @@ const reasons = {missing_douyin_cookie:'缺少 Cookie', login_required:'需要�
   baseline_incomplete:'未读满基线且未到末页', snapshot_gap:'未找到上次同步位置',
   snapshot_rebased:'未找到上次同步位置，已重新建立基线', browser_dependency_missing:'服务器缺少浏览器组件',
   douyin_resolver_failed:'下载解析失败，请核对登录状态'};
+const imageDownloadErrors = {douyin_http_failed:'图片地址不可用，请读取收藏刷新后重试', douyin_timeout:'图片下载超时',
+  album_image_limit:'图片数量超出上限', album_size_limit:'图片总大小超出上限', douyin_size_limit:'图片大小超出上限',
+  album_invalid_image:'图片格式无效', douyin_unsafe_url:'图片地址不在允许的图床范围内'};
 
-function batchAmount(value, count) {
-  if (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value)) return null;
-  const [whole, fraction=''] = value.split('.');
-  const scale = Math.max(2, fraction.length);
-  const units = BigInt(whole + fraction.padEnd(scale, '0')) * BigInt(count);
-  const digits = units.toString().padStart(scale + 1, '0');
-  return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+export function batchAmount(values) {
+  let total = 0n;
+  for (const value of values) {
+    if (typeof value !== 'string' || !/^\d+(?:\.\d{1,2})?$/.test(value)) return null;
+    const [whole, fraction = ''] = value.split('.');
+    total += BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+  }
+  return `${total / 100n}.${(total % 100n).toString().padStart(2, '0')}`;
 }
 
-function FavoriteRow({item, checked, canSelect, onChange}) {
+function FavoriteRow({item, checked, canSelect, onChange, onRetry}) {
   const title = item.title || item.work_id;
   const titleId = useId();
   const titleRef = useRef(null);
@@ -61,10 +65,15 @@ function FavoriteRow({item, checked, canSelect, onChange}) {
     <div className="favorites-video">
       <Title id={titleId} htmlFor={item.selectable ? checkboxId : undefined}
         ref={titleRef} className="favorites-title" data-expanded={expanded || undefined}>{title}</Title>
+      <div className="muted">{item.kind === 'image' ? `图文 · ${item.image_count ?? '未知'} 张 · ${item.image_quote_cny ? '费用上限 ¥' + item.image_quote_cny : '报价不可用'}` : '视频'}</div>
       {(truncated || expanded) && <button type="button" className="favorites-expand" aria-expanded={expanded}
         aria-controls={titleId} onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '展开'}</button>}
     </div>
-    <span className="favorites-status" data-tone={tone}>{statusText}</span>
+    <span className="favorites-status" data-tone={tone}>{statusText}
+      {item.image_download_error&&status==='download_failed'&&<small>{imageDownloadErrors[item.image_download_error]||item.image_download_error}</small>}
+      {item.kind==='image'&&status==='download_failed'&&<button type="button" disabled={!canSelect}
+        onClick={()=>onRetry(item.work_id)}>重新下载</button>}
+    </span>
   </li>;
 }
 
@@ -98,7 +107,7 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
     finally{setBusy(false);}
   }
   const items=data?.items||[];
-  const eligible=items.filter(item=>item.selectable);
+  const eligible=items.filter(item=>item.selectable && (item.kind !== 'image' || batchAmount([item.image_quote_cny]) !== null));
   const imported=items.filter(item=>itemStates[item.status]?.[1]==='imported');
   const filters=[
     {key:'all',label:'全部',items},
@@ -112,8 +121,10 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
     setSelected(previous=>checked?[...previous,id]:previous.filter(value=>value!==id));
   }
   const price=data?.manual_video_budget_cny;
-  const total=batchAmount(price, selectedIds.length);
-  const selectionKey=JSON.stringify([data?.active_account?.id, price, ...selectedIds]);
+  const selectedItems=eligible.filter(item=>selectedIds.includes(item.work_id));
+  const imageQuotes=Object.fromEntries(selectedItems.filter(item=>item.kind==='image').map(item=>[item.work_id,item.image_quote_cny]));
+  const total=batchAmount(selectedItems.map(item=>item.kind==='image'?item.image_quote_cny:price));
+  const selectionKey=JSON.stringify([data?.active_account?.id, price, imageQuotes, ...selectedIds]);
   const paid=paidAgreement===selectionKey;
   useEffect(()=>{setPaidAgreement(null);},[selectionKey]);
   const blocked=disabled||busy;
@@ -121,7 +132,7 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
   return <details onToggle={event=>setOpen(event.currentTarget.open)}>
     <summary>抖音收藏</summary>
     {open&&<div className="management">
-      {data?.enabled&&<p>首次确认账号后记录最近 {data.baseline_limit ?? 100} 条收藏，选择视频后可排队下载并导入。</p>}
+      {data?.enabled&&<p>首次确认账号后记录最近 {data.baseline_limit ?? 100} 条收藏，选择作品后可排队下载并导入。</p>}
       {data&&!data.enabled&&<p>收藏同步尚未启用。</p>}
       {(!data||data.enabled)&&<p role="status">{data?states[data.state]||data.state:'正在读取状态…'}{data?.error_code&&' · '+(reasons[data.error_code]||data.error_code)}</p>}
       {data?.active_account&&<p>当前账号 {data.active_account.label||data.active_account.id}</p>}
@@ -135,7 +146,7 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
       {data?.queue_counts&&<p>等待下载 {data.queue_counts.queued||0} 条，下载失败 {data.queue_counts.download_failed||0} 条，等待转换 {data.queue_counts.conversion_queued||0} 条。</p>}
       {data?.last_scan&&<p>最近读取 {data.last_scan.day}，读到 {data.last_scan.read_count} 条，新增排队 {data.last_scan.queued_count} 条。</p>}
       {!!items.length&&<fieldset className="favorites-fieldset">
-        <legend>收藏视频</legend>
+        <legend>收藏作品</legend>
         <div className="favorites-toolbar">
           <div className="favorites-filters" role="group" aria-label="按导入状态筛选">
             {filters.map(option=><button key={option.key} type="button" aria-pressed={filter===option.key}
@@ -143,29 +154,30 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
           </div>
           <div className="favorites-selection">
             {filter!=='imported'&&<button type="button" disabled={!canSelect||!eligible.length||selectedIds.length===eligible.length}
-              onClick={()=>setSelected(eligibleIds)}>全选可导入视频</button>}
+              onClick={()=>setSelected(eligibleIds)}>全选可导入作品</button>}
             <button type="button" disabled={blocked||!selectedIds.length} onClick={()=>setSelected([])}>清空选择</button>
             <span className="muted" role="status">已选 {selectedIds.length} 条</span>
           </div>
         </div>
         {visibleItems.length ? <>
-          <div className="favorites-heading" aria-hidden="true"><span>视频标题</span><span>导入状态</span></div>
+          <div className="favorites-heading" aria-hidden="true"><span>作品标题</span><span>导入状态</span></div>
           <ul className="favorites-list" role="list">
             {visibleItems.map(item=><FavoriteRow key={item.work_id} item={item} checked={selectedIds.includes(item.work_id)}
-              canSelect={canSelect} onChange={selectItem}/>)}
+              canSelect={canSelect && (item.status==='download_failed' || eligibleIds.includes(item.work_id))} onChange={selectItem}
+              onRetry={work_id=>action('/douyin/favorites/retry-image',{account_id:data.active_account?.id,work_id},'已重新排队下载。')}/>)}
           </ul>
-        </> : <p className="favorites-empty muted">当前没有{filter==='available'?'可导入':'已导入'}的视频。</p>}
+        </> : <p className="favorites-empty muted">当前没有{filter==='available'?'可导入':'已导入'}的作品。</p>}
         <div className="favorites-submit">
-          {!!selectedIds.length&&total!==null&&<p>每条转换费用上限 ¥{price}，本次费用上限 ¥{total}。执行时逐条预留费用，仍受系统累计预算约束。</p>}
+          {!!selectedIds.length&&total!==null&&<p>本次费用上限 ¥{total}。执行时逐条预留费用，仍受系统累计预算约束。</p>}
           {!data.manual_conversion_available&&<p>当前无法启动手动付费转换。</p>}
           <label><input type="checkbox" checked={rights} disabled={!canSelect}
             onChange={e=>setRights(e.target.checked)}/> 我确认有权下载和处理所选作品</label>
           <label><input type="checkbox" checked={paid} disabled={!canSelect||!selectedIds.length||total===null}
-            onChange={e=>setPaidAgreement(e.target.checked?selectionKey:null)}/> 我同意所选视频转换产生费用，按上述上限执行</label>
+            onChange={e=>setPaidAgreement(e.target.checked?selectionKey:null)}/> 我同意所选作品转换产生费用，按上述上限执行</label>
           <button type="button" className="primary" disabled={!canSelect||!selectedIds.length||!rights||!paid||!data.manual_conversion_available||total===null} onClick={async()=>{
-            if(await action('/douyin/favorites/import',{account_id:data.active_account?.id,work_ids:selectedIds,rights_confirmed:true,allow_paid:true,video_budget_cny:price},
+            if(await action('/douyin/favorites/import',{account_id:data.active_account?.id,work_ids:selectedIds,rights_confirmed:true,allow_paid:true,video_budget_cny:price,image_quotes:imageQuotes},
               ({queued})=>queued? `已将 ${queued} 条作品排队下载和转换。`:'所选作品已导入或已在队列中。')){setSelected([]);setPaidAgreement(null);}
-          }}>下载并转换所选视频</button>
+          }}>下载并转换所选作品</button>
         </div>
       </fieldset>}
       {message&&<p role="status">{message}</p>}

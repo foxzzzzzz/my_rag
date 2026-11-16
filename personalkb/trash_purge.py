@@ -94,6 +94,11 @@ def purge(config, apply=False):
                 if not shared and original.exists() and (not original.is_file() or _sha(original) != source['sha256']):
                     raise WorkflowError('source_integrity')
                 paths = [root / workflow['content']['directory'] / sid, *(root / 'video-work' / tid for tid in tasks)]
+                if source['kind'] == 'douyin_album':
+                    album = re.fullmatch(r'douyin-([0-9]+)\.album\.json', source['original_name'])
+                    if album is None:
+                        raise WorkflowError('unsafe_path')
+                    paths.append(root / 'albums' / album[1])
                 for path in paths:
                     _no_links(path)
                     if path.exists():

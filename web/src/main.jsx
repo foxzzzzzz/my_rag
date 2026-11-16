@@ -241,7 +241,7 @@ function App() {
   const offlineHtml=source?.kind==='html'&&result.provenance==='local_extraction';
   const duplicateNotes=offlineHtml&&!!result.body&&result.notes===result.body;
   const availableTabs=Object.keys(fields).filter(name=>name!=='title'
-    &&(isVideo(source?.kind)||!['transcript','visual'].includes(name))
+    &&(isVideo(source?.kind)||(source?.kind==='douyin_album' && name==='visual')||!['transcript','visual'].includes(name))
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
   useEffect(()=>{
@@ -312,7 +312,7 @@ function App() {
                 onClick={()=>setSourceManagementOpen(open=>!open)}>资料管理</button>}
             </div>
             <p className="muted">
-              {isVideo(source.kind)?'视频':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
+              {isVideo(source.kind)?'视频':source.kind==='douyin_album'?'图文':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
             {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}</option>)}</select></label>}
@@ -323,7 +323,7 @@ function App() {
             {(stale||source.content_status&&source.content_status!=='synced')&&<p className="error" role="alert">{stale?'版本或连接状态已变化，旧草稿不会提交到新版本。':'长期内容尚未同步或校验失败，不能用于正式知识库。'} <button onClick={reloadDetail}>重新加载详情</button></p>}
             <div className="source-layout"><div className="source-reading">
               {!detail.viewing_history&&<section id="source-management" key={source.id} className="source-management" aria-label="资料管理" hidden={!sourceManagementOpen}>
-                <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&!isVideo(source.kind)&&<a href={detail.original_url}>下载原HTML</a>}</div>
+                <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&source.kind==='html'&&<a href={detail.original_url}>下载原HTML</a>}</div>
                 <details><summary>分类</summary><ClassificationEditor key={source.id+'-classification'} source={source} catalog={catalog} api={api} changed={changed} disabled={busy}/></details>
                 <details><summary>Obsidian 导出与更新</summary><ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!edit||hasWork(key)}/></details>
                 <details open={!!edit}><summary>人工修订</summary>{edit?<>
@@ -358,6 +358,12 @@ function App() {
                 }))}>确认删除资料</button></details>
               </section>}
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
+              {source.kind==='douyin_album'&&result.processing&&<p className="muted">
+                费用预留上限 ¥{result.processing.reserved_cny}
+                {Number(result.processing.stats?.additional_reserved_cny)>0&&` · 手动追加预留 ¥${result.processing.stats.additional_reserved_cny}`}
+                {result.processing.estimated_cost_cny!=null&&` · 已知用量估算 ¥${result.processing.estimated_cost_cny}`}
+                {result.processing.stats?.unknown_attempts>0&&` · ${result.processing.stats.unknown_attempts} 次用量未知`}
+              </p>}
               <div className="content-tabs" aria-label="阅读内容">{availableTabs.map(name=><button key={name} aria-pressed={selectedTab===name} className={selectedTab===name?'active':''} onClick={()=>setTab(name)}>{name==='summary'&&preview?'正文预览':fields[name]}</button>)}</div>
               {duplicateNotes&&<details key={current.id}><summary>笔记与正文相同</summary><button className="text-button" onClick={()=>setTab('body')}>查看完整正文</button></details>}
               {isVideo(source.kind)&&<section className="video-evidence" hidden={selectedTab!=='visual'} aria-label="视频原片与关键帧">
@@ -374,13 +380,21 @@ function App() {
                     : <figure key={frame.index??index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
                 })}</div>:<p className="muted">暂无可查看的关键帧。</p>}
               </section>}
-              {selectedTab==='visual'&&<h2 className="visual-text-heading">画面识别文字</h2>}
-              <div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
+              {source.kind==='douyin_album'&&selectedTab==='visual'&&<section className="album-evidence" aria-label="图文原图">
+                <h2>图文原图</h2>
+                {(result.images||[]).map((item,index)=><figure key={index}>
+                  <img loading="lazy" alt={'图 '+(index+1)} src={'/api/sources/'+source.id+'/album/'+(index+1)}/>
+                  <figcaption>图 {index+1}</figcaption>
+                  {item.text&&<DocumentView value={item.text}/>}
+                </figure>)}
+              </section>}
+              {selectedTab==='visual'&&isVideo(source.kind)&&<h2 className="visual-text-heading">画面识别文字</h2>}
+              {!(source.kind==='douyin_album'&&selectedTab==='visual')&&<div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
                 <DocumentView structureSummary={selectedTab==='summary'&&!preview}
                   summaryStructure={result.summary_structure}
                   value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
-              </div>
+              </div>}
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
             </div>
             <aside className="review-panel" aria-label={detail.viewing_history?'历史版本审核记录':'审核当前版本'}><h2>{detail.viewing_history?'审核记录':'审核'}</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>

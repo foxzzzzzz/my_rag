@@ -197,13 +197,14 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         if action == 'scan': return sync.request_scan()
         cookie = service.favorites_cookie()
         if action == 'confirm': return sync.confirm(payload.get('account_id'), cookie)
+        if action == 'retry-image': return sync.retry_image_download(payload.get('account_id'), payload.get('work_id'), cookie)
         if action == 'import':
             if not service.webcfg['live_video_enabled']:
                 raise WorkflowError('video_disabled')
             service.douyin._ready()
             return sync.select(payload.get('account_id'), payload.get('work_ids'), cookie,
                                rights_confirmed=payload.get('rights_confirmed'), allow_paid=payload.get('allow_paid'),
-                               video_budget_cny=payload.get('video_budget_cny'))
+                               video_budget_cny=payload.get('video_budget_cny'), image_quotes=payload.get('image_quotes'))
         raise WorkflowError('favorites_action_not_found')
     @app.get('/api/douyin/jobs')
     def douyin_jobs(): return {'items':service.douyin.jobs()}
@@ -395,9 +396,15 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.get('/api/sources/{source_id}/original')
     def original(source_id:str):
         path,kind,name=service.original(source_id)
+        if kind == 'douyin_album': raise WorkflowError('unsupported_format')
         r=FileResponse(path,media_type='text/html' if kind=='html' else 'video/mp4',filename=name,content_disposition_type='attachment' if kind=='html' else 'inline')
         if kind=='html': r.headers['Content-Security-Policy']="sandbox; default-src 'none'"
         return r
+
+    @app.get('/api/sources/{source_id}/album/{page}')
+    def album_image(source_id: str, page: int):
+        path, mime = service.douyin_album.original_image(source_id, page)
+        return FileResponse(path, media_type=mime, headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'})
     @app.get('/api/sources/{source_id}/frames/{index}')
     def frame(source_id:str,index:int,version_id:str|None=None): return FileResponse(service.frame(source_id,index,version_id),media_type='image/jpeg')
     @app.get('/api/versions/{version_id}/export')

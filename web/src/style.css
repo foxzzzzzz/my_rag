@@ -261,3 +261,5 @@ dialog::backdrop { background:#0006; }
 .login-panel input { width: 100%; }
 
 .source-prose .document-reader blockquote { border-inline-start:2px solid var(--border); padding-inline-start:var(--detail-list-indent); margin-inline:0; color:var(--muted); }
+.album-evidence figure { margin: 0 0 1.5rem; }
+.album-evidence img { display: block; max-width: 100%; height: auto; }

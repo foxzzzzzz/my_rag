@@ -2,7 +2,7 @@ import hashlib, json, os, re, uuid
 from pathlib import Path
 from .workflow_store import WorkflowError
 
-SAFE_EVIDENCE = ('type', 'locator', 'text', 'start', 'end', 'start_seconds', 'end_seconds', 'seconds', 'image_sha256')
+SAFE_EVIDENCE = ('type', 'locator', 'text', 'start', 'end', 'start_seconds', 'end_seconds', 'seconds', 'image_sha256', 'page')
 
 def digest(data): return hashlib.sha256(data).hexdigest()
 def encoded(value): return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)+'\n').encode('utf8')

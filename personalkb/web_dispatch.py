@@ -65,10 +65,17 @@ class WebDispatcher:
             return dict(stage=stage, mode='restore', attempt=prior['attempt'], amount=None, reason=prior['diagnostic'])
         kind = 'text' if stage == 'text' else 'vision'
         try:
-            amount = Decimal(str(self.service.pc['strategy']['reserve_cny'][kind]))
+            source = self.store._row(c, 'sources', task['source_id'])
+            if source['kind'] == 'douyin_album':
+                from .douyin_album import stage_amounts
+
+                album = self.service.douyin_album
+                amount = stage_amounts({**self.service.pc, **album.config})[kind]
+            else:
+                amount = Decimal(str(self.service.pc['strategy']['reserve_cny'][kind]))
             if not amount.is_finite() or amount <= 0:
                 return None
-        except (AttributeError, KeyError, TypeError, InvalidOperation):
+        except (AttributeError, KeyError, TypeError, InvalidOperation, WorkflowError):
             return None
         if prior and prior['amount'] == str(amount) and not prior['started']:
             return dict(stage=stage, mode='restore', attempt=prior['attempt'], amount=None, reason=prior['diagnostic'],
@@ -84,7 +91,7 @@ class WebDispatcher:
                 raise WorkflowError('source_deleted')
             if task_is_archived(c, task_id):
                 raise WorkflowError('task_archived')
-            if source['kind'] not in ('video', 'mp4'):
+            if source['kind'] not in ('video', 'mp4', 'douyin_album'):
                 raise WorkflowError('invalid_state')
             dispatch = c.execute('SELECT state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
             if dispatch and dispatch['state'] in ('pending', 'working'):
@@ -114,6 +121,10 @@ class WebDispatcher:
             if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
+            elif source['kind'] == 'douyin_album':
+                if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
+                if not c.execute('SELECT 1 FROM favorites_conversion WHERE task_id=?', (task_id,)).fetchone():
+                    raise WorkflowError('invalid_state')
             elif source['kind']=='html' and processing_mode=='model':
                 if not self.config.get('live_html_enabled',False): raise WorkflowError('html_model_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
@@ -246,6 +257,10 @@ class WebDispatcher:
             if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
+            elif source['kind'] == 'douyin_album' and not c.execute(
+                'SELECT 1 FROM favorites_conversion WHERE task_id=?', (task_id,)
+            ).fetchone():
+                raise WorkflowError('invalid_state')
             if task['status'] not in ('failed','cancelled') or task['external_started'] or task['attempts']>=self.store.max_attempts:
                 raise WorkflowError('invalid_state')
             if source['kind'] in ('video', 'mp4') and c.execute(
@@ -308,6 +323,15 @@ class WebDispatcher:
                     from .workflow import run_once
                     result = run_once(self.service.wc, worker_id='web-html', task_id=tid)
                     if not result or 'error' in result: raise WorkflowError(result.get('error','invalid_state') if result else 'invalid_state')
+            elif source['kind'] == 'douyin_album':
+                if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
+                from .douyin_album_processing import run_album
+
+                with self.store._tx() as c:
+                    reservation = c.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (tid,)).fetchone()
+                if not reservation:
+                    raise WorkflowError('invalid_state')
+                run_album(self.service.douyin_album, tid, reservation['amount'], resume=resume)
             elif source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 runner = self.service.video_runner

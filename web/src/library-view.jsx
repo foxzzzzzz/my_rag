@@ -123,6 +123,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
         <option value="">全部类型</option>
         <option value="html">网页</option>
         <option value="video">视频</option>
+        <option value="douyin_album">图文</option>
       </select></label>
       <label>审核<select value={filters.review} onChange={event=>filter('review',event.target.value)}>
         <option value="">全部状态</option>
@@ -188,7 +189,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
           checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
         <div className="library-identity">
           <button type="button" className="source" onClick={()=>open(source.id)}><strong>{source.title||source.original_name}</strong></button>
-          <small>{['video','mp4'].includes(source.kind)?'视频':'网页'}</small>
+          <small>{['video','mp4'].includes(source.kind)?'视频':source.kind==='douyin_album'?'图文':'网页'}</small>
         </div>
         <div className="library-taxonomy">
           <span>{topicNames}</span>

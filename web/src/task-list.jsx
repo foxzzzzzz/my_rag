@@ -40,16 +40,19 @@ function taskStatus(task, queuedForProcessing) {
 
 function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,toggle}) {
   const [recoveryAgreement,setRecoveryAgreement]=useState(null);
-  const {mode,action,queuedForProcessing}=controls;
+  const {mode,action:defaultAction,queuedForProcessing}=controls;
   const video=['video','mp4'].includes(item?.kind);
-  const kind=video?'视频':item?.kind==='html'?'网页':'';
+  const album=item?.kind==='douyin_album';
+  const action=album&&defaultAction==='start'&&!task.dispatch?undefined:defaultAction;
+  const kind=video?'视频':album?'图文':item?.kind==='html'?'网页':'';
   const title=item?.title||item?.original_name||'来源资料不可用';
-  const paidNeeded=video||mode==='model';
-  const enabled=video?config.live_video_enabled:mode!=='model'||config.live_html_enabled;
+  const paidNeeded=video||(!album&&mode==='model');
+  const enabled=video||album?config.live_video_enabled:mode!=='model'||config.live_html_enabled;
   const status=taskStatus(task,queuedForProcessing);
   const label=status==='attention'?statusText(task.status):statusOptions[status]||statusText(task.status);
   const progress=progressText(task.progress,task.status);
-  const stage=task.stage?statusText(task.stage):'';
+  const stageText=value=>album&&/^vision-\d+$/.test(value)?`图文识别 · 图 ${value.slice(7)}`:statusText(value);
+  const stage=task.stage?stageText(task.stage):'';
   const problem=task.resume_blocked_reason||task.error_code||task.dispatch?.error_code;
   const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const diagnostic=task.model_diagnostic;
@@ -100,7 +103,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
         ].filter(Boolean).join(' · ')||'未记录'}</dd></>}
       {diagnostic?.provider_request_id&&<><dt>模型请求号</dt><dd>{diagnostic.provider_request_id}</dd></>}
       {recovery&&item&&!item.deleted&&!task.archived&&<><dt>继续处理</dt><dd>
-        <p>中断步骤 {statusText(recovery.stage)}{!diagnosticReason&&recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
+        <p>中断步骤 {stageText(recovery.stage)}{!diagnosticReason&&recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
         {['budget_invalid_or_exceeded','favorites_budget_exceeded'].includes(task.error_code)&&<p>{failureReasons[task.error_code]}</p>}
         {recovery.mode==='restore'?<p>{recovery.authorized_amount
           ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`
@@ -170,7 +173,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
           {Object.entries(statusOptions).map(([value,label])=><option key={value} value={value}>{label}</option>)}
         </select></label>
         <label>类型<select value={filters.kind} onChange={event=>setFilter('kind',event.target.value)}>
-          <option value="">全部类型</option><option value="video">视频</option><option value="html">网页</option>
+          <option value="">全部类型</option><option value="video">视频</option><option value="html">网页</option><option value="douyin_album">图文</option>
         </select></label>
         <button type="button" disabled={!filters.query&&!filtering} onClick={()=>setFilters(emptyFilters)}>清空筛选</button>
       </div>

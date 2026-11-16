@@ -259,5 +259,6 @@ export function RagPanel({onLoginRequired,api,sources,catalog,session,connected=
  <details>
  <summary>{config.technical_label}</summary>
  <pre className="citation-technical">{JSON.stringify({chunk_id:citation.chunk_id,source_id:citation.source_id,version_id:citation.version_id,content_sha256:citation.content_sha256,locator:citation.locator},null,2)}</pre>
- </details>{hasTime&&<video controls src={'/api/sources/'+encodeURIComponent(citation.source_id)+'/original'} onLoadedMetadata={e=>{e.currentTarget.currentTime=seconds}}/>}</article>}</section>
+ </details>{hasTime&&<video controls src={'/api/sources/'+encodeURIComponent(citation.source_id)+'/original'} onLoadedMetadata={e=>{e.currentTarget.currentTime=seconds}}/>}
+ {loc.type==='image'&&Number.isInteger(loc.page)&&loc.page>0&&<a href={'/api/sources/'+encodeURIComponent(citation.source_id)+'/album/'+loc.page} target="_blank" rel="noreferrer">查看图 {loc.page} 原图</a>}</article>}</section>
 }
