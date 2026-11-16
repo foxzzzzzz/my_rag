@@ -189,8 +189,8 @@ class WebService:
             self._favorites_stamp = stamp
         return self._favorites_sync
 
-    def _album_quote(self, image_count):
-        return self.douyin_album.quote(image_count)
+    def _album_quote(self, image_count, *, work_id, manual):
+        return self.douyin_album.quote(image_count, work_id=work_id, manual=manual)
 
     def favorites_cookie(self):
         import os

@@ -178,14 +178,18 @@ class FavoritesSync:
                     elif not (row['paid'] or row['kind'] == 'image') or status not in ('downloaded', 'conversion_queued', 'converted', 'conversion_failed'):
                         status = 'imported'
                 urls = json.loads(row['image_urls'] or '[]')
-                quote = None
+                quote = quote_error = None
                 if mixed and row['kind'] == 'image' and self.image_quote and urls:
                     try:
-                        quote = format(Decimal(str(self.image_quote(len(urls)))), '.2f')
-                    except (WorkflowError, ValueError, InvalidOperation):
+                        amount = self.image_quote(len(urls), work_id=row['work_id'], manual=bool(row['baseline'] or row['paid']))
+                        quote = format(Decimal(str(amount)), '.2f')
+                    except WorkflowError as exc:
+                        quote_error = exc.code
+                    except (ValueError, InvalidOperation):
                         pass
                 items.append(dict(work_id=row['work_id'], title=row['title'], status=status,
-                                  kind=row['kind'], image_count=len(urls), image_quote_cny=quote, image_download_error=row['image_download_error'] if row['kind'] == 'image' else None,
+                                  kind=row['kind'], image_count=len(urls), image_quote_cny=quote, image_quote_error=quote_error,
+                                  image_download_error=row['image_download_error'] if row['kind'] == 'image' else None,
                                   selectable=bool(ready and row['baseline'] and not status and (row['kind'] != 'image' or quote is not None))))
             counts = dict(db.execute('SELECT status, COUNT(*) FROM favorites_queue WHERE account_id=? GROUP BY status',
                                      (s['active'],)).fetchall())
@@ -248,9 +252,9 @@ class FavoritesSync:
             for item in records:
                 if item['work_id'] in wanted and item['kind'] == 'image':
                     urls = json.loads(item['image_urls'] or '[]')
-                    if not self.image_quote or not urls:
+                    if not self.config.get('mixed_enabled') or not self.image_quote or not urls:
                         raise WorkflowError('favorites_price_changed')
-                    quote = format(Decimal(str(self.image_quote(len(urls)))), '.2f')
+                    quote = format(Decimal(str(self.image_quote(len(urls), work_id=item['work_id'], manual=True))), '.2f')
                     if not isinstance(image_quotes, dict) or image_quotes.get(item['work_id']) != quote:
                         raise WorkflowError('favorites_price_changed')
                     amounts[item['work_id']] = quote
@@ -541,7 +545,7 @@ class FavoritesSync:
         used = [Decimal(row[0]) for row in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
         remaining = Decimal(str(self.config['daily_budget_cny'])) - sum(used, Decimal(0))
         can_schedule = scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
-        rows = db.execute("""SELECT q.seq,t.id,m.video_budget_cny,i.kind,i.image_urls FROM favorites_queue q
+        rows = db.execute("""SELECT q.seq,t.id,q.work_id,m.video_budget_cny,i.kind,i.image_urls FROM favorites_queue q
                 JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
                 JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
                 LEFT JOIN web_task_archive a ON a.task_id=t.id
@@ -558,7 +562,8 @@ class FavoritesSync:
             amount = Decimal(str(self.config['video_budget_cny']))
             if row['kind'] == 'image':
                 try:
-                    amount = Decimal(self.image_quote(len(json.loads(row['image_urls']))))
+                    amount = Decimal(self.image_quote(len(json.loads(row['image_urls'])),
+                                                      work_id=row['work_id'], manual=manual_amount is not None))
                 except (TypeError, ValueError, InvalidOperation, WorkflowError):
                     continue
                 if manual_amount is not None and amount > Decimal(manual_amount):

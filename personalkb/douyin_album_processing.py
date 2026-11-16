@@ -27,6 +27,22 @@ def pipeline_config(album):
     return pc
 
 
+def _confirmed_work_budget(album, task, work_id, reserved):
+    limit = album.manual_work_budget(work_id)
+    if limit is None:
+        return None
+    with album.store._tx() as db:
+        row = db.execute("""SELECT m.video_budget_cny,r.amount FROM favorites_queue q
+                           JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                           JOIN favorites_conversion r ON r.task_id=q.task_id AND r.account_id=q.account_id
+                           JOIN douyin_jobs j ON j.id=q.job_id AND j.source_id=?
+                           WHERE q.task_id=? AND q.work_id=? AND q.automatic=0""",
+                         (task['source_id'], task['id'], work_id)).fetchone()
+    if row and Decimal(row['video_budget_cny']) == Decimal(row['amount']) == reserved:
+        return min(limit, reserved)
+    return None
+
+
 def _cost_summary(store, task_id, pc):
     with store._tx() as db:
         rows = db.execute("""SELECT stage,response_metrics,attempt,automatic,amount,started FROM video_chat_attempts
@@ -57,8 +73,15 @@ def run_album(album, task_id, reserved, *, resume=False, services=None):
     store = album.store
     task = store.get_task(task_id)
     manifest = album.manifest(task['source_id'])
-    if album.quote(len(manifest['images'])) > Decimal(reserved):
+    work_id = manifest['work_id']
+    reserved = Decimal(reserved)
+    work_budget = _confirmed_work_budget(album, task, work_id, reserved)
+    amount = album.quote(len(manifest['images']), work_id=work_id, manual=work_budget is not None)
+    if amount > reserved:
         raise WorkflowError('album_quote_changed')
+    if work_budget is not None:
+        # Only this confirmed manual task receives a different ledger ceiling.
+        pc['budget'] = {**pc['budget'], 'run_limit': str(work_budget)}
     if services is None:
         keys = dotenv(ROOT / album.service.webcfg['env_file'])
         keys.update(os.environ)

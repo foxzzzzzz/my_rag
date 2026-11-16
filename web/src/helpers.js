@@ -1,6 +1,11 @@
 export function validReview(score, decision, target, reviewer) { const n=Number(score); return score !== '' && Number.isFinite(n) && n>=0 && n<=100 && !!reviewer.trim() && (decision !== 'approve' || n>=target); }
 export const classificationTopicRequired = '有标签的资料至少需要一个主题。请选择主题，或清空标签。';
+export const albumQuoteErrors = {
+  album_image_limit: '图片数量超限',
+  album_quote_over_run_budget: '单任务预算不足',
+};
 export function errorText(status, code) {
+  if (Object.hasOwn(albumQuoteErrors, code)) return albumQuoteErrors[code];
   if (code==='classification_topic_required') return classificationTopicRequired;
   if (code==='trash_expired') return '这份资料已过撤销期限，等待定期维护清理。';
   if (code==='worker_busy') return '后台正在处理任务，请稍后再试。';

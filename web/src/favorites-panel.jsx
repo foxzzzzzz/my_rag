@@ -1,4 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
+import {albumQuoteErrors} from './helpers.js';
 import './favorites.css';
 
 const states = {scan_queued:'等待读取收藏', scanning:'正在读取收藏', confirm_account:'等待确认账号',
@@ -45,7 +46,10 @@ function FavoriteRow({item, checked, canSelect, onChange, onRetry}) {
   const Title = item.selectable ? 'label' : 'div';
   const checkboxId = `${titleId}-checkbox`;
   const status = item.status || 'baseline';
-  const [statusText, tone] = status==='baseline'&&!item.selectable
+  const quoteError = albumQuoteErrors[item.image_quote_error];
+  const [statusText, tone] = quoteError&&['baseline','downloaded'].includes(status)
+    ? [quoteError, 'neutral']
+    : status==='baseline'&&!item.selectable
     ? ['暂不可导入', 'neutral']
     : itemStates[status] || [status, 'neutral'];
 

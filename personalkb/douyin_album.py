@@ -73,17 +73,35 @@ class DouyinAlbum:
             hosts = self.config['media_hosts']
             if not isinstance(hosts, list) or not hosts or any(not isinstance(host, str) or not re.fullmatch(r'[a-z0-9-]+(?:\.[a-z0-9-]+)+', host) for host in hosts):
                 raise ValueError()
-        except (OSError, KeyError, TypeError, ValueError):
+            work_budgets = self.config.get('manual_work_budgets_cny', {})
+            if not isinstance(work_budgets, dict) or any(
+                not isinstance(work_id, str) or not re.fullmatch(r'[0-9]+', work_id)
+                or not isinstance(amount, str) or not re.fullmatch(r'[0-9]+\.[0-9]{2}', amount)
+                or Decimal(amount) <= 0 for work_id, amount in work_budgets.items()
+            ):
+                raise ValueError()
+            self.manual_work_budgets = {work_id: Decimal(amount) for work_id, amount in work_budgets.items()}
+        except (OSError, KeyError, TypeError, ValueError, ArithmeticError):
             raise WorkflowError('invalid_album_config') from None
 
-    def quote(self, image_count):
+    def manual_work_budget(self, work_id):
+        amount = self.manual_work_budgets.get(work_id)
+        if amount is not None:
+            return min(amount, Decimal(str(self.service.pc['budget']['research_limit'])))
+        return None
+
+    def quote(self, image_count, *, work_id=None, manual=False):
         if type(image_count) is not int or image_count < 1:
             raise WorkflowError('invalid_album_image_count')
         if image_count > self.config['max_images']:
             raise WorkflowError('album_image_limit')
         amount = quote(image_count, {**self.service.pc, **self.config})
-        if 'budget' in self.service.pc and amount > Decimal(str(self.service.pc['budget']['run_limit'])):
-            raise WorkflowError('album_quote_over_run_budget')
+        if 'budget' in self.service.pc:
+            limit = self.manual_work_budget(work_id) if manual else None
+            if limit is None:
+                limit = Decimal(str(self.service.pc['budget']['run_limit']))
+            if amount > limit:
+                raise WorkflowError('album_quote_over_run_budget')
         return amount
 
     def _root(self):

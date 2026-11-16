@@ -108,3 +108,7 @@ test('上传阶段可恢复且未知提交仍被阻止', async ()=> {
     assert.equal(taskControls({...task,resume_blocked_reason:'unknown_submission'}, 'preview').action, undefined);
   }
 });
+test('图文报价区分图片数量和单任务预算', () => {
+  assert.equal(errorText(400, 'album_image_limit'), '图片数量超限');
+  assert.equal(errorText(400, 'album_quote_over_run_budget'), '单任务预算不足');
+});

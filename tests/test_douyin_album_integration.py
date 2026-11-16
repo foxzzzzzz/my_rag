@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+import sqlite3
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,13 +18,14 @@ from personalkb.workflow_store import WorkflowError
 
 
 COOKIE = 'test-cookie'
+AUTHORIZED_WORK = '7707297968927829478'
 
 
-def work(number, kind='video'):
+def work(number, kind='video', image_count=2):
     item = {'id': str(number), 'title': f'Title {number}', 'kind': kind}
     if kind == 'image':
         item.update(description='测试作品文案', image_urls=[
-            f'https://p3.douyinpic.com/{number}-page-{page}' for page in (1, 2)
+            f'https://p3.douyinpic.com/{number}-page-{page}' for page in range(1, image_count + 1)
         ])
     return item
 
@@ -80,6 +82,96 @@ def establish(sync, tick, items, day, account='a'):
     tick(items, day=day, account=account)
     sync.confirm(account, COOKIE)
     tick(items, day=day, account=account)
+
+
+@pytest.mark.parametrize('budget_case', ('complete', 'cumulative_limit', 'missing_consent'))
+def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case):
+    from fastapi.testclient import TestClient
+    from personalkb import douyin_album_processing
+    from tools.api_smoke import reserve
+
+    service, album, sync, tick, now, downloads = system
+    items = [work(AUTHORIZED_WORK, 'image', 37), work(100, 'image', 37), work(99, 'image', 41)]
+    establish(sync, tick, items, now)
+    with pytest.raises(WorkflowError, match='album_quote_over_run_budget'):
+        album.quote(37, work_id=AUTHORIZED_WORK)
+    calls = {}
+
+    def timeout_once(stage):
+        calls[stage] = calls.get(stage, 0) + 1
+        if calls[stage] == 1:
+            raise ProviderError('provider_timeout')
+
+    class Models:
+        def vision(self, path, *, mime):
+            stage = path.read_bytes().rsplit(b'-', 1)[-1]
+            timeout_once(stage)
+            return {'content': '图文证据'}
+
+        def summarize(self, body, title):
+            timeout_once('text')
+            return {'structured': {'summary': {'overview': '概述', 'key_points': [], 'limitations': ''}, 'notes': '参见图 37'}}
+
+    monkeypatch.setattr(douyin_album_processing, 'run_album', lambda *a, **kw: run_album(*a, **kw, services=Models()))
+    monkeypatch.setattr(service, 'start', lambda: None)
+    monkeypatch.setattr(service, 'stop', lambda: None)
+    with TestClient(create_app(service.wc, service.pc, service.webcfg, service)) as client:
+        headers = {'x-csrf-token': client.get('/api/session').json()['csrf_token']}
+        rows = {row['work_id']: row for row in client.get('/api/douyin/favorites/sync').json()['items']}
+        assert rows[AUTHORIZED_WORK]['selectable'] and rows[AUTHORIZED_WORK]['image_quote_cny'] == '8.54'
+        assert not rows['100']['selectable'] and rows['100']['image_quote_error'] == 'album_quote_over_run_budget'
+        assert not rows['99']['selectable'] and rows['99']['image_quote_error'] == 'album_image_limit'
+        url = '/api/douyin/favorites/import'
+        consent = {'account_id': 'a', 'work_ids': [AUTHORIZED_WORK], 'rights_confirmed': True,
+                   'allow_paid': True, 'video_budget_cny': '4.05', 'image_quotes': {AUTHORIZED_WORK: '8.54'}}
+        assert client.post(url, json={**consent, 'allow_paid': False}, headers=headers).json()['error'] == 'paid_consent_required'
+        assert client.post(url, json={**consent, 'image_quotes': {AUTHORIZED_WORK: '8.55'}}, headers=headers).json()['error'] == 'favorites_price_changed'
+        assert client.post(url, json={**consent, 'work_ids': ['100'], 'image_quotes': {'100': '8.54'}},
+                           headers=headers).json()['error'] == 'album_quote_over_run_budget'
+        assert client.post(url, json=consent, headers=headers).json() == {'queued': 1}
+    tick(items)
+    tick(items)
+    with service.store._tx() as db:
+        assert db.execute('SELECT COUNT(*) FROM favorites_queue').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM favorites_download_slots').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM favorites_conversion_slots').fetchone()[0] == 0
+        assert db.execute('SELECT amount FROM favorites_conversion').fetchone()[0] == '8.54'
+        if budget_case == 'missing_consent':
+            db.execute('DELETE FROM favorites_manual_consent')
+    budget = service.pc['budget']
+    if budget_case == 'cumulative_limit':
+        reserve(budget['ledger'], 'prior-task', 'prior-request', '96', '96', budget['research_limit'])
+    result = service.dispatcher.process_next()
+    if budget_case == 'cumulative_limit':
+        assert result['error'] == 'budget_invalid_or_exceeded' and not calls
+    elif budget_case == 'missing_consent':
+        assert result['error'] == 'album_quote_over_run_budget' and not calls
+    else:
+        assert result['dispatch_state'] == 'done'
+        source_id = service.store.get_task(result['task_id'])['source_id']
+        document = service.detail(source_id)
+        assert not document['eligible'] and len(document['current']['result']['images']) == 37
+        with sqlite3.connect(budget['ledger']) as db:
+            amounts = [Decimal(row[0]) for row in db.execute('SELECT amount FROM reservations WHERE run_id=?', (result['task_id'],))]
+        assert len(amounts) == sum(calls.values()) == 76
+        assert sum(amounts) == Decimal('8.534016') < Decimal('8.54')
+    assert len(downloads) == 37 and budget['run_limit'] == '5'
+
+
+def test_scheduled_work_does_not_use_manual_budget(system):
+    service, _, sync, tick, now, _ = system
+    baseline = [work(100)]
+    establish(sync, tick, baseline, now - timedelta(days=1))
+    items = [work(AUTHORIZED_WORK, 'image', 37), *baseline]
+    tick(items)
+    tick(items)
+    assert tick(items) is None
+    with service.store._tx() as db:
+        row = db.execute('SELECT automatic,status FROM favorites_queue WHERE work_id=?', (AUTHORIZED_WORK,)).fetchone()
+        assert tuple(row) == (1, 'downloaded')
+        assert db.execute('SELECT COUNT(*) FROM favorites_conversion').fetchone()[0] == 0
+    row = next(item for item in sync.status(COOKIE)['items'] if item['work_id'] == AUTHORIZED_WORK)
+    assert row['image_quote_error'] == 'album_quote_over_run_budget' and not row['selectable']
 
 
 def test_mixed_daily_count_budget_and_continuation(system):

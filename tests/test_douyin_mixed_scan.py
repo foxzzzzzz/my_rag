@@ -32,7 +32,7 @@ def test_migration_marks_existing_images_as_baseline_and_queues_new_video(tmp_pa
                                                webcfg={'live_video_enabled': True, 'dispatch_recovery_seconds': 60}))
     config = load_config('config/douyin-daily-sync.json')
     config.update(enabled=True, schedule_enabled=True, baseline_limit=3)
-    sync = FavoritesSync(downloader.store, config, image_quote=lambda count: '1.20')
+    sync = FavoritesSync(downloader.store, config, image_quote=lambda count, **kwargs: '1.20')
     def tick(payload):
         sync.request_scan()
         sync.tick('cookie', lambda *args, **kwargs: payload, downloader, dispatcher,
