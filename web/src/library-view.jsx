@@ -29,7 +29,7 @@ function Choices({catalog,kind,value,onChange}) {
 
 export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,filters,setFilters,onResetFilters,onImport,onTrash,listRef,displayTimezone}) {
   const [selection,setSelection]=useState({});
-  const [timeDirection,setTimeDirection]=useState('asc');
+  const [timeDirection,setTimeDirection]=useState('desc');
   const [batchOpen,setBatchOpen]=useState(false);
   const [topics,setTopics]=useState([]), [tags,setTags]=useState([]), [operation,setOperation]=useState('add');
   const [results,setResults]=useState([]), [working,setWorking]=useState(false), [message,setMessage]=useState('');
