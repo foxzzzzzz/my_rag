@@ -1,7 +1,13 @@
+.favorites-layout {
+  display:grid;
+  grid-template-columns:minmax(0,var(--favorites-list-width)) var(--favorites-confirm-width);
+  gap:var(--favorites-layout-gap);
+  align-items:start;
+}
 .favorites-fieldset {
   min-inline-size:0;
   max-inline-size:var(--favorites-list-width);
-  padding:0 0 12px;
+  padding:0;
   border-radius:var(--radius);
 }
 .favorites-fieldset legend { margin-inline-start:12px; padding-inline:4px; font-weight:600 }
@@ -66,8 +72,31 @@
   text-decoration:underline;
   text-underline-offset:2px;
 }
-.favorites-status {
+.favorites-type {
   grid-column:3;
+  display:grid;
+  justify-items:start;
+  gap:4px;
+  min-inline-size:0;
+}
+.favorites-type-badge {
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:2px 7px;
+  border-radius:var(--radius);
+  background:var(--favorites-video-bg);
+  color:var(--favorites-video-text);
+  font-size:var(--sidebar-meta-size);
+  white-space:nowrap;
+}
+.favorites-type-badge[data-kind="image"] {
+  background:var(--favorites-image-bg);
+  color:var(--favorites-image-text);
+}
+.favorites-type-detail { font-size:var(--sidebar-meta-size) }
+.favorites-status {
+  grid-column:4;
   justify-self:start;
   padding:2px 8px;
   border-radius:var(--radius);
@@ -75,6 +104,7 @@
   color:var(--muted);
   font-size:var(--sidebar-meta-size);
 }
+.favorites-status small { display:block }
 .favorites-status[data-tone="available"] {
   color:var(--accent);
   background:var(--favorites-available-bg);
@@ -88,11 +118,30 @@
   background:var(--favorites-failed-bg);
 }
 .favorites-empty { padding-inline:12px }
+.favorites-confirmation {
+  position:sticky;
+  inset-block-start:var(--content-pad-y);
+  max-block-size:calc(100dvh - 2 * var(--content-pad-y));
+  overflow:auto;
+  margin-block-start:10px;
+  padding:16px;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  background:var(--app-bg);
+}
+.favorites-confirmation h2,.favorites-dialog-heading h2 { margin:0; font-size:var(--favorites-confirm-heading-size) }
 .favorites-submit {
   display:grid;
-  justify-items:start;
+  gap:10px;
+  margin-block-start:10px;
+}
+.favorites-submit > [role="status"]:empty { display:none }
+.favorites-fee { font-size:var(--favorites-confirm-heading-size) }
+.favorites-consents {
+  display:grid;
   gap:8px;
-  padding:12px 12px 0;
+  padding-block-start:10px;
+  border-block-start:1px solid var(--border);
 }
 .favorites-submit p,.management .favorites-submit label { margin:0 }
 .management .favorites-submit label {
@@ -101,9 +150,41 @@
   align-items:start;
 }
 .favorites-submit label input { margin-block-start:4px }
+.favorites-mobile-bar { display:none }
+.favorites-mobile-dialog {
+  width:min(100% - 2 * var(--mobile-pad-x), var(--favorites-dialog-width));
+  max-block-size:calc(100dvh - 2 * var(--mobile-pad-y));
+  padding:16px;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  color:var(--text);
+  background:var(--surface);
+}
+.favorites-mobile-dialog::backdrop { background:var(--favorites-dialog-backdrop) }
+.favorites-dialog-heading { display:flex; justify-content:space-between; align-items:center; gap:10px }
+@media (max-width:1050px) {
+  .favorites-layout { display:block; padding-block-end:var(--favorites-mobile-bar-height, 0px) }
+  .favorites-confirmation { display:none }
+  .favorites-mobile-bar {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    position:fixed;
+    z-index:5;
+    inset:auto 0 0;
+    padding:10px var(--mobile-pad-x) calc(10px + env(safe-area-inset-bottom));
+    border-block-start:1px solid var(--border);
+    background:var(--surface);
+  }
+  .favorites-mobile-bar small { display:block }
+  .favorites-mobile-bar button { flex:none }
+  .favorites-checkbox,.favorites-expand { scroll-margin-block-end:var(--favorites-mobile-bar-height, 0px) }
+}
 @media (max-width:700px) {
   .favorites-heading { display:none }
   .favorites-list { border-block-start:1px solid var(--border) }
   .favorites-row { grid-template-columns:1.25rem minmax(0,1fr) }
-  .favorites-status { grid-column:2 }
+  .favorites-type,.favorites-status { grid-column:2 }
+  .favorites-type { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px }
 }
