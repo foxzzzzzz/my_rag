@@ -31,8 +31,8 @@
  --favorites-columns:1.25rem minmax(0,1fr) 8.5rem 8.5rem; /* 收藏列表的勾选、标题、类型和状态列 */
  --favorites-confirm-width:18rem; --favorites-layout-gap:20px; /* 桌面导入确认面板宽度与列间距 */
  --favorites-confirm-heading-size:16px; --favorites-dialog-width:28rem; /* 确认区标题字号与手机对话框宽度上限 */
- --favorites-video-bg:#edf2f5; --favorites-video-text:#315466; /* 视频类型标识 */
- --favorites-image-bg:#f0eafa; --favorites-image-text:#62408c; /* 图文类型标识 */
+ --media-type-video-bg:#edf2f5; --media-type-video-text:#315466; /* 视频类型标识 */
+ --media-type-album-bg:#f0eafa; --media-type-album-text:#62408c; /* 图文类型标识 */
  --favorites-dialog-backdrop:rgb(20 29 44 / .44); /* 手机导入确认对话框的遮罩 */
  --favorites-title-lines:2; /* 收藏标题折叠时的行数 */
  --favorites-available-bg:#e7effb; /* 可导入状态与选中筛选按钮的背景 */

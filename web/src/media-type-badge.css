@@ -1,0 +1,16 @@
+.media-type-badge {
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:2px 7px;
+  border-radius:var(--radius);
+  background:var(--media-type-video-bg);
+  color:var(--media-type-video-text);
+  font-size:var(--sidebar-meta-size);
+  white-space:nowrap;
+  vertical-align:middle;
+}
+.media-type-badge[data-kind="album"] {
+  background:var(--media-type-album-bg);
+  color:var(--media-type-album-text);
+}

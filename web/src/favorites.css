@@ -79,21 +79,6 @@
   gap:4px;
   min-inline-size:0;
 }
-.favorites-type-badge {
-  display:inline-flex;
-  align-items:center;
-  gap:5px;
-  padding:2px 7px;
-  border-radius:var(--radius);
-  background:var(--favorites-video-bg);
-  color:var(--favorites-video-text);
-  font-size:var(--sidebar-meta-size);
-  white-space:nowrap;
-}
-.favorites-type-badge[data-kind="image"] {
-  background:var(--favorites-image-bg);
-  color:var(--favorites-image-text);
-}
 .favorites-type-detail { font-size:var(--sidebar-meta-size) }
 .favorites-status {
   grid-column:4;

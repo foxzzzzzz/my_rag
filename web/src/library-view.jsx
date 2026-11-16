@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {filterSources, isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {classificationTopicRequired, formatDate} from './helpers';
 import {compareTime, TimeSortButton} from './time-sort';
+import {MediaTypeBadge} from './media-type-badge';
 
 const importTime=source=>source.created_at||source.updated_at;
 
@@ -189,7 +190,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
           checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
         <div className="library-identity">
           <button type="button" className="source" onClick={()=>open(source.id)}><strong>{source.title||source.original_name}</strong></button>
-          <small>{['video','mp4'].includes(source.kind)?'视频':source.kind==='douyin_album'?'图文':'网页'}</small>
+          <small><MediaTypeBadge kind={source.kind} fallback="网页"/></small>
         </div>
         <div className="library-taxonomy">
           <span>{topicNames}</span>

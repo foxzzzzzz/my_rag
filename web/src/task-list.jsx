@@ -1,5 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {compareTime, TimeSortButton} from './time-sort';
+import {MediaTypeBadge} from './media-type-badge';
 import {errorText, formatDate, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
 
 const emptyFilters={query:'',status:'',kind:''};
@@ -44,7 +45,9 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   const video=['video','mp4'].includes(item?.kind);
   const album=item?.kind==='douyin_album';
   const action=album&&defaultAction==='start'&&!task.dispatch?undefined:defaultAction;
-  const kind=video?'视频':album?'图文':item?.kind==='html'?'网页':'';
+  const html=item?.kind==='html';
+  const knownKind=video||album||html;
+  const metadata=[task.reprocess&&'重新转写',item?.deleted&&'来源在回收站'].filter(Boolean).join(' · ');
   const title=item?.title||item?.original_name||'来源资料不可用';
   const paidNeeded=video||(!album&&mode==='model');
   const enabled=video||album?config.live_video_enabled:mode!=='model'||config.live_html_enabled;
@@ -64,7 +67,10 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   return <article className="task-grid task-item">
     <div className="task-identity">
       <strong>{title}</strong>
-      {(kind||item?.deleted)&&<span className="muted">{[kind,task.reprocess&&'重新转写',item?.deleted&&'来源在回收站'].filter(Boolean).join(' · ')}</span>}
+      {(knownKind||item?.deleted)&&<span className="muted">
+        <MediaTypeBadge kind={item?.kind} fallback={html?'网页':null}/>
+        {knownKind&&metadata?' · ':null}{metadata}
+      </span>}
     </div>
     <div className="task-state">
       <strong data-status={status}>{label}</strong>
