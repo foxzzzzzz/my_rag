@@ -68,7 +68,7 @@ export function RagPanel({onLoginRequired,api,sources,catalog,session,connected=
  async function openCitation(id){
   if(!connected)return;
   const token=++citationGeneration.current, captured=signature; C(null); E('');
-  try{const value=await api('/rag/citations/'+encodeURIComponent(id));
+  try{const value=await api('/rag/citations/'+encodeURIComponent(id),{headers:{'X-PKB-Activity':'user'}});
    if(isCurrentRequest(token,citationGeneration.current,context.current.connected,captured,context.current.signature))C(value);
   }catch{if(isCurrentRequest(token,citationGeneration.current,context.current.connected,captured,context.current.signature)){R({});C(null);E(errorText('rag_invalidated'))}}
  }
@@ -91,17 +91,20 @@ export function RagPanel({onLoginRequired,api,sources,catalog,session,connected=
     if(!valid()){res.body?.cancel().catch(()=>{});return;}
     if(!res.ok){const data=await guardedJson(res,token,()=>requestGeneration.current,onLoginRequired);if(!valid())return;throw Error(data.error || 'internal_error')}
     const reader=res.body.getReader(); readerRef.current=reader;
-    const decoder=new TextDecoder(); let buffer='',doneEvent=false;
+    const decoder=new TextDecoder(); let buffer='',doneEvent=false,successful=false;
     while(true){const {value,done}=await reader.read(); if(!valid())return; if(done)break;
      const parsed=parseSSE(buffer+decoder.decode(value,{stream:true}));buffer=parsed.rest;
      for(const event of parsed.events){
       if(['done','invalidated','error'].includes(event.type))doneEvent=true;
+      if(event.type==='done')successful=true;
+      if(['invalidated','error'].includes(event.type))successful=false;
       if(['invalidated','error'].includes(event.type)){citationGeneration.current++;C(null)}
       if(event.code==='rag_coverage_changed')loadStatus();
       R(s=>valid()?applyEvent(s,event):s);
      }
     }
     if(!doneEvent)throw Error('internal_error');
+    if(successful && valid())await fetch('/api/auth/activity',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':session.csrf_token},signal:controller.signal}).catch(()=>{});
    }else{
     const x=await api('/rag/'+action,{method:'POST',body:JSON.stringify(body)}); if(!valid())return;
     G(x.items);

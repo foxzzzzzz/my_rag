@@ -66,7 +66,7 @@ def make_store(config):
     root.mkdir(parents=True, exist_ok=True)
     return WorkflowStore(root / 'workflow.sqlite3', quality_target=config['quality_target'],
                          lease_seconds=config['lease_seconds'], max_attempts=config['max_attempts'],
-                         busy_timeout_seconds=config['busy_timeout_seconds'], source_trash_days=config.get('source_trash_days', 7),
+                         busy_timeout_seconds=config['busy_timeout_seconds'], max_display_title_chars=config.get('max_display_title_chars', 200), source_trash_days=config.get('source_trash_days', 7),
                          content_root=(root / config.get('content', {}).get('directory', 'knowledge')) if config.get('content', {}).get('enabled', False) else None, data_root=root)
 
 
@@ -252,4 +252,9 @@ def render_markdown(store, version):
     approved = any(x['id'] == source['id'] and x['current_version_id'] == version['id'] for x in store.eligible_sources())
     from .classification import ClassificationStore
     classification=ClassificationStore(store).snapshot(source['id'])
-    return render(source, version, 'approved' if approved else 'draft_or_inactive', classification=classification)
+    title = None
+    if source['current_version_id'] == version['id']:
+        from .workflow_store import title_metadata
+        with store._tx() as c:
+            title = title_metadata(c, source['id'])
+    return render(source, version, 'approved' if approved else 'draft_or_inactive', classification=classification, title_metadata=title)

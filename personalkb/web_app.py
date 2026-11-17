@@ -1,4 +1,5 @@
 import json, secrets, time, uuid, shutil, math, threading
+from time import monotonic
 from collections import deque
 from html.parser import HTMLParser
 from personalkb.web_auth import load_auth, verify_password
@@ -14,15 +15,17 @@ from personalkb import workflow
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RAG_STATUS_POLL_INTERVAL_MS = 10000
+DEFAULT_SESSION_ACTIVITY_INTERVAL_MS = 60000
 
 def load_web_config(path=None):
     try:
         c=json.loads(Path(path or ROOT/'config/web.json').read_text(encoding='utf-8-sig'))
         if c['host'] not in ('127.0.0.1','localhost'): raise ValueError()
         c.setdefault('rag_status_poll_interval_ms', DEFAULT_RAG_STATUS_POLL_INTERVAL_MS)
+        c.setdefault('session_activity_interval_ms', DEFAULT_SESSION_ACTIVITY_INTERVAL_MS)
         for k in ('port','session_ttl_seconds','max_sessions','poll_interval_ms','upload_chunk_bytes','dispatch_poll_seconds','dispatch_recovery_seconds','shutdown_timeout_seconds'):
             if type(c[k]) not in (int,float) or not math.isfinite(c[k]) or c[k]<=0: raise ValueError()
-        for k in ('port','max_sessions','upload_chunk_bytes','poll_interval_ms','rag_status_poll_interval_ms','max_json_bytes'):
+        for k in ('port','max_sessions','upload_chunk_bytes','poll_interval_ms','rag_status_poll_interval_ms','max_json_bytes','session_activity_interval_ms'):
             if type(c[k]) is not int or c[k]<=0: raise ValueError()
         if type(c['port']) is not int or c['port']>65535: raise ValueError()
         for k in ('trusted_hosts','trusted_origins'):
@@ -71,6 +74,11 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             service=WebService(wc,pipeline_config or load_pipeline_config(ROOT/c['pipeline_config']),c)
     sessions={}
     session_lock=threading.RLock()
+    ttl=c['session_ttl_seconds']
+
+    def set_session_cookie(response, sid):
+        response.set_cookie('pkb_session',sid,httponly=True,secure=auth_enabled,samesite='strict',max_age=int(ttl))
+
     @asynccontextmanager
     async def lifespan(app):
         with runtime_guard(wc['data_dir'],'web') if production else nullcontext():
@@ -86,11 +94,12 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         if production:
             from urllib.parse import urlsplit
             if req.headers.get('host','').lower() not in {urlsplit(x).netloc.lower() for x in c['trusted_origins']}: return JSONResponse({'error':'invalid_host'},400)
-        now=time.monotonic()
+        now=monotonic()
         with session_lock:
             for key in list(sessions):
                 if sessions[key][1]<=now: del sessions[key]
         path=req.url.path
+        sid=req.cookies.get('pkb_session')
         session=None
         if auth_enabled:
             if production and req.url.scheme != 'https': return JSONResponse({'error':'https_required'},403,headers={'Cache-Control':'no-store'})
@@ -101,13 +110,13 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
                     api_attempts.append(now)
             public=path in ('/','/healthz','/api/auth/status','/api/auth/login') or path in assets.paths
             if not public:
-                with session_lock: session=sessions.get(req.cookies.get('pkb_session'))
+                with session_lock: session=sessions.get(sid)
                 if not session: return JSONResponse({'error':'login_required'},401,headers={'Cache-Control':'no-store'})
             if req.method not in ('GET','HEAD','OPTIONS'):
                 if req.headers.get('origin') not in c['trusted_origins']: return JSONResponse({'error':'csrf_invalid'},403,headers={'Cache-Control':'no-store'})
                 if path != '/api/auth/login' and (not session or not secrets.compare_digest(req.headers.get('x-csrf-token','').encode(),session[0].encode())): return JSONResponse({'error':'csrf_invalid'},403,headers={'Cache-Control':'no-store'})
         elif req.url.path.startswith('/api/') and req.url.path not in ('/api/session','/api/auth/status','/api/auth/login'):
-            with session_lock: session=sessions.get(req.cookies.get('pkb_session'))
+            with session_lock: session=sessions.get(sid)
             if not session: return JSONResponse({'error':'session_required'},401,headers={'Cache-Control':'no-store'})
             if req.method not in ('GET','HEAD','OPTIONS'):
                 origin=req.headers.get('origin')
@@ -118,6 +127,16 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             status=413 if code=='body_too_large' else 404 if code.endswith('_not_found') else 410 if code=='version_content_pruned' else 409 if any(x in code for x in ('conflict','stale','state','lease')) else 503 if code in ('disk_low','invalid_config') else 400
             response=JSONResponse({'error':code},status)
         except Exception: response=JSONResponse({'error':'internal_error'},503)
+        interactive = (req.headers.get('X-PKB-Activity')=='user' if req.method=='GET'
+                       else req.method not in ('HEAD','OPTIONS'))
+        if (session is not None and interactive and 200<=response.status_code<300
+                and path.startswith('/api/') and path not in ('/api/session','/api/auth/logout','/api/rag/stream')):
+            with session_lock:
+                latest=sessions.get(sid)
+                now=monotonic()
+                if latest is not None and latest[0]==session[0] and latest[1]>now:
+                    sessions[sid]=(latest[0],now+ttl)
+                    set_session_cookie(response,sid)
         response.headers.setdefault('Content-Security-Policy',"default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'")
         response.headers['X-Content-Type-Options']='nosniff'
         if auth_enabled or req.url.path.startswith('/api/'): response.headers['Cache-Control']='no-store'
@@ -131,7 +150,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.post('/api/auth/login')
     async def login(req:Request):
         if not auth_enabled: return JSONResponse({'error':'invalid_credentials'},400)
-        now=time.monotonic()
+        now=monotonic()
         with session_lock:
             while login_attempts and login_attempts[0]<=now-auth['login_window_seconds']: login_attempts.popleft()
             if len(login_attempts)>=auth['login_limit']: return JSONResponse({'error':'rate_limited'},429)
@@ -147,16 +166,21 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             sessions.pop(req.cookies.get('pkb_session'),None)
             while len(sessions)>=int(c['max_sessions']): sessions.pop(next(iter(sessions)))
             sid=secrets.token_urlsafe(32); token=secrets.token_urlsafe(32)
-            sessions[sid]=(token,time.monotonic()+c['session_ttl_seconds'])
+            sessions[sid]=(token,monotonic()+ttl)
         r=JSONResponse({'authenticated':True})
-        r.set_cookie('pkb_session',sid,httponly=True,secure=True,samesite='strict',max_age=int(c['session_ttl_seconds']))
+        set_session_cookie(r,sid)
         return r
     @app.post('/api/auth/logout')
     def logout(req:Request):
         with session_lock: sessions.pop(req.cookies.get('pkb_session'),None)
         r=JSONResponse({'authenticated':False}); r.delete_cookie('pkb_session',secure=True,httponly=True,samesite='strict'); return r
+    @app.post('/api/auth/activity')
+    def activity():
+        return {'ok':True}
+
     @app.get('/api/session')
     def session(req:Request):
+        new_session=False
         with session_lock:
             sid=req.cookies.get('pkb_session')
             existing=sessions.get(sid)
@@ -166,11 +190,13 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
                 if auth_enabled: return JSONResponse({'error':'login_required'},401)
                 while len(sessions)>=int(c['max_sessions']): sessions.pop(next(iter(sessions)))
                 sid=secrets.token_urlsafe(32); token=secrets.token_urlsafe(32)
-            if not auth_enabled: sessions[sid]=(token,time.monotonic()+c['session_ttl_seconds'])
+                sessions[sid]=(token,monotonic()+ttl)
+                new_session=True
         r=JSONResponse({'csrf_token':token,'config':{'quality_target':wc['quality_target'],'poll_interval_ms':c['poll_interval_ms'],
+            'session_activity_interval_ms':c.get('session_activity_interval_ms', DEFAULT_SESSION_ACTIVITY_INTERVAL_MS),
             'rag_status_poll_interval_ms':c.get('rag_status_poll_interval_ms', DEFAULT_RAG_STATUS_POLL_INTERVAL_MS),
             'max_upload_bytes':wc['max_upload_bytes'],'max_html_bytes':wc['max_html_bytes'],'live_video_enabled':c['live_video_enabled'],'live_html_enabled':c.get('live_html_enabled',False),'display_timezone':c['display_timezone'],'auth_enabled':auth_enabled}})
-        r.set_cookie('pkb_session',sid,httponly=True,secure=auth_enabled,samesite='strict',max_age=int(c['session_ttl_seconds']))
+        if new_session: set_session_cookie(r,sid)
         return r
     @app.get('/api/sources')
     def sources(req:Request):
@@ -378,6 +404,8 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         return service.dispatcher.enqueue(task_id,mode='resume' if action=='resume' else 'run',allow_paid=payload.get('allow_paid',False),processing_mode=payload.get('processing_mode','preview'))
     @app.post('/api/sources/{source_id}/reviews')
     async def review(source_id:str,req:Request): return service.review(source_id,await read_object(req))
+    @app.patch('/api/sources/{source_id}/title')
+    async def set_display_title(source_id:str,req:Request): return service.set_display_title(source_id,await read_object(req))
     @app.post('/api/sources/{source_id}/process')
     async def reprocess_source(source_id:str,req:Request):
         p=await read_object(req)

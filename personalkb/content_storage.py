@@ -32,12 +32,15 @@ def read(root, relative):
     if not p.is_file(): raise WorkflowError('content_integrity')
     return p.read_bytes()
 
-def render(source, version, status, *, location=None, classification=None):
+def render(source, version, status, *, location=None, classification=None, title_metadata=None):
     r=version['result']
     fields={'note_id':source['id'], 'source_id':source['id'], 'version_id':version['id'], 'source_sha256':source['sha256'], 'content_sha256':version['content_sha256'], 'review_status':status, 'scheme_id':clean(r['scheme_id']), 'scheme_version':clean(r['scheme_version']), 'output_kind':r['output_kind']}
     if classification is not None: fields.update(classification_revision=classification['revision'], topics=classification['topics'], tags=classification['tags'])
+    if title_metadata is not None: fields.update(title_metadata)
     front='---\n'+''.join(k+': '+json.dumps(v,ensure_ascii=False)+'\n' for k,v in fields.items())+'---\n\n'
-    text=front+'# '+r['title']+'\n\n'+r['notes']+'\n\n## Body\n\n'+r['body']+'\n\n## Summary\n\n'+r['summary']+'\n'
+    from .workflow_store import resolve_display_title
+    title=r['title'] if title_metadata is None else resolve_display_title(title_metadata,r['title'],source['original_name'])
+    text=front+'# '+title+'\n\n'+r['notes']+'\n\n## Body\n\n'+r['body']+'\n\n## Summary\n\n'+r['summary']+'\n'
     for key, title in (('transcript','Transcript'),('visual','Visual')):
         if r.get(key): text+='\n## '+title+'\n\n'+r[key]+'\n'
     if location:
@@ -47,6 +50,28 @@ def render(source, version, status, *, location=None, classification=None):
             prefix='../../frames/' if location=='version' else 'frames/'
             text+='\n![Frame '+str(frame['index'])+']('+prefix+frame['sha256']+'.jpg)\n'
     return text
+
+def _note(c, source, current, status):
+    from .classification import snapshot_from_connection
+    from .workflow_store import title_metadata
+    sid = source['id']
+    return render(source,current,status,location='current',classification=snapshot_from_connection(c,sid),
+                  title_metadata=title_metadata(c,sid)).encode('utf8')
+
+def sync_title(store, sid):
+    with store._tx() as c:
+        pending = c.execute('SELECT revision FROM source_title_overrides WHERE source_id=? AND revision<>synced_revision',(sid,)).fetchone()
+        if not pending:
+            return
+        source=store._row(c,'sources',sid)
+        if source['deleted']:
+            raise WorkflowError('source_deleted')
+        verify(store,sid,connection=c)
+        state=json.loads(read(store.content_root,f'{sid}/current.json'))
+        current=store._row(c,'versions',source['current_version_id'])
+        note=_note(c,source,current,state['status'])
+        write(store.content_root,f'{sid}/note.md',note)
+        c.execute('UPDATE source_title_overrides SET synced_revision=revision,note_sha256=? WHERE source_id=?',(digest(note),sid))
 
 def sync(store, sid):
     root=store.content_root
@@ -95,9 +120,9 @@ def sync(store, sid):
         status='deleted' if source['deleted'] else ({'approve':'approved','reject':'rejected','rework':'rework'}[review[0]] if review else 'pending')
         if source['current_version_id']:
             current=next(v for v in versions if v['id']==source['current_version_id'])
-            from .classification import snapshot_from_connection
-            note=render(source,current,status,location='current',classification=snapshot_from_connection(c,sid)).encode('utf8')
+            note=_note(c,source,current,status)
             rel=f'{sid}/note.md'; write(root,rel,note); entries[rel]=digest(note)
+            c.execute('UPDATE source_title_overrides SET synced_revision=revision,note_sha256=NULL WHERE source_id=?',(sid,))
         state=encoded({'note_id':sid,'source_id':sid,'current_version_id':source['current_version_id'],'status':status,'generation':generation,'files':entries})
         write(root,f'{sid}/current.json',state)
         c.execute('UPDATE content_sync SET synced_generation=?, state_sha256=? WHERE source_id=? AND generation=?',(generation,digest(state),sid,generation))
@@ -114,7 +139,17 @@ def verify(store,sid,connection=None):
         if digest(state)!=row[2]: raise ValueError()
         obj=json.loads(state)
         if obj['note_id']!=sid or obj['generation']!=row[0]: raise ValueError()
+        title=c.execute('SELECT revision,synced_revision,note_sha256 FROM source_title_overrides WHERE source_id=?',(sid,)).fetchone()
         for path,sha in obj['files'].items():
-            if not path.startswith(sid+'/') or digest(read(store.content_root,path))!=sha: raise ValueError()
+            if not path.startswith(sid+'/'): raise ValueError()
+            actual=digest(read(store.content_root,path))
+            if path==f'{sid}/note.md' and title:
+                sha=title['note_sha256'] or sha
+                if actual!=sha and title['revision']!=title['synced_revision']:
+                    # The note may have been atomically replaced just before a database rollback.
+                    source=store._row(c,'sources',sid)
+                    current=store._row(c,'versions',source['current_version_id'])
+                    if actual==digest(_note(c,source,current,obj['status'])): continue
+            if actual!=sha: raise ValueError()
     except (OSError,ValueError,KeyError,TypeError,WorkflowError): raise WorkflowError('content_integrity') from None
     return True

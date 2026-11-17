@@ -57,6 +57,9 @@ class EditableExport:
             if not source['current_version_id']: raise WorkflowError('version_not_found')
             version = self.store._row(c, 'versions', source['current_version_id'])
             metadata = self.classification.snapshot(sid, connection=c)
+            from .workflow_store import title_metadata, resolve_display_title
+            title = title_metadata(c, sid)
+            metadata = {**metadata, **title, 'resolved_title': resolve_display_title(title, version['result']['title'], source['original_name'])}
             if self.store.content_root:
                 from .content_storage import verify
                 verify(self.store, sid, connection=c)
@@ -65,7 +68,7 @@ class EditableExport:
     def _note(self, source, version, metadata):
         fields = dict(pkb_format='pkb-obsidian-v1', note_id=source['id'], source_id=source['id'],
                       base_version_id=version['id'], base_content_sha256=version['content_sha256'],
-                      title=version['result']['title'], classification_revision=metadata['revision'],
+                      title=metadata['resolved_title'], base_display_title=metadata['resolved_title'], title_revision=metadata['title_revision'], classification_revision=metadata['revision'],
                       topic_ids=[x['id'] for x in metadata['topics']], tag_ids=[x['id'] for x in metadata['tags']])
         note = ('---\n' + ''.join(k + ': ' + json.dumps(v, ensure_ascii=False) + '\n' for k, v in fields.items()) + '---\n\n' + version['result']['notes']).encode('utf8')
         if len(note) > self.config['max_note_bytes']: raise WorkflowError('note_too_large')

@@ -1,5 +1,10 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {filterSources,splitAliases,labelIds} from './management-helpers.js';
+test('资料可用显示标题或原标题搜索',()=>{
+  const rows=[{id:'video',original_name:'clip.mp4',title:'精简标题',original_title:'视频平台上的完整原标题'}];
+  assert.deepEqual(filterSources(rows,{q:'精简标题'}),rows);
+  assert.deepEqual(filterSources(rows,{q:'完整原标题'}),rows);
+});
 test('分类筛选维度AND、同维度OR、隐藏删除',()=>{const rows=[{id:'1',kind:'html',original_name:'Agent笔记',review_status:'pending',classification:{topics:[{id:'a'}],tags:[{id:'t'}]}},{id:'2',kind:'html',original_name:'Agent旧版',deleted:true},{id:'3',kind:'video',original_name:'Agent视频',classification:{topics:[{id:'b'}],tags:[]}}];assert.deepEqual(filterSources(rows,{q:'agent',kind:'html',topics:['b','a'],tags:['t']}).map(x=>x.id),['1']);assert.equal(filterSources(rows,{topics:['unknown']}).length,0);assert.equal(filterSources(rows,{review:'approve'}).length,0)});
 test('别名分隔与稳定ID提取',()=>{assert.deepEqual(splitAliases(' RAG，检索\n retrieval, '),['RAG','检索','retrieval']);assert.deepEqual(labelIds([{id:'a',name:'旧名称'}]),['a'])});
 

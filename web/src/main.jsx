@@ -15,7 +15,7 @@ import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDr
 import ui from './ui-config.json';
 import './style.css';
 
-const fields = {title:'标题', summary:'摘要', notes:'笔记', body:'正文', transcript:'语音转录', visual:'画面证据'};
+const fields = {summary:'摘要', notes:'笔记', body:'正文', transcript:'语音转录', visual:'画面证据'};
 const isVideo = kind => ['video','mp4'].includes(kind);
 const inputDraft = () => emptyReviewDraft(ui.default_reviewer);
 const emptyLibraryFilters = {q:'',kind:'',review:'',tags:[]};
@@ -35,12 +35,13 @@ function App() {
   const [confirmation,setConfirmation] = useState(null);
   const dialogRef=useRef(null), dialogOpener=useRef(null);
   const [drafts, setDrafts] = useState({}), [edits, setEdits] = useState({}), [stale, setStale] = useState(false);
+  const [titleEdits,setTitleEdits]=useState({});
   const [tab, setTab] = useState('summary'), [sourcePaid, setSourcePaid] = useState(false);
   const videoReprocessRequest = useRef(null);
   const [sourceManagementOpen,setSourceManagementOpen]=useState(false);
   const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
-  const authEpoch=useRef(0);
+  const authEpoch=useRef(0), lastActivity=useRef(0);
   const refreshOrder=useRef({issued:0,applied:0});
   const libraryScrollRef=useRef(null);
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
@@ -49,6 +50,8 @@ function App() {
   const hasUnclassified=sources.some(isUnclassifiedSource);
   const activeTopic=topic===UNCLASSIFIED_TOPIC&&!hasUnclassified?'':topic;
   const key = draftKey(source?.id, current?.id), draft = drafts[key] || inputDraft(), edit = edits[key];
+  const titleEdit=titleEdits[source?.id];
+  const titlePayload=titleEdit ? {display_title:titleEdit.value,expected_title_revision:titleEdit.revision} : {};
   const renderNavigation = openSequence.current;
   const hasWork = k => !!editRef.current[k] || !!draftRef.current[k] && (
     draftRef.current[k].score !== '' || draftRef.current[k].note !== '' ||
@@ -56,7 +59,8 @@ function App() {
 
   function clearPrivate() {
     ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
-    setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setSelectedVersion(null); setDrafts({}); setEdits({});
+    lastActivity.current=0;
+    setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setSelectedVersion(null); setDrafts({}); setEdits({});setTitleEdits({});
     setDataLoaded(false); resetLibraryFilters(); setPage('library'); setFiles([]); setUploads([]); setRights(false);
     setSourcePaid(false); setConfirmation(null); setMessage('');
     setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
@@ -95,6 +99,29 @@ function App() {
     }
     return guardedJson(response,epoch,()=>authEpoch.current,requireLogin);
   }
+  useEffect(()=>{
+    const interval=session?.config.session_activity_interval_ms;
+    if(!interval)return;
+    let timer=null; const sessionEpoch=authEpoch.current;
+    const send=()=>{
+      timer=null; if(sessionEpoch!==authEpoch.current)return; lastActivity.current=Date.now();
+      const epoch=authEpoch.current;
+      fetch('/api/auth/activity',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':session.csrf_token}})
+        .then(response=>{
+          if(response.status!==401||epoch!==authEpoch.current)return;
+          if(session.config.auth_enabled)requireLogin();
+          else bootstrap();
+        }).catch(()=>{});
+    };
+    const activity=event=>{
+      if(!event.isTrusted || !event.target.matches('input, textarea, select, [contenteditable="true"]'))return;
+      const remaining=interval-(Date.now()-lastActivity.current);
+      if(remaining<=0){if(timer)clearTimeout(timer);send();}
+      else if(!timer)timer=setTimeout(send,remaining);
+    };
+    document.addEventListener('input',activity);document.addEventListener('change',activity);
+    return ()=>{clearTimeout(timer);document.removeEventListener('input',activity);document.removeEventListener('change',activity);};
+  },[session]);
   async function refresh() {
     const epoch=authEpoch.current;
     const order=++refreshOrder.current.issued;
@@ -130,7 +157,7 @@ function App() {
     const sequence=++openSequence.current;
     setBusy(true);setError('');setMessage('');
     try {
-      const value=await api(detailPath(id,versionId));
+      const value=await api(detailPath(id,versionId),options?.background?{}:{headers:{'X-PKB-Activity':'user'}});
       if (sequence!==openSequence.current) return;
       const prior=cache.current[id];
       const conflict=!discard && !versionId && prior?.current?.id!==value.current?.id && hasWork(draftKey(id,prior?.current?.id));
@@ -157,11 +184,26 @@ function App() {
   async function obsidianApplied(id, originNavigation) {
     await refresh();
     if(!id)return;
-    if(originNavigation===openSequence.current)await open(id);
+    if(originNavigation===openSequence.current)await open(id,{background:true});
     else cache.current[id]=await api('/sources/'+id);
   }
   function patchDraft(patch) {setDrafts(previous=>({...previous,[key]:updateReviewDraft(previous[key]||inputDraft(),patch)}));}
   function setEdit(value) {setEdits(previous=>({...previous,[key]:value}));}
+  function clearTitleEdit() {setTitleEdits(previous=>{const next={...previous};delete next[source.id];return next;});}
+  function editTitle(value) {
+    const revision=titleEdit?.revision ?? source.title_revision;
+    if (revision===source.title_revision && value===source.title) clearTitleEdit();
+    else setTitleEdits(previous=>({...previous,[source.id]:{value,revision}}));
+    if(draft.reviewId)patchDraft({reviewId:null});
+  }
+  async function saveTitle() {
+    const payload=titleEdit?titlePayload:{display_title:source.display_title??'',expected_title_revision:source.title_revision};
+    const saved=await api('/sources/'+source.id+'/title',{method:'PATCH',body:JSON.stringify({
+      ...payload,expected_version_id:current.id})});
+    clearTitleEdit();
+    await changed();
+    setMessage(saved.title_sync_status==='pending'?'资料标题已保存，笔记文件待同步。':'资料标题已保存。');
+  }
   function confirmAction(title,text,action) {
     dialogOpener.current=document.activeElement;setConfirmation({title,text,action});
   }
@@ -170,9 +212,10 @@ function App() {
     const action=async()=>{
       setDrafts(previous=>{const next={...previous};delete next[key];return next;});
       setEdits(previous=>{const next={...previous};delete next[key];return next;});
+      clearTitleEdit();
       await open(source.id,true);
     };
-    if(hasWork(key))confirmAction('重新加载详情','这会放弃此版本尚未提交的评分和修订草稿。',action);
+    if(hasWork(key)||titleEdit)confirmAction('重新加载详情','这会放弃尚未保存的标题、评分和修订草稿。',action);
     else await action();
   }
   async function submitReview() {
@@ -183,7 +226,8 @@ function App() {
     try {
       await api('/sources/'+source.id+'/reviews',{method:'POST',body:JSON.stringify({
         version_id:current.id,content_sha256:current.content_sha256,score:Number(draft.score),decision:draft.decision,
-        reviewer:draft.reviewer,review_id:reviewId,note:draft.note,tags:[]})});
+        reviewer:draft.reviewer,review_id:reviewId,note:draft.note,tags:[],...titlePayload})});
+      clearTitleEdit();
       setDrafts(previous=>{const next={...previous};delete next[key];return next;});
       const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
       if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId)showDetail(fresh);
@@ -240,8 +284,7 @@ function App() {
   const preview=useMemo(()=>htmlBodyPreview(source?.kind,result),[source?.kind,result]);
   const offlineHtml=source?.kind==='html'&&result.provenance==='local_extraction';
   const duplicateNotes=offlineHtml&&!!result.body&&result.notes===result.body;
-  const availableTabs=Object.keys(fields).filter(name=>name!=='title'
-    &&(isVideo(source?.kind)||(source?.kind==='douyin_album' && name==='visual')||!['transcript','visual'].includes(name))
+  const availableTabs=Object.keys(fields).filter(name=>(isVideo(source?.kind)||(source?.kind==='douyin_album' && name==='visual')||!['transcript','visual'].includes(name))
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
   useEffect(()=>{
@@ -315,6 +358,8 @@ function App() {
               {isVideo(source.kind)?'视频':source.kind==='douyin_album'?'图文':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
+            {source.original_title && source.original_title!==source.title && source.original_title!==source.original_name &&
+              <p className="muted">原标题 {source.original_title}</p>}
             {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}{version.content_pruned_at?' · 内容已清理':''}</option>)}</select></label>}
             {detail.viewing_history&&<p className="notice">{current.content_pruned_at?'此历史版本的内容已清理，保留版本信息和审核记录。':<>正在查看历史版本，仅供阅读。 <a href={'/api/versions/'+current.id+'/export'}>下载此版本 Markdown 与证据</a></>}</p>}
             {!current?.content_pruned_at&&detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
@@ -325,7 +370,7 @@ function App() {
               {!detail.viewing_history&&<section id="source-management" key={source.id} className="source-management" aria-label="资料管理" hidden={!sourceManagementOpen}>
                 <div className="source-downloads"><a href={'/api/versions/'+current.id+'/export'}>下载Markdown与证据正文</a>{detail.original_url&&source.kind==='html'&&<a href={detail.original_url}>下载原HTML</a>}</div>
                 <details><summary>分类</summary><ClassificationEditor key={source.id+'-classification'} source={source} catalog={catalog} api={api} changed={changed} disabled={busy}/></details>
-                <details><summary>Obsidian 导出与更新</summary><ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!edit||hasWork(key)}/></details>
+                <details><summary>Obsidian 导出与更新</summary><ObsidianPanel key={source.id} sourceId={source.id} api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy||!!titleEdit||hasWork(key)}/></details>
                 <details open={!!edit}><summary>人工修订</summary>{edit?<>
                   {Object.keys(fields).filter(name=>isVideo(source.kind)||!['transcript','visual'].includes(name)).map(name=><label className="edit-field" key={name}>{fields[name]}<textarea disabled={busy} value={edit[name]} onChange={event=>setEdit({...edit,[name]:event.target.value})}/></label>)}
                   <button className="primary" disabled={busy||stale} onClick={()=>run(async()=>{
@@ -336,7 +381,7 @@ function App() {
                     await refresh();setMessage('已生成新版本，请重新审核。');
                   })}>保存新版本</button>
                   <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
-                </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(name==='title'&&isVideo(source.kind)&&result.title===source.original_name?source.title||result.title:result[name])])))}>编辑内容</button>}</details>
+                </>:<button onClick={()=>setEdit(Object.fromEntries(Object.keys(fields).map(name=>[name,textValue(result[name])])))}>编辑内容</button>}</details>
                 {source.kind==='html'&&<details><summary>重新整理网页</summary><label><input type="checkbox" checked={sourcePaid} onChange={event=>setSourcePaid(event.target.checked)}/>我同意本次网页模型整理费用</label><p className="muted">保留旧版本与评分，新结果需要重新审核。</p>
                   <button disabled={busy||!sourcePaid||!session.config.live_html_enabled||stale||['queued','running','needs_attention'].includes(detail.task?.status)} onClick={()=>run(async()=>{await api('/sources/'+source.id+'/process',{method:'POST',body:JSON.stringify({allow_paid:true,expected_version_id:current.id})});setSourcePaid(false);await changed();})}>生成新的模型整理版本</button></details>}
                 {isVideo(source.kind)&&<details><summary>重新转写视频</summary>
@@ -403,11 +448,14 @@ function App() {
               {!current?.content_pruned_at&&detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
               {detail.review&&<><p className="muted">{detail.review.reviewer} · {formatDate(detail.review.created_at,session.config.display_timezone)}</p><p>审核意见：{detail.review.note||'无'}</p></>}
               {!detail.viewing_history&&<><p className="muted">批准门槛 {session.config.quality_target} 分。修改内容生成新版本后须重新审核。</p>
+              <label>资料标题<input disabled={busy} placeholder="沿用默认标题" value={titleEdit?.value??source.title??''} onChange={event=>editTitle(event.target.value)}/></label>
+              <button type="button" disabled={busy||stale||!titleEdit} onClick={()=>run(saveTitle)}>保存标题</button>
+              {source.title_sync_status==='pending'&&<div className="actions"><p role="status">标题已保存，笔记文件待同步。</p><button type="button" disabled={busy||stale||!!titleEdit} onClick={()=>run(saveTitle)}>重试笔记同步</button></div>}
               <label>审核人<input disabled={busy} value={draft.reviewer} onChange={event=>patchDraft({reviewer:event.target.value})}/></label><label>评分<input disabled={busy} type="number" min="0" max="100" step={ui.review_score_step} value={draft.score} onChange={event=>patchDraft({score:event.target.value})}/></label>
               <label>决定<select disabled={busy} value={draft.decision} onChange={event=>patchDraft({decision:event.target.value})}><option value="approve">批准</option><option value="rework">返工</option><option value="reject">拒绝</option></select></label><label>审核意见<textarea disabled={busy} value={draft.note} onChange={event=>patchDraft({note:event.target.value})}/></label>
               <p className="muted">草稿仅保留在当前打开的页面，刷新会丢失；保存草稿不会批准资料。</p><div className="actions">
                 <button disabled={busy||stale||!!edit||!validReview(draft.score,'rework',session.config.quality_target,draft.reviewer)} onClick={()=>{setDrafts(previous=>({...previous,[key]:saveReviewDraft(previous[key]||inputDraft())}));setMessage('评分草稿已保存，尚未提交审核。');}}>保存评分草稿</button>
-                <button className="primary" disabled={busy||stale||!!edit||!canSubmitReview(draft,session.config.quality_target)} onClick={()=>run(submitReview)}>提交{statusText(draft.decision)}</button></div>
+                <button className="primary" disabled={busy||stale||!!edit||!canSubmitReview(draft,session.config.quality_target)} onClick={()=>run(submitReview)}>{titleEdit?'保存标题并提交':'提交'}{statusText(draft.decision)}</button></div>
               <p className="muted" role="status">{edit?'人工修订尚未提交，请先保存新版本或放弃修订。':reviewDraftSaved(draft)?'评分草稿已保存，请核对后明确提交。':'评分或意见尚未保存。'}</p></>}
             </aside></div>
           </>}

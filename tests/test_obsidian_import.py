@@ -12,7 +12,7 @@ def setup(tmp_path):
  v=s.store.finish(t['id'],t['lease_token'],r); s.store.review(sid,v['id'],v['content_sha256'],99,'approve','me')
  return s,sid,v
 
-def edit(data,old,new): return data.replace(old.encode(),new.encode())
+def edit(data,old,new): return data.replace(old.encode(),new.encode(),1)
 def preview(s,data): return s.preview(data,'note.md')['preview_id']
 def error(code, f):
  with pytest.raises(WorkflowError) as ex: f()
@@ -110,3 +110,41 @@ def test_tag_only_import_rolls_back_content(setup):
  assert s.store.get_source(sid)['current_version_id']==v['id']
  assert len(s.store.list_versions(sid))==1
  assert s.classification.snapshot(sid)['tags']==[]
+
+def test_title_only_roundtrip_and_concurrency(setup):
+ s,sid,v=setup; data,_=s.export_note(sid)
+ p=preview(s,edit(data,'title: "Title"','title: "New title"'))
+ receipt=s.apply(p,'use_uploaded')
+ assert receipt['title_changed'] and not receipt['content_changed'] and not receipt['review_required']
+ assert s.store.get_source(sid)['current_version_id']==v['id']
+ assert s.store.get_version(v['id'])['result']['title']=='Title'
+ data,_=s.export_note(sid); assert b'title: "New title"' in data
+ p=preview(s,edit(data,'New title','Next title'))
+ s.store.set_display_title(sid,'Concurrent',1,expected_version_id=v['id'])
+ error('title_conflict',lambda:s.apply(p,'use_uploaded'))
+
+def test_title_and_notes_atomic_on_classification_conflict(setup):
+ s,sid,v=setup; data,_=s.export_note(sid)
+ p=preview(s,edit(edit(data,'title: "Title"','title: "New"'),'Notes','Changed'))
+ label=s.classification.create_label('topic','topic'); s.classification.update(sid,0,[label['id']],[])
+ error('classification_conflict',lambda:s.apply(p,'use_uploaded'))
+ data,_=s.export_note(sid); assert b'title: "Title"' in data
+ assert s.store.get_source(sid)['current_version_id']==v['id']
+
+def test_stale_title_export_does_not_overwrite_and_edited_conflicts(setup):
+ s,sid,v=setup; data,_=s.export_note(sid)
+ s.store.set_display_title(sid,'Server title',0,expected_version_id=v['id'])
+ receipt=s.apply(preview(s,edit(data,'Notes','Updated notes')),'use_uploaded')
+ assert not receipt['title_changed']
+ fresh,_=s.export_note(sid); assert b'title: "Server title"' in fresh
+ p=preview(s,edit(data,'title: "Title"','title: "Client title"'))
+ error('title_conflict',lambda:s.apply(p,'use_uploaded'))
+
+def test_legacy_stale_title_is_not_overwritten(setup):
+ s,sid,v=setup; data,_=s.export_note(sid)
+ data=data.replace(b'base_display_title: "Title"\n',b'').replace(b'title_revision: 0\n',b'')
+ s.store.set_display_title(sid,'Server title',0,expected_version_id=v['id'])
+ receipt=s.apply(preview(s,edit(data,'Notes','Legacy notes')),'use_uploaded')
+ assert receipt['content_changed'] and not receipt['title_changed']
+ p=preview(s,edit(data,'title: "Title"','title: "Legacy edit"'))
+ error('title_conflict',lambda:s.apply(p,'use_uploaded'))

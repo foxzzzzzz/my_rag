@@ -1,7 +1,7 @@
 import hashlib, json, time, uuid
 from pathlib import Path
 from .workflow import make_store, run_once, _root, _hash, render_markdown
-from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
+from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError, title_metadata
 
 
 def _display_title(title, original_name, platform_title):
@@ -295,9 +295,10 @@ class WebService:
                 sid = row['id']
                 catalog = _version_catalog(c, row, row['platform_title'])
                 catalogs[sid] = catalog
+                title = title_metadata(c, sid)['display_title']
                 sources[sid] = {
                     'id': sid, 'kind': row['kind'], 'original_name': row['original_name'], 'deleted': bool(row['deleted']),
-                    'title': catalog.get(row['current_version_id'], {}).get('title') or row['platform_title'],
+                    'title': title or catalog.get(row['current_version_id'], {}).get('title') or row['platform_title'],
                     'current_version_id': row['current_version_id'],
                 }
                 views.update(_task_views(grouped[sid], catalog))
@@ -309,7 +310,7 @@ class WebService:
             view = views.get(task['id'])
             item.update(source=source, view_version_id=view, reprocess=bool(task['base_version_id']),
                         viewing_history=bool(source and view and view != source['current_version_id']))
-            if source and view:
+            if source and view and view != source['current_version_id']:
                 item['source'] = {**source, 'title': catalogs[sid][view]['title']}
             items.append(item)
         return {'items': items}
@@ -333,14 +334,19 @@ class WebService:
             with self.store._tx() as c:
                 metadata=classifications.snapshot(s['id'],connection=c)
                 review=c.execute('SELECT decision,seq FROM reviews WHERE version_id=? ORDER BY seq DESC LIMIT 1',(s['current_version_id'],)).fetchone()
-                platform=c.execute('SELECT title FROM source_display_titles WHERE source_id=?',(s['id'],)).fetchone()
-                platform_title=platform['title'] if platform else None
+                titles=title_metadata(c,s['id'])
+                platform_title=titles['original_title']
                 versions=_version_catalog(c,s,platform_title)
-                title=versions.get(s['current_version_id'],{}).get('title') or platform_title or ''
+                title=titles['display_title'] or versions.get(s['current_version_id'],{}).get('title') or platform_title or ''
+                if not platform_title:
+                    titles['original_title']=next((v['title'] for v in versions.values()
+                        if v['output_kind']=='machine_initial' and v['title']),s['original_name'])
             status=review[0] if review else 'pending'
+            d.update(titles)
+            d['title_sync_status']=self.store.title_sync_status(s['id'])
             d.update(title=title,status=tasks.get(s['id'],{}).get('status'),eligible=s['id'] in eligible,content_status=self.store.content_status(s['id']),classification=metadata,review_status=status,review_revision=review['seq'] if review else None)
             if filters.get('kind') and s['kind']!=filters['kind']: continue
-            if filters.get('q') and filters['q'].casefold() not in (s['original_name']+' '+title).casefold(): continue
+            if filters.get('q') and filters['q'].casefold() not in ' '.join((s['original_name'],title,titles['original_title'])).casefold(): continue
             if filters.get('reviews') and status not in filters['reviews']: continue
             if any(filters.get(k) and not set(filters[k]).intersection(x['id'] for x in metadata[k]) for k in ('topics','tags')): continue
             items.append(d)
@@ -380,11 +386,15 @@ class WebService:
         original_url = f'/api/sources/{source_id}/original' if not (current and current['content_pruned_at']) and media['available'] and source['kind'] != 'douyin_album' else None
         return dict(source=source,current=current,versions=list(catalog.values()),review=review,task=task,eligible=source['eligible'],viewing_history=history,frames=frames,media=media,original_url=original_url)
     def review(self, source_id, p):
-        r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
+        title={key:p[key] for key in ('display_title','expected_title_revision') if key in p}
+        r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'),**title)
         eligible=any(s['id']==source_id for s in self.store.eligible_sources())
         if eligible:
             self.rag_auto_index.schedule()
         return {'review':r,'eligible':eligible}
+    def set_display_title(self, source_id, p):
+        return self.store.set_display_title(source_id,p.get('display_title'),p.get('expected_title_revision'),
+                                            expected_version_id=p.get('expected_version_id'))
     def revise(self, source_id, p):
         s=self.store.get_source(source_id)
         if not s['current_version_id']: raise WorkflowError('version_conflict')

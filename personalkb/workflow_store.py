@@ -17,12 +17,22 @@ _UNSET = object()
 ASR_UPLOAD_STAGES = ('asr_upload_policy', 'asr_audio_upload')
 ASR_UPLOAD_TASK_STAGES = (*ASR_UPLOAD_STAGES, 'asr_upload_prepare')
 
+def title_metadata(connection, source_id):
+    row = connection.execute('SELECT title,revision FROM source_title_overrides WHERE source_id=?', (source_id,)).fetchone()
+    original = connection.execute('SELECT title FROM source_display_titles WHERE source_id=?', (source_id,)).fetchone()
+    return {'display_title': row[0] if row else None, 'title_revision': row[1] if row else 0, 'original_title': original[0] if original else None}
+
+def resolve_display_title(metadata, version_title, original_name):
+    return metadata['display_title'] or (metadata['original_title'] if not version_title or version_title == original_name else version_title) or original_name
+
 class WorkflowStore:
-    def __init__(self, db_path, *, quality_target=98, lease_seconds=300, max_attempts=3, busy_timeout_seconds=5, content_root=None, data_root=None, source_trash_days=7):
+    def __init__(self, db_path, *, quality_target=98, lease_seconds=300, max_attempts=3, busy_timeout_seconds=5, content_root=None, data_root=None, source_trash_days=7, max_display_title_chars=200):
         if not _number(quality_target, 0, 100) or not _number(lease_seconds, 0.000001) or not _number(busy_timeout_seconds, 0) or not _number(max_attempts, 1) or int(max_attempts) != max_attempts:
             raise WorkflowError('invalid_config')
         if type(source_trash_days) is not int or not 1 <= source_trash_days <= 3650:
             raise WorkflowError('invalid_config')
+        if type(max_display_title_chars) is not int or max_display_title_chars < 1: raise WorkflowError('invalid_config')
+        self.max_display_title_chars = max_display_title_chars
         self.trash_retention_seconds = source_trash_days * 86400
         self.db_path, self.quality_target, self.lease_seconds, self.max_attempts, self.busy_timeout_seconds = str(db_path), quality_target, lease_seconds, int(max_attempts), busy_timeout_seconds
         self.content_root = Path(content_root).absolute() if content_root else None
@@ -40,12 +50,20 @@ CREATE TRIGGER IF NOT EXISTS content_review_insert AFTER INSERT ON reviews BEGIN
 CREATE TABLE IF NOT EXISTS video_maintenance (id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS source_trash (source_id TEXT PRIMARY KEY, deleted_at REAL NOT NULL, purge_started INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, title TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS source_title_overrides (source_id TEXT PRIMARY KEY, title TEXT, revision INTEGER NOT NULL, synced_revision INTEGER NOT NULL DEFAULT 0, note_sha256 TEXT);
 CREATE TABLE IF NOT EXISTS video_reprocess (task_id TEXT PRIMARY KEY, base_version_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_results (task_id TEXT PRIMARY KEY, version_id TEXT NOT NULL UNIQUE);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
         with self._tx() as c:
             if 'content_pruned_at' not in [r[1] for r in c.execute('PRAGMA table_info(versions)')]:
                 c.execute('ALTER TABLE versions ADD COLUMN content_pruned_at TEXT')
+            review_columns = {r[1] for r in c.execute('PRAGMA table_info(reviews)')}
+            if 'title_request' not in review_columns:
+                c.execute('ALTER TABLE reviews ADD COLUMN title_request TEXT')
+            title_columns = {r[1] for r in c.execute('PRAGMA table_info(source_title_overrides)')}
+            if 'synced_revision' not in title_columns:
+                c.execute('ALTER TABLE source_title_overrides ADD COLUMN synced_revision INTEGER NOT NULL DEFAULT 0')
+                c.execute('ALTER TABLE source_title_overrides ADD COLUMN note_sha256 TEXT')
             c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager
     def _tx(self):
@@ -63,7 +81,9 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         if r is None: raise WorkflowError(table[:-1]+'_not_found')
         d=dict(r)
         if table=='versions': d['result']=json.loads(d['result'])
-        if table=='reviews': d['tags']=json.loads(d['tags'])
+        if table=='reviews':
+            d['tags']=json.loads(d['tags'])
+            d.pop('title_request',None)
         return d
     def import_source(self,kind,sha256,original_name,blob_relpath,*,commit_guard=None, install_blob=None):
         if not isinstance(kind,str) or not kind or not isinstance(sha256,str) or not re.fullmatch(r'[0-9a-f]{64}',sha256) or not isinstance(original_name,str) or not original_name or not isinstance(blob_relpath,str) or not blob_relpath or PurePosixPath(blob_relpath).is_absolute() or PureWindowsPath(blob_relpath).is_absolute() or PureWindowsPath(blob_relpath).drive or '..' in PurePosixPath(blob_relpath.replace('\\','/')).parts:
@@ -225,9 +245,38 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             if s['deleted']: raise WorkflowError('source_deleted')
             if not expected_version_id or s['current_version_id']!=expected_version_id: raise WorkflowError('version_conflict')
             return self._version(c,source_id,result,expected_version_id,True)
-    def review(self,source_id,version_id,content_sha256,score,decision,reviewer,*,review_id=None,note='',tags=None):
+    def _set_display_title(self, c, source_id, title, expected_title_revision, expected_version_id):
+        source = self._row(c, 'sources', source_id)
+        if source['deleted']: raise WorkflowError('source_deleted')
+        if not expected_version_id or source['current_version_id'] != expected_version_id: raise WorkflowError('version_conflict')
+        title = self._title_value(title, expected_title_revision)
+        metadata = title_metadata(c, source_id)
+        if metadata['title_revision'] != expected_title_revision: raise WorkflowError('title_conflict')
+        if metadata['display_title'] != title:
+            c.execute('INSERT INTO source_title_overrides(source_id,title,revision) VALUES(?,?,?) ON CONFLICT(source_id) DO UPDATE SET title=excluded.title,revision=excluded.revision', (source_id,title,expected_title_revision+1))
+        return title_metadata(c, source_id)
+    def _title_value(self, title, expected_revision):
+        if not isinstance(title, str) or len(title) > self.max_display_title_chars or any(ord(ch) < 32 or ord(ch) == 127 for ch in title): raise WorkflowError('invalid_title')
+        if type(expected_revision) is not int or expected_revision < 0: raise WorkflowError('title_conflict')
+        return title.strip() or None
+    def set_display_title(self, source_id, title, expected_title_revision, *, expected_version_id):
+        with self._tx() as c:
+            result = self._set_display_title(c, source_id, title, expected_title_revision, expected_version_id)
+        if self.content_root:
+            from .content_storage import sync_title
+            try: sync_title(self, source_id)
+            except (WorkflowError,OSError): pass
+        return {**result,'title_sync_status':self.title_sync_status(source_id)}
+    def title_sync_status(self, source_id):
+        if not self.content_root: return 'disabled'
+        with self._tx() as c:
+            row = c.execute('SELECT revision,synced_revision FROM source_title_overrides WHERE source_id=?',(source_id,)).fetchone()
+        return 'pending' if row and row[0]!=row[1] else 'synced'
+    def review(self,source_id,version_id,content_sha256,score,decision,reviewer,*,review_id=None,note='',tags=None,display_title=_UNSET,expected_title_revision=None):
         if not _number(score,0,100) or decision not in ('approve','reject','rework') or (decision=='approve' and score<self.quality_target) or not isinstance(reviewer,str) or not reviewer.strip() or not isinstance(note,str) or (tags is not None and (not isinstance(tags,list) or any(not isinstance(t,str) for t in tags))) or (review_id is not None and (not isinstance(review_id,str) or not review_id.strip())): raise WorkflowError('invalid_review')
         rid=review_id or _id(); tags=_json(tags or [])
+        title_request = (None if display_title is _UNSET else
+                         _json([self._title_value(display_title,expected_title_revision),expected_title_revision]))
         with self._tx() as c:
             s=self._row(c,'sources',source_id)
             if s['deleted']: raise WorkflowError('source_deleted')
@@ -235,10 +284,13 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             v=self._row(c,'versions',version_id)
             if v['source_id']!=source_id or v['content_sha256']!=content_sha256: raise WorkflowError('version_conflict')
             old=c.execute('SELECT * FROM reviews WHERE id=?',(rid,)).fetchone()
-            vals=(source_id,version_id,content_sha256,score,decision,reviewer,note,tags)
+            vals=(source_id,version_id,content_sha256,score,decision,reviewer,note,tags,title_request)
             if old:
-                if tuple(old[k] for k in ('source_id','version_id','content_sha256','score','decision','reviewer','note','tags'))!=vals: raise WorkflowError('review_conflict')
-            else: c.execute('INSERT INTO reviews(id,source_id,version_id,content_sha256,score,decision,reviewer,note,tags) VALUES(?,?,?,?,?,?,?,?,?)',(rid,*vals))
+                if tuple(old[k] for k in ('source_id','version_id','content_sha256','score','decision','reviewer','note','tags','title_request'))!=vals: raise WorkflowError('review_conflict')
+            else:
+                c.execute('INSERT INTO reviews(id,source_id,version_id,content_sha256,score,decision,reviewer,note,tags,title_request) VALUES(?,?,?,?,?,?,?,?,?,?)',(rid,*vals))
+                if display_title is not _UNSET:
+                    self._set_display_title(c, source_id, display_title, expected_title_revision, version_id)
             return self._row(c,'reviews',rid)
     def assert_synced(self, source_id):
         if not self.content_root: raise WorkflowError('content_storage_disabled')

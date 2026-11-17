@@ -4,7 +4,7 @@ export const UNCLASSIFIED_TOPIC = Symbol('unclassified');
 export function isUnclassifiedSource(source) {return !source.deleted&&!source.classification?.topics?.length;}
 export function filterSources(sources,filters) {
   const q=(filters.q||'').trim().toLocaleLowerCase();
-  return sources.filter(s=>!s.deleted&&(!filters.unclassified||isUnclassifiedSource(s))&&(!filters.kind||s.kind===filters.kind||(filters.kind==='video'&&s.kind==='mp4'))&&(!filters.review||(s.review_status||'pending')===filters.review)&&(!q||(s.original_name+' '+(s.title||'')).toLocaleLowerCase().includes(q))&&['topics','tags'].every(kind=>!(filters[kind]||[]).length||(s.classification?.[kind]||[]).some(x=>filters[kind].includes(x.id))));
+  return sources.filter(s=>!s.deleted&&(!filters.unclassified||isUnclassifiedSource(s))&&(!filters.kind||s.kind===filters.kind||(filters.kind==='video'&&s.kind==='mp4'))&&(!filters.review||(s.review_status||'pending')===filters.review)&&(!q||[s.original_name,s.title,s.original_title].join(' ').toLocaleLowerCase().includes(q))&&['topics','tags'].every(kind=>!(filters[kind]||[]).length||(s.classification?.[kind]||[]).some(x=>filters[kind].includes(x.id))));
 }
 
 export function douyinErrorText(code) {

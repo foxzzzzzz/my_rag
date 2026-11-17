@@ -13,6 +13,8 @@ export function errorText(status, code) {
   if (code==='task_archived') return '任务已归档，请先取消归档。';
   if (code==='model_recovery_conflict') return '模型步骤或费用已更新，请刷新任务后重新确认。';
   if (code==='version_conflict') return '资料版本已更新，请在最新版本上重新操作。';
+  if (code==='title_conflict') return '资料标题已在别处更新，请重新加载详情后再修改。';
+  if (code==='invalid_title') return '资料标题过长或含换行等无效字符。';
   if (code==='favorites_price_changed') return '单条费用预留已更新，请刷新收藏列表并重新确认。';
   if (code==='favorites_manual_disabled') return '当前无法启动手动付费转换。';
   if (code==='paid_consent_required') return '请先同意本次模型费用。';

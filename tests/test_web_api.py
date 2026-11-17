@@ -304,6 +304,67 @@ class WebApiTests(unittest.TestCase):
         payload=dict(version_id=v['id'],content_sha256=v['content_sha256'],score=50,decision='approve',reviewer='tester',review_id='r1')
         self.assertEqual(self.client.post('/api/sources/'+sid+'/reviews',json=payload,headers=self.h).status_code,400)
 
+    def test_first_review_can_save_title_without_creating_a_version(self):
+        from unittest.mock import patch
+
+        store = self.service.store
+        source = store.import_source('video', 'a'*64, 'clip.mp4', 'clip.mp4')
+        sid, task = source['source']['id'], source['task']['id']
+        (Path(self.wc['data_dir']) / 'clip.mp4').write_bytes(b'video')
+        result = dict(title='clip.mp4', body='Body', summary='Summary', notes='Notes', transcript='Body',
+                      visual='Frame', provenance='provider', output_kind='machine_initial', scheme_id='test',
+                      scheme_version='1', evidence=[{'type':'audio','text':'Body'}])
+        original = '视频平台上的完整标题'
+        with store._tx() as db:
+            db.execute('INSERT INTO source_display_titles VALUES (?,?)', (sid, original))
+        v = store.finish(task, store.claim_specific(task, 'tester')['lease_token'], result)
+        path = f'/api/sources/{sid}'
+        payload = dict(version_id=v['id'], content_sha256=v['content_sha256'], score=99, decision='approve',
+                       reviewer='tester', review_id='first-review', display_title='精简标题', expected_title_revision=0)
+        invalid = self.client.post(path+'/reviews', json={**payload, 'display_title':'bad\nname'}, headers=self.h)
+        assert invalid.json()['error'] == 'invalid_title'
+        pending = self.client.get(path).json()
+        assert pending['review'] is None and pending['source']['title'] == original
+        submitted = self.client.post(path+'/reviews', json=payload, headers=self.h)
+        assert submitted.json()['eligible']
+        assert self.client.post(path+'/reviews', json=payload, headers=self.h).status_code == 200
+        detail = self.client.get(path).json()
+        assert detail['source']['title'] == '精简标题' and detail['source']['original_title'] == original
+        assert detail['current']['result']['title'] == original
+        assert detail['current']['id'] == v['id'] and detail['current']['content_sha256'] == v['content_sha256']
+        assert len(detail['versions']) == 1 and detail['review']['id'] == 'first-review'
+        assert len(self.client.get('/api/sources', params={'q':original}).json()['items']) == 1
+
+        rename = dict(display_title='调整标题', expected_title_revision=1, expected_version_id=v['id'])
+        with patch.object(self.service.rag_auto_index, 'schedule') as schedule:
+            assert self.client.patch(path+'/title', json=rename, headers=self.h).status_code == 200
+            schedule.assert_not_called()
+        assert self.client.patch(path+'/title', json=rename, headers=self.h).json()['error'] == 'title_conflict'
+        renamed = self.client.get(path).json()
+        assert renamed['review'] == detail['review'] and renamed['current'] == detail['current']
+        note = store.content_root / sid / 'note.md'
+        immutable = store.content_root / sid / 'versions' / v['id'] / 'content.md'
+        assert '# 调整标题\n' in note.read_text(encoding='utf-8')
+        assert '# '+original+'\n' in immutable.read_text(encoding='utf-8')
+        assert '# 调整标题\n' in self.client.get('/api/versions/'+v['id']+'/export').text
+
+        task = self.service.dispatcher.reprocess(sid, v['id'], True)['task_id']
+        with store._tx() as db:
+            db.execute("UPDATE tasks SET status='running',lease_token='test',lease_until=9999999999 WHERE id=?", (task,))
+        new = store.finish(task, 'test', {**result, 'body':'New body'})
+        current = self.client.get(path).json()
+        assert current['source']['title'] == '调整标题' and current['source']['original_title'] == original
+        assert current['current']['id'] == new['id'] and len(current['versions']) == 2 and current['review'] is None
+
+    def test_actual_content_edit_still_creates_pending_version(self):
+        sid, v = self.make_version()
+        path = f'/api/sources/{sid}'
+        response = self.client.post(path+'/revisions', json={'expected_version_id':v['id'], 'body':'New body'}, headers=self.h)
+        assert response.status_code == 200
+        detail = self.client.get(path).json()
+        assert len(detail['versions']) == 2 and detail['review'] is None
+        assert detail['current']['result']['body'] == 'New body' and detail['current']['id'] != v['id']
+
     def test_video_tasks_open_their_own_versions_and_keep_the_older_review(self):
         store = self.service.store
         source = store.import_source('video', 'a'*64, 'clip.mp4', 'clip.mp4')

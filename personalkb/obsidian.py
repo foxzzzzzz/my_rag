@@ -58,6 +58,8 @@ class ObsidianService(EditableExport):
                 if not isinstance(fields.get(k),str) or not re.fullmatch('[0-9a-f]{32}',fields[k]): raise ValueError()
             if fields['note_id']!=fields['source_id'] or not isinstance(fields.get('base_content_sha256'),str) or not re.fullmatch('[0-9a-f]{64}',fields['base_content_sha256']): raise ValueError()
             if not isinstance(fields.get('title'),str) or not fields['title'].strip(): raise ValueError()
+            if 'base_display_title' in fields and (not isinstance(fields['base_display_title'],str) or not fields['base_display_title'].strip()): raise ValueError()
+            if 'title_revision' in fields and (type(fields['title_revision']) is not int or fields['title_revision'] < 0): raise ValueError()
             if type(fields.get('classification_revision')) is not int or fields['classification_revision']<0: raise ValueError()
             for k in ('topic_ids','tag_ids'):
                 values=fields[k]
@@ -66,7 +68,7 @@ class ObsidianService(EditableExport):
             if notes.startswith('\n'): notes=notes[1:]
             if not notes.strip(): raise ValueError()
             # No other properties (including review_status) confer authority.
-            return {k:fields[k] for k in ('source_id','base_version_id','base_content_sha256','title','classification_revision','topic_ids','tag_ids')}|{'notes':notes}
+            return {k:fields[k] for k in ('source_id','base_version_id','base_content_sha256','title','classification_revision','topic_ids','tag_ids')}|{'notes':notes, 'title_revision':fields.get('title_revision'), 'base_display_title':fields.get('base_display_title')}
         except (ValueError,KeyError,TypeError,UnicodeError,RecursionError): raise WorkflowError('invalid_obsidian_note') from None
 
     def _read_upload(self, data, filename):
@@ -127,16 +129,21 @@ class ObsidianService(EditableExport):
                     label=c.execute('SELECT kind FROM classification_labels WHERE id=?',(ident,)).fetchone()
                     if not label or label[0]!=kind: raise WorkflowError('classification_not_found')
             current=self.store._row(c,'versions',source['current_version_id'])
+            from .workflow_store import title_metadata, resolve_display_title
+            title = title_metadata(c, sid)
+            candidate['preview_title_revision'] = title['title_revision']
+            current_title = resolve_display_title(title, current['result']['title'], source['original_name'])
             preview_id=uuid.uuid4().hex;raw=_json(candidate)
             c.execute('INSERT INTO obsidian_previews(id,source_id,candidate,candidate_sha256,current_version_id,metadata_revision,expires_at) VALUES(?,?,?,?,?,?,?)',(preview_id,sid,raw,_sha(raw.encode()),current['id'],metadata['revision'],time.time()+self.config['preview_ttl_seconds']))
             labels={r['id']:dict(r) for r in c.execute('SELECT id,name FROM classification_labels')}
             incoming_meta={'topics':[labels[x] for x in candidate['topic_ids']],'tags':[labels[x] for x in candidate['tag_ids']]}
             return {'preview_id':preview_id,'source_id':sid,'base_version_id':base['id'],'current_version_id':current['id'],
-                    'conflict':base['id']!=current['id'] or candidate['classification_revision']!=metadata['revision'],
+                    'conflict':base['id']!=current['id'] or candidate['classification_revision']!=metadata['revision'] or (candidate['title_revision'] is not None and candidate['title_revision']!=title['title_revision']),
+                    'title_conflict':candidate['title_revision'] is not None and candidate['title_revision']!=title['title_revision'],
                     'content_conflict':base['id']!=current['id'],
                     'classification_conflict':candidate['classification_revision']!=metadata['revision'],
                     'incoming_metadata_revision':candidate['classification_revision'],'current_metadata_revision':metadata['revision'],
-                    'current':{'title':current['result']['title'],'notes':current['result']['notes'],'classification':metadata},
+                    'current':{'title':current_title,'notes':current['result']['notes'],'classification':metadata},
                     'incoming':{'title':candidate['title'],'notes':candidate['notes'],'classification':incoming_meta}}
 
     def apply(self,preview_id,choice):
@@ -160,15 +167,40 @@ class ObsidianService(EditableExport):
                     before=self.classification.snapshot(sid,connection=c)
                     if before['revision']!=row['metadata_revision']: raise WorkflowError('classification_conflict')
                     old=self.store._row(c,'versions',source['current_version_id'])
-                    if old['result']['notes'].replace('\r\n','\n')!=candidate['notes'] or old['result']['title']!=candidate['title']:
-                        material={**old['result'],'title':candidate['title'],'notes':candidate['notes'],'provenance':'human_edited','output_kind':'human_edited'}
+                    from .workflow_store import title_metadata, resolve_display_title
+                    title = title_metadata(c, sid)
+                    if title['title_revision'] != candidate.get('preview_title_revision', 0): raise WorkflowError('title_conflict')
+                    current_title = resolve_display_title(title, old['result']['title'], source['original_name'])
+                    base_title = candidate.get('base_display_title')
+                    base_revision = candidate.get('title_revision')
+                    if base_title is None:
+                        base = self.store._row(c,'versions',candidate['base_version_id'])
+                        base_title = base['result'].get('title')
+                        if base_revision is None:
+                            base_revision = 0
+                        # A legacy export at the current title revision used the current display title.
+                        if base_revision == title['title_revision'] and base_revision:
+                            base_title = current_title
+                    edited = candidate['title'].strip() != (base_title or '').strip()
+                    title_changed = edited and candidate['title'].strip() != current_title
+                    if title_changed and base_revision != title['title_revision']:
+                        raise WorkflowError('title_conflict')
+                    if title_changed: self.store._set_display_title(c, sid, candidate['title'], title['title_revision'], old['id'])
+                    result['title_changed'] = title_changed
+                    if old['result']['notes'].replace('\r\n','\n')!=candidate['notes']:
+                        material={**old['result'],'notes':candidate['notes'],'provenance':'human_edited','output_kind':'human_edited'}
                         version=self.store._version(c,sid,material,old['id'],True)
                         result.update(version_id=version['id'],content_changed=True,review_required=True)
                     after=self.classification.update_in_transaction(c,sid,row['metadata_revision'],candidate['topic_ids'],candidate['tag_ids'])
                     result['classification_changed']=before['revision']!=after['revision']
-                    result['changed']=result['content_changed'] or result['classification_changed']
+                    result['changed']=result['content_changed'] or result['classification_changed'] or result.get('title_changed', False)
                 c.execute('UPDATE obsidian_previews SET applied_choice=?,receipt=? WHERE id=?',(choice,_json(result),preview_id))
         if self.store.content_root:
-            try:self.store.sync_source(sid)
-            except Exception:pass
-        return {**result,'content_status':self.store.content_status(sid)}
+            try:
+                if result['content_changed'] or result['classification_changed']:
+                    self.store.sync_source(sid)
+                elif result.get('title_changed'):
+                    from .content_storage import sync_title
+                    sync_title(self.store, sid)
+            except (WorkflowError,OSError): pass
+        return {**result,'content_status':self.store.content_status(sid),'title_sync_status':self.store.title_sync_status(sid)}

@@ -9,6 +9,10 @@ class Fake:
     def start(self): pass
     def stop(self): pass
     def sources(self): return {'items':[]}
+    def review(self, source_id, payload):
+        if not payload.get('score'):
+            raise WorkflowError('invalid_review')
+        return {'review': {'source_id': source_id}}
 
 @pytest.fixture
 def setup(tmp_path):
@@ -38,6 +42,7 @@ def test_public_and_login_flow(setup):
         r=client.post('/api/auth/login',json={'password':'correct horse'},headers=h)
         assert r.status_code==200
         assert all(x in r.headers['set-cookie'].lower() for x in ('secure','httponly','samesite=strict'))
+        assert 'max-age=86400' in r.headers['set-cookie'].lower()
         token=client.get('/api/session').json()['csrf_token']
         assert client.get('/api/sources').status_code==200
         assert client.post('/api/auth/logout',headers=h).status_code==403
@@ -88,3 +93,116 @@ def test_private_cache_headers_and_public_write(setup):
         assert client.post('/api/auth/login',json={'password':'correct horse'},headers={'origin':'https://testserver'}).status_code==200
         response=client.get('/assets/index-old.js')
         assert response.status_code==200 and response.headers['cache-control']=='no-store'
+
+
+def test_sliding_session_activity_and_polling(setup, monkeypatch):
+    import personalkb.web_app as web_app
+    now = [1000.0]
+    monkeypatch.setattr(web_app, 'monotonic', lambda: now[0])
+    c, wc = setup
+    c['session_ttl_seconds'] = 100
+    origin = {'origin': 'https://testserver'}
+    with TestClient(create_app(wc, None, c, Fake()), base_url='https://testserver') as client:
+        assert client.post('/api/auth/login', json={'password': 'correct horse'}, headers=origin).status_code == 200
+        csrf = client.get('/api/session').json()['csrf_token']
+        now[0] = 1080
+        for response in (client.get('/api/sources'), client.get('/api/session')):
+            assert response.status_code == 200
+            assert 'set-cookie' not in response.headers
+        response = client.get('/api/sources', headers={'X-PKB-Activity': 'user'})
+        assert response.status_code == 200 and 'Max-Age=100' in response.headers['set-cookie']
+        now[0] = 1160
+        response = client.post('/api/auth/activity', headers={**origin, 'x-csrf-token': csrf})
+        assert response.status_code == 200 and 'set-cookie' in response.headers
+        now[0] = 1240
+        response = client.post('/api/auth/activity', headers=origin)
+        assert response.status_code == 403 and 'set-cookie' not in response.headers
+        now[0] = 1261
+        response = client.get('/api/sources', headers={'X-PKB-Activity': 'user'})
+        assert response.status_code == 401
+        assert 'set-cookie' not in response.headers or 'max-age=0' in response.headers['set-cookie'].lower()
+
+
+def test_successful_review_slides_but_failed_requests_do_not(setup, monkeypatch):
+    import personalkb.web_app as web_app
+
+    now = [1000.0]
+    monkeypatch.setattr(web_app, 'monotonic', lambda: now[0])
+    c, wc = setup
+    c['session_ttl_seconds'] = 100
+    origin = {'origin': 'https://testserver'}
+    with TestClient(create_app(wc, None, c, Fake()), base_url='https://testserver') as client:
+        assert client.post('/api/auth/login', json={'password': 'correct horse'}, headers=origin).status_code == 200
+        csrf = client.get('/api/session').json()['csrf_token']
+        headers = {**origin, 'x-csrf-token': csrf}
+        path = '/api/sources/test/reviews'
+        now[0] = 1090
+        response = client.post(path, json={'score': 99}, headers=headers)
+        assert response.status_code == 200 and 'Max-Age=100' in response.headers['set-cookie']
+        now[0] = 1175
+        failed_review = client.post(path, json={}, headers=headers)
+        missing_read = client.get('/api/unknown', headers={'X-PKB-Activity': 'user'})
+        assert failed_review.status_code == 400 and 'set-cookie' not in failed_review.headers
+        assert missing_read.status_code == 404 and 'set-cookie' not in missing_read.headers
+        now[0] = 1191
+        assert client.get('/api/session').status_code == 401
+
+
+def test_logout_cannot_be_revived_by_activity(setup, monkeypatch):
+    import personalkb.web_app as web_app
+    now = [1000.0]
+    monkeypatch.setattr(web_app, 'monotonic', lambda: now[0])
+    c, wc = setup
+    c['session_ttl_seconds'] = 100
+    origin = {'origin': 'https://testserver'}
+    with TestClient(create_app(wc, None, c, Fake()), base_url='https://testserver') as client:
+        assert client.post('/api/auth/login', json={'password': 'correct horse'}, headers=origin).status_code == 200
+        cookie = client.cookies.get('pkb_session')
+        csrf = client.get('/api/session').json()['csrf_token']
+        assert client.post('/api/auth/logout', headers={**origin, 'x-csrf-token': csrf}).status_code == 200
+        response = client.get('/api/sources', headers={'cookie': 'pkb_session=' + cookie, 'X-PKB-Activity': 'user'})
+        assert response.status_code == 401
+
+
+def test_polling_alone_expires_at_the_original_deadline(setup, monkeypatch):
+    import personalkb.web_app as web_app
+
+    now = [1000.0]
+    monkeypatch.setattr(web_app, 'monotonic', lambda: now[0])
+    c, wc = setup
+    c['session_ttl_seconds'] = 100
+    origin = {'origin': 'https://testserver'}
+    with TestClient(create_app(wc, None, c, Fake()), base_url='https://testserver') as client:
+        assert client.post('/api/auth/login', json={'password': 'correct horse'}, headers=origin).status_code == 200
+        for elapsed in (30, 60, 90, 99):
+            now[0] = 1000 + elapsed
+            assert client.get('/api/sources').status_code == 200
+            assert client.get('/api/session', headers={'X-PKB-Activity':'user'}).status_code == 200
+        now[0] = 1100
+        assert client.get('/api/sources', headers={'X-PKB-Activity':'user'}).status_code == 401
+
+def test_stream_error_does_not_renew_but_explicit_activity_does(setup, monkeypatch):
+    from personalkb import web_app
+    now = [1000]
+    monkeypatch.setattr(web_app, 'monotonic', lambda: now[0])
+    c, wc = setup
+    c['session_ttl_seconds'] = 100
+    class Answers:
+        def stream(self, **kwargs):
+            yield {'type': 'error', 'code': 'internal_error'}
+    service = Fake()
+    service.rag_answers = Answers()
+    origin = {'origin': 'https://testserver'}
+    with TestClient(create_app(wc, None, c, service), base_url='https://testserver') as client:
+        client.post('/api/auth/login', json={'password': 'correct horse'}, headers=origin)
+        csrf = client.get('/api/session').json()['csrf_token']
+        headers = {**origin, 'x-csrf-token': csrf}
+        now[0] = 1090
+        response = client.post('/api/rag/stream', json={'question':'test','allow_paid':False,'request_id':'a','mode':'lexical'}, headers=headers)
+        assert response.status_code == 200 and '"type": "error"' in response.text
+        assert 'set-cookie' not in response.headers
+        now[0] = 1095
+        response = client.post('/api/auth/activity', headers=headers)
+        assert response.status_code == 200 and 'set-cookie' in response.headers
+        now[0] = 1101
+        assert client.get('/api/sources').status_code == 200
