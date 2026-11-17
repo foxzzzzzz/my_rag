@@ -36,4 +36,6 @@ For scheduled backups, copy `deploy/systemd/personalkb-backup.service.template` 
 
 The timer and manual runs use `sh deploy/operate.sh daily`. It stops the project services, creates and verifies a cold snapshot, and restores the previously running project services even after failure. The latest result is written to `$STATE_DIR/backup-status.json`. Set `keep_snapshots`, `video_retention_days`, and `auto_retention_enabled` in `maintenance.json`. Manual storage requires a separate external copy. OSS storage pushes the verified snapshot when explicitly configured.
 
+`version_history_retention` in `maintenance.json` controls history cleanup in `daily`. The shipped configuration enables it with `approved_history: 1` and `other_history: 1`. Existing mounted configurations without this section leave it disabled. Cleanup starts after the snapshot passes verification and is published. A plain `backup` creates a snapshot with no history cleanup. The backup repository retains the pre-cleanup snapshot through any interrupted attempts and the successful retry, then resumes normal rotation on the next backup. The daily report records cleanup counts, skipped sources, and the pre-cleanup snapshot ID when available.
+
 ZIP extraction tools may not restore executable permissions; the `sh deploy/operate.sh` commands above do not depend on the executable bit.

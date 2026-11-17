@@ -38,9 +38,21 @@ def _no_links(p):
         raise WorkflowError('unsafe_path')
 
 
+def version_history_policy(config):
+    policy = config.get('version_history_retention')
+    if 'version_history_retention' not in config:
+        return {'enabled': False}
+    if (not isinstance(policy, dict) or type(policy.get('enabled')) is not bool
+            or any(type(policy.get(key)) is not int or policy[key] < 0
+                   for key in ('approved_history', 'other_history'))):
+        raise WorkflowError('invalid_maintenance_config')
+    return policy
+
+
 def load_config(path):
     try:
         c = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        version_history_policy(c)
         c['workflow_config'] = str(_path(c['workflow_config']))
         c['backup_root'] = str(_path(c['backup_root']))
         c['ledger_paths'] = [str(_path(x)) for x in c['ledger_paths']]
@@ -130,12 +142,29 @@ def _check_active_index(path):
 
 
 def create(config):
+    return _create(config)['snapshot']
+
+
+def create_and_prune_version_history(config):
+    if not version_history_policy(config)['enabled']:
+        raise WorkflowError('version_history_retention_disabled')
+    return _create(config, prune_history=True)
+
+
+def _create(config, *, prune_history=False):
     from .rag_index import GENERATION_FILE, STAGING_FILE
     store = _guard_store(config)
     root = Path(config['backup_root']); _no_links(root); root.mkdir(parents=True, exist_ok=True)
     objects = root / 'objects'; manifests = root / 'snapshots'
     for p in (objects, manifests): _no_links(p); p.mkdir(exist_ok=True)
     with maintenance_guard(store), tempfile.TemporaryDirectory(dir=root, prefix='.stage-') as temp:
+        checkpoint = root / 'version-history-pending'
+        _no_links(checkpoint)
+        recovery_snapshot = checkpoint.read_text(encoding='ascii').strip() if checkpoint.exists() else None
+        if recovery_snapshot is not None:
+            recovery_manifest = _manifest(root, recovery_snapshot)
+            if prune_history:
+                _verify_objects(root, recovery_manifest)
         store = make_store(config['_workflow'])
         staging = Path(temp); files = []
         data = Path(store.data_root)
@@ -208,13 +237,35 @@ def create(config):
         os.replace(part, destination)
         keep_previous = config['keep_snapshots'] - 1
         retained = [manifest, *checked[:keep_previous]]
-        for old in existing[keep_previous:]: old.unlink()
+        for old, old_manifest in zip(existing[keep_previous:], checked[keep_previous:]):
+            if old.stem == recovery_snapshot:
+                retained.append(old_manifest)
+            else:
+                old.unlink()
         referenced = {i['sha256'] for m in retained for i in m['files']}
         for obj in objects.iterdir():
             if len(obj.name) == 64 and all(c in '0123456789abcdef' for c in obj.name) and obj.name not in referenced:
                 _no_links(obj)
                 if obj.is_file(): obj.unlink()
-        return identifier
+        result = {'snapshot': identifier}
+        if prune_history:
+            from .version_retention import prune
+            result['version_history_recovery_snapshot'] = recovery_snapshot if recovery_snapshot is not None else identifier
+            try:
+                if recovery_snapshot is None:
+                    pending = staging / checkpoint.name
+                    with pending.open('w', encoding='ascii') as stream:
+                        stream.write(identifier + '\n')
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(pending, checkpoint)
+                result['version_history_retention'] = prune(
+                    store, version_history_policy(config), retry_only=recovery_snapshot is not None,
+                )
+                checkpoint.unlink()
+            except Exception as error:
+                result['version_history_error'] = getattr(error, 'code', type(error).__name__)
+        return result
 
 
 def _validate_manifest(manifest):

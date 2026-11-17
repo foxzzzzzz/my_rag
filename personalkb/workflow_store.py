@@ -30,7 +30,7 @@ class WorkflowStore:
         with self._tx() as c:
             c.executescript('''CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, kind TEXT NOT NULL, sha256 TEXT NOT NULL, original_name TEXT NOT NULL, blob_relpath TEXT NOT NULL, current_version_id TEXT, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(kind,sha256));
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, worker_id TEXT, lease_token TEXT, lease_until REAL, stage TEXT, remote_task_id TEXT, external_started INTEGER NOT NULL DEFAULT 0, error_code TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
-CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, content_sha256 TEXT NOT NULL, result TEXT NOT NULL, output_kind TEXT NOT NULL, parent_version_id TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, content_sha256 TEXT NOT NULL, result TEXT NOT NULL, output_kind TEXT NOT NULL, parent_version_id TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), content_pruned_at TEXT);
 CREATE TABLE IF NOT EXISTS reviews (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, source_id TEXT NOT NULL, version_id TEXT NOT NULL, content_sha256 TEXT NOT NULL, score REAL NOT NULL, decision TEXT NOT NULL, reviewer TEXT NOT NULL, note TEXT NOT NULL, tags TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
 CREATE TABLE IF NOT EXISTS content_sync (source_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, synced_generation INTEGER NOT NULL DEFAULT 0, state_sha256 TEXT);
 CREATE TRIGGER IF NOT EXISTS content_source_insert AFTER INSERT ON sources BEGIN INSERT INTO content_sync(source_id,generation) VALUES(NEW.id,1); END;
@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, ti
 CREATE TABLE IF NOT EXISTS video_reprocess (task_id TEXT PRIMARY KEY, base_version_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_results (task_id TEXT PRIMARY KEY, version_id TEXT NOT NULL UNIQUE);
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
+        with self._tx() as c:
+            if 'content_pruned_at' not in [r[1] for r in c.execute('PRAGMA table_info(versions)')]:
+                c.execute('ALTER TABLE versions ADD COLUMN content_pruned_at TEXT')
             c.execute('INSERT OR IGNORE INTO source_trash(source_id,deleted_at) SELECT id,? FROM sources WHERE deleted=1', (time.time(),))
     @contextmanager
     def _tx(self):

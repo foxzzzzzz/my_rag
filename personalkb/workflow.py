@@ -223,15 +223,12 @@ def export_version(config, version_id, output_dir):
     from personalkb.workflow_store import WorkflowError
     store = make_store(config)
     version = store.get_version(version_id)
-    raw = json.dumps(version['result'], ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
-    if hashlib.sha256(raw.encode()).hexdigest() != version['content_sha256']:
-        raise WorkflowError('version_integrity')
+    content = render_markdown(store, version)
     root = _root(config).resolve()
     out = Path(output_dir).resolve()
     if not out.is_relative_to(root): raise WorkflowError('invalid_output_path')
     out.mkdir(parents=True, exist_ok=True)
     target = out / (version['id'] + '.md')
-    content = render_markdown(store, version)
     temp = out / ('.' + uuid.uuid4().hex + '.tmp')
     try:
         with temp.open('xb') as f: f.write(content.encode('utf8'))
@@ -244,6 +241,8 @@ def export_version(config, version_id, output_dir):
 def render_markdown(store, version):
     """Render the same version and review state for each export surface."""
     from personalkb.workflow_store import WorkflowError
+    if version.get('content_pruned_at'):
+        raise WorkflowError('version_content_pruned')
     raw = json.dumps(version['result'], ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
     if hashlib.sha256(raw.encode()).hexdigest() != version['content_sha256']:
         raise WorkflowError('version_integrity')

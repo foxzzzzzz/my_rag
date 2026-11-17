@@ -57,7 +57,7 @@ def sync(store, sid):
         dirty=c.execute('SELECT generation FROM content_sync WHERE source_id=?',(sid,)).fetchone()
         if not dirty: raise WorkflowError('content_not_tracked')
         generation=dirty[0]; entries={}
-        versions=[store._row(c,'versions',x[0]) for x in c.execute('SELECT id FROM versions WHERE source_id=? ORDER BY rowid',(sid,)).fetchall()]
+        versions=[store._row(c,'versions',x[0]) for x in c.execute('SELECT id FROM versions WHERE source_id=? AND content_pruned_at IS NULL ORDER BY rowid',(sid,)).fetchall()]
         for v in versions:
             raw=json.dumps(v['result'],ensure_ascii=False,sort_keys=True,separators=(',', ':'),allow_nan=False).encode()
             if digest(raw)!=v['content_sha256']: raise WorkflowError('version_integrity')

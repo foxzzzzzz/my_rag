@@ -10,7 +10,7 @@ def main():
     parser = argparse.ArgumentParser(description='Cold backup and offline restore')
     parser.add_argument('--config', default='config/maintenance.json')
     sub = parser.add_subparsers(dest='command', required=True)
-    sub.add_parser('create')
+    p = sub.add_parser('create'); p.add_argument('--prune-version-history', action='store_true')
     p = sub.add_parser('push'); p.add_argument('snapshot')
     p = sub.add_parser('pull'); p.add_argument('snapshot')
     p = sub.add_parser('retention'); p.add_argument('--apply', action='store_true')
@@ -34,11 +34,15 @@ def main():
             elif args.command == 'purge-trash':
                 from personalkb.trash_purge import purge
                 result = purge(config, apply=args.apply)
-            elif args.command == 'create': result = {'snapshot': maintenance.create(config)}
+            elif args.command == 'create':
+                result = (maintenance.create_and_prune_version_history(config) if args.prune_version_history
+                          else {'snapshot': maintenance.create(config)})
             elif args.command == 'verify': result = maintenance.verify(config, args.snapshot)
             elif args.command == 'export': result = {'archive': maintenance.export(config, args.snapshot, args.output)}
             else: result = maintenance.restore(config, args.snapshot, args.target_empty_dir)
         print(json.dumps(result, ensure_ascii=False))
+        if 'version_history_error' in result:
+            return 1
     except Exception as e:
         print(json.dumps({'error': getattr(e, 'code', type(e).__name__)}, ensure_ascii=False), file=sys.stderr)
         return 1

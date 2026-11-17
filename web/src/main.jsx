@@ -315,9 +315,9 @@ function App() {
               {isVideo(source.kind)?'视频':source.kind==='douyin_album'?'图文':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
-            {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}</option>)}</select></label>}
-            {detail.viewing_history&&<p className="notice">正在查看历史版本，仅供阅读。 <a href={'/api/versions/'+current.id+'/export'}>下载此版本 Markdown 与证据</a></p>}
-            {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
+            {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}{version.content_pruned_at?' · 内容已清理':''}</option>)}</select></label>}
+            {detail.viewing_history&&<p className="notice">{current.content_pruned_at?'此历史版本的内容已清理，保留版本信息和审核记录。':<>正在查看历史版本，仅供阅读。 <a href={'/api/versions/'+current.id+'/export'}>下载此版本 Markdown 与证据</a></>}</p>}
+            {!current?.content_pruned_at&&detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
           </div>
           {!current?<section><p>尚未生成可审核内容。</p><button onClick={()=>navigate('tasks')}>到任务页处理</button></section>:<>
             {(stale||source.content_status&&source.content_status!=='synced')&&<p className="error" role="alert">{stale?'版本或连接状态已变化，旧草稿不会提交到新版本。':'长期内容尚未同步或校验失败，不能用于正式知识库。'} <button onClick={reloadDetail}>重新加载详情</button></p>}
@@ -357,6 +357,7 @@ function App() {
                   if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){detailRef.current=null;setDetail(null);navigate('library');}await refresh();
                 }))}>确认删除资料</button></details>
               </section>}
+              {current.content_pruned_at?<section aria-label="版本信息"><h2>版本信息</h2><p>版本 ID：{current.id}</p><p>创建时间：{formatDate(current.created_at,session.config.display_timezone)}</p><p>内容清理时间：{formatDate(current.content_pruned_at,session.config.display_timezone)}</p><p>内容 SHA-256：{current.content_sha256}</p></section>:<>
               {offlineHtml&&<p className="notice">离线正文预览，尚未调用模型整理。</p>}
               {source.kind==='douyin_album'&&result.processing&&<p className="muted">
                 费用预留上限 ¥{result.processing.reserved_cny}
@@ -396,9 +397,10 @@ function App() {
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               </div>}
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
+              </>}
             </div>
             <aside className="review-panel" aria-label={detail.viewing_history?'历史版本审核记录':'审核当前版本'}><h2>{detail.viewing_history?'审核记录':'审核'}</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
-              {detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
+              {!current?.content_pruned_at&&detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
               {detail.review&&<><p className="muted">{detail.review.reviewer} · {formatDate(detail.review.created_at,session.config.display_timezone)}</p><p>审核意见：{detail.review.note||'无'}</p></>}
               {!detail.viewing_history&&<><p className="muted">批准门槛 {session.config.quality_target} 分。修改内容生成新版本后须重新审核。</p>
               <label>审核人<input disabled={busy} value={draft.reviewer} onChange={event=>patchDraft({reviewer:event.target.value})}/></label><label>评分<input disabled={busy} type="number" min="0" max="100" step={ui.review_score_step} value={draft.score} onChange={event=>patchDraft({score:event.target.value})}/></label>

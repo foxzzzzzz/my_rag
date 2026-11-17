@@ -282,6 +282,41 @@ def test_production_enables_daily_retention(tmp_path):
     assert json.loads((ROOT/'config/maintenance.json').read_text(encoding='utf-8-sig'))['auto_retention_enabled'] is False
     assert json.loads((tmp_path/'maintenance.json').read_text(encoding='utf-8'))['auto_retention_enabled'] is True
 
+
+def test_daily_prunes_only_through_verified_backup_command(tmp_path, monkeypatch):
+    import subprocess, pytest
+    d = module('daily_version_retention', 'deploy/daily.py')
+    cfg = tmp_path / 'maintenance.json'
+    cfg.write_text(json.dumps({'storage_mode': 'manual', 'version_history_retention': {'enabled': True}}))
+    report = tmp_path / 'report.json'
+    calls = []
+
+    def run(cmd, **kwargs):
+        args = cmd[cmd.index('/app/config/maintenance.json') + 1:]
+        calls.append(args)
+        payload = {'snapshot': 'verified', 'version_history_recovery_snapshot': 'verified',
+                   'version_history_retention': {'pruned': 2}} if args[0] == 'create' else {}
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    d.daily(cfg, report)
+    assert calls == [['create', '--prune-version-history'], ['purge-trash', '--apply']]
+    assert json.loads(report.read_text())['version_history_retention'] == {'pruned': 2}
+    assert json.loads(report.read_text())['version_history_recovery_snapshot'] == 'verified'
+
+    def fail(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd, output=json.dumps({
+            'snapshot': 'verified', 'version_history_recovery_snapshot': 'before-cleanup', 'version_history_error': 'OSError',
+        }))
+
+    monkeypatch.setattr(subprocess, 'run', fail)
+    with pytest.raises(subprocess.CalledProcessError):
+        d.daily(cfg, report)
+    status = json.loads(report.read_text())
+    assert status['state'] == 'failed' and status['snapshot'] == 'verified'
+    assert status['version_history_recovery_snapshot'] == 'before-cleanup'
+    assert status['version_history_error'] == 'OSError'
+
 def _restore_health_fixture(tmp_path, monkeypatch):
     from types import SimpleNamespace
     h=module('restore_health_test','deploy/restore_health.py')

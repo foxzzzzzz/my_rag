@@ -14,7 +14,19 @@ def daily(config, report):
                 name=cfg['oss'][key]
                 if not isinstance(name,str) or not re.fullmatch(r'[A-Z_][A-Z0-9_]*',name): raise ValueError('invalid credential variable name')
                 if name in os.environ: env_args.extend(['-e',name])
-        p=subprocess.run(['docker','compose','--project-name',project,'--profile',profile,'run','--rm',*env_args,service,'python','-m','tools.maintenance','--config','/app/config/maintenance.json',command,*args],capture_output=True,text=True,check=True)
+        cmd=['docker','compose','--project-name',project,'--profile',profile,'run','--rm',*env_args,service,'python','-m','tools.maintenance','--config','/app/config/maintenance.json',command,*args]
+        try:
+            p=subprocess.run(cmd,capture_output=True,text=True,check=True)
+        except subprocess.CalledProcessError as error:
+            if '--prune-version-history' in args and error.stdout:
+                try:
+                    backup=json.loads(error.stdout)
+                    result.update(snapshot=backup['snapshot'],version_history_error=backup['version_history_error'])
+                    if 'version_history_recovery_snapshot' in backup:
+                        result['version_history_recovery_snapshot']=backup['version_history_recovery_snapshot']
+                except (ValueError,TypeError,KeyError):
+                    pass
+            raise
         return json.loads(p.stdout)
     try:
         cfg=json.loads(Path(config).read_text(encoding='utf-8-sig'))
@@ -22,8 +34,17 @@ def daily(config, report):
         if mode not in ('manual','oss'): raise ValueError('invalid storage mode')
         enabled=cfg.get('auto_retention_enabled',False)
         if type(enabled) is not bool: raise ValueError('invalid retention setting')
-        result['snapshot']=run('maintenance','maintenance','create')['snapshot']
-        run('maintenance','maintenance','verify',result['snapshot'])
+        history=cfg.get('version_history_retention',{})
+        if not isinstance(history,dict) or type(history.get('enabled',False)) is not bool:
+            raise ValueError('invalid version history retention setting')
+        create_args=('--prune-version-history',) if history.get('enabled',False) else ()
+        backup=run('maintenance','maintenance','create',*create_args)
+        result['snapshot']=backup['snapshot']
+        if create_args:
+            result['version_history_retention']=backup['version_history_retention']
+            result['version_history_recovery_snapshot']=backup['version_history_recovery_snapshot']
+        else:
+            run('maintenance','maintenance','verify',result['snapshot'])
         result['trash_purge'] = run('maintenance','maintenance','purge-trash','--apply')
         if enabled:
             result['retention']['result']=run('maintenance','maintenance','retention','--apply')

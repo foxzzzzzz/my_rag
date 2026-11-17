@@ -12,7 +12,7 @@ def _display_title(title, original_name, platform_title):
 def _version_catalog(connection, source, platform_title):
     versions = {}
     for row in connection.execute("""SELECT id,source_id,content_sha256,output_kind,parent_version_id,created_at,
-            json_extract(result,'$.title') AS title FROM versions WHERE source_id=? ORDER BY rowid""", (source['id'],)):
+            content_pruned_at,json_extract(result,'$.title') AS title FROM versions WHERE source_id=? ORDER BY rowid""", (source['id'],)):
         version = dict(row)
         if version['output_kind'] == 'machine_initial':
             version['title'] = _display_title(version['title'], source['original_name'], platform_title)
@@ -362,7 +362,7 @@ class WebService:
             source={**source, 'title':catalog[selected]['title'], 'eligible':False,
                     'review_status':review['decision'] if review else 'pending',
                     'review_revision':review['seq'] if review else None}
-        allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at')
+        allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at','content_pruned_at')
         result_fields=('title','body','summary','summary_structure','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','images','processing')
         if current: current={**{k:current[k] for k in allowed},'result':{k:current['result'][k] for k in result_fields if k in current['result']}}
         if current:
@@ -377,7 +377,7 @@ class WebService:
         media=media_status(self.store,source_id)
         if not (_root(self.wc) / self.store.get_source(source_id)['blob_relpath']).is_file():
             media={**media, 'available':False}
-        original_url = f'/api/sources/{source_id}/original' if media['available'] and source['kind'] != 'douyin_album' else None
+        original_url = f'/api/sources/{source_id}/original' if not (current and current['content_pruned_at']) and media['available'] and source['kind'] != 'douyin_album' else None
         return dict(source=source,current=current,versions=list(catalog.values()),review=review,task=task,eligible=source['eligible'],viewing_history=history,frames=frames,media=media,original_url=original_url)
     def review(self, source_id, p):
         r=self.store.review(source_id,p.get('version_id'),p.get('content_sha256'),p.get('score'),p.get('decision'),p.get('reviewer'),review_id=p.get('review_id'),note=p.get('note',''),tags=p.get('tags'))
@@ -421,6 +421,7 @@ class WebService:
             selected=version_id if version_id is not None else source['current_version_id']
             current=self.store._row(c,'versions',selected) if selected is not None else None
             if current and current['source_id'] != source_id: raise WorkflowError('version_not_found')
+            if current and current.get('content_pruned_at'): raise WorkflowError('version_content_pruned')
         frames=(current or {}).get('result',{}).get('frames',[])
         f=next((x for x in frames if x['index']==index),None)
         if not f: raise WorkflowError('frame_not_found')
@@ -450,6 +451,7 @@ class WebService:
         raise WorkflowError('frame_integrity')
     def export(self, version_id):
         v=self.store.get_version(version_id)
+        if v.get('content_pruned_at'): raise WorkflowError('version_content_pruned')
         return render_markdown(self.store, v).encode('utf8'), version_id+'.md'
     def enqueue(self, task_id, mode='run', allow_paid=False): return self.dispatcher.enqueue(task_id,mode=mode,allow_paid=allow_paid)
     def process_next(self):

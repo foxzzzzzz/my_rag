@@ -115,7 +115,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         try: response=await call_next(req)
         except WorkflowError as e:
             code=e.code
-            status=413 if code=='body_too_large' else 404 if code.endswith('_not_found') else 409 if any(x in code for x in ('conflict','stale','state','lease')) else 503 if code in ('disk_low','invalid_config') else 400
+            status=413 if code=='body_too_large' else 404 if code.endswith('_not_found') else 410 if code=='version_content_pruned' else 409 if any(x in code for x in ('conflict','stale','state','lease')) else 503 if code in ('disk_low','invalid_config') else 400
             response=JSONResponse({'error':code},status)
         except Exception: response=JSONResponse({'error':'internal_error'},503)
         response.headers.setdefault('Content-Security-Policy',"default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'")

@@ -15,6 +15,25 @@ class WebServiceTests(unittest.TestCase):
         imported=import_file(self.wc,p,True); self.sid=imported['source']['id']; self.tid=imported['task']['id']
     def tearDown(self): self.tmp.cleanup()
     def finish(self): run_once(self.wc,task_id=self.tid); return self.s.detail(self.sid)['current']
+    def test_pruned_history_exposes_metadata_and_rejects_content_access(self):
+        old = self.finish()
+        self.s.review(self.sid, dict(version_id=old['id'], content_sha256=old['content_sha256'],
+                                    score=99, decision='approve', reviewer='A'))
+        self.s.revise(self.sid, {'expected_version_id':old['id'], 'title':'new'})
+        with self.s.store._tx() as c:
+            c.execute('UPDATE versions SET result=?, content_pruned_at=? WHERE id=?',
+                      (json.dumps({'title':'Hello'}), '2026-11-17T00:00:00Z', old['id']))
+        detail = self.s.detail(self.sid, old['id'])
+        self.assertEqual(detail['current']['content_pruned_at'], '2026-11-17T00:00:00Z')
+        self.assertEqual(detail['current']['result'], {'title':'Hello'})
+        self.assertEqual(detail['review']['decision'], 'approve')
+        self.assertIsNone(detail['original_url'])
+        self.assertEqual(detail['frames'], [])
+        self.assertTrue(next(v for v in detail['versions'] if v['id']==old['id'])['content_pruned_at'])
+        for call in (lambda: self.s.export(old['id']), lambda: self.s.frame(self.sid, 0, old['id'])):
+            with self.assertRaisesRegex(WorkflowError, 'version_content_pruned'):
+                call()
+
     def test_selected_task(self):
         p=self.root/'other.html'; p.write_text('<html><body>Other</body></html>',encoding='utf8'); other=import_file(self.wc,p,True)
         run_once(self.wc,task_id=other['task']['id'])
