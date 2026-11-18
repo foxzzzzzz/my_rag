@@ -36,3 +36,24 @@ def test_prompt_fingerprint_compatibility(loader, keys, prompt_key):
     altered['strategy']['max_context_utf8_bytes'] += 1
     with pytest.raises(WorkflowError, match='fingerprint_conflict'):
         _bind_strategy(Journal(old_fingerprint), 't', 'token', altered, keys)
+
+
+def test_video_note_policy_is_applied_only_to_new_tasks():
+    keys = ('models','strategy','storage','prices','default_profile')
+    config = load_pipeline_config()
+    old = copy.deepcopy(config)
+    old['strategy'].pop('legacy_text_prompt')
+    old['strategy'].pop('previous_text_prompt')
+    for key in ('policy_timeout_seconds', 'policy_timeout_seconds说明',
+                'upload_timeout_seconds', 'upload_timeout_seconds说明'):
+        old['storage'].pop(key, None)
+    fingerprint = _digest({key: old[key] for key in keys})
+    resumed = copy.deepcopy(config)
+    _bind_strategy(Journal(fingerprint), 'task', 'token', resumed, keys)
+    assert resumed['strategy']['text_system_prompt'] == old['strategy']['text_system_prompt']
+    fresh = copy.deepcopy(config)
+    _bind_strategy(Journal(), 'task', 'token', fresh, keys)
+    assert fresh['strategy']['text_system_prompt'].endswith(config['video_notes_prompt_suffix'])
+    html = load_html_config()
+    _bind_strategy(Journal(), 'task', 'token', html, ('models','strategy','prices','scheme_id','extractor_version'))
+    assert config['video_notes_prompt_suffix'] not in html['strategy']['text_system_prompt']

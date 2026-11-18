@@ -1,6 +1,28 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {parseDocument,parseInline,safeLink,structuredSummaryBlocks} from './document-layout.js';
+import {hideVideoNoteTimes} from './video-note-times.js';
+
+test('视频笔记默认隐藏转录定位和抽帧清单，保留正文数字、标点与 Markdown',()=>{
+  const cases=[
+    ['[00:00:00–00:00:05] **注意力**需要缓存 30 秒。','**注意力**需要缓存 30 秒。'],
+    ['以135篇面经为分母（[00:00:08.330–00:00:14.790]）。','以135篇面经为分母。'],
+    ['原句（[00:07:09.920–00:07:15.790]、[00:07:49.460]）。','原句。'],
+    ['来源：语音转录 + 抽样画面（抽样画面时间点 0.100s、13.513s、27.026s）。','来源：语音转录 + 抽样画面。'],
+    ['首屏与12.533s画面表格一致，缓存保留 12.533s。','首屏与画面表格一致，缓存保留 12.533s。'],
+    ['画面 [67.566s]：顶部横条','画面：顶部横条'],
+    ['画面 [189.184s] 与 [202.697s]：两幅示意图','画面：两幅示意图'],
+    ['抽样画面中多处百分比（如 27.026s 的 40%）','抽样画面中多处百分比（如40%）'],
+    ['画面（96.184s）三模块，耗时（30s）。','画面三模块，耗时（30s）。'],
+    ['使用 `[00:12:09]` 作为示例，会议 09:30 开始。','使用 `[00:12:09]` 作为示例，会议 09:30 开始。'],
+    ['[00:12:09](https://example.com) 是链接','[00:12:09](https://example.com) 是链接'],
+    ['真实耗时为30秒，采样周期为0.1s。','真实耗时为30秒，采样周期为0.1s。'],
+    ['片段长度 [30秒] 很短，超时设置为 [30s]。','片段长度 [30秒] 很短，超时设置为 [30s]。'],
+    ['画面中的缓存时长 [30s]，长度 [2.5秒]。','画面中的缓存时长 [30s]，长度 [2.5秒]。'],
+    ['画面 [67.566s] 与 [81.079s]','画面'],
+  ];
+  for(const [input,expected] of cases) assert.equal(hideVideoNoteTimes(input),expected,input);
+});
 test('结构化摘要按字段渲染并校验旧数据',()=>{
   assert.deepEqual(structuredSummaryBlocks({overview:'概述',key_points:['要点一','要点二'],limitations:'范围说明'}),[
     {type:'paragraph',text:'概述'},

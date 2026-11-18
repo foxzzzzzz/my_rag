@@ -1,5 +1,6 @@
-import React from 'react';
+import React, {useId, useMemo, useState} from 'react';
 import {parseDocument,parseInline,structuredSummaryBlocks} from './document-layout';
+import {hideVideoNoteTimeBlocks} from './video-note-times';
 function renderInline(tokens) {
   return tokens.map((token,index)=>{
     if(token.type==='strong')return <strong key={index}>{renderInline(token.children)}</strong>;
@@ -46,4 +47,20 @@ function Blocks({blocks}) {
 export function DocumentView({value,structureSummary,summaryStructure}) {
   const blocks=structureSummary && structuredSummaryBlocks(summaryStructure);
   return <div className="document-reader"><Blocks blocks={blocks||parseDocument(value,{structureSummary})}/></div>;
+}
+
+export function VideoNoteView({value}) {
+  const [showTimes,setShowTimes]=useState(false);
+  const contentId=useId();
+  const blocks=useMemo(()=>parseDocument(value),[value]);
+  const readingBlocks=useMemo(()=>hideVideoNoteTimeBlocks(blocks),[blocks]);
+  const hasTimes=JSON.stringify(blocks)!==JSON.stringify(readingBlocks);
+  const visible=showTimes?blocks:readingBlocks;
+  return <div className="document-reader">
+    {hasTimes&&<button type="button" className="note-times-toggle" aria-controls={contentId} aria-expanded={showTimes}
+      onClick={()=>setShowTimes(value=>!value)}>{showTimes?'收起时间定位':'显示时间定位'}</button>}
+    <div id={contentId}>
+      {visible.length?<Blocks blocks={visible}/>:<p>时间定位已收起。</p>}
+    </div>
+  </div>;
 }

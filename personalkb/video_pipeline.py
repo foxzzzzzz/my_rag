@@ -45,6 +45,10 @@ def _bind_strategy(journal, task_id, token, config, keys):
     old_prompts = _legacy_text_prompts(strategy)
     strategy.pop('legacy_text_prompt', None)
     strategy.pop('previous_text_prompt', None)
+    previous_strategy = dict(strategy)
+    suffix = config.get('video_notes_prompt_suffix') if 'storage' in keys else None
+    if suffix:
+        strategy['text_system_prompt'] += '\n' + suffix
     config['strategy'] = strategy
     inputs = {key: config[key] for key in keys}
     if 'storage' in inputs:
@@ -55,6 +59,8 @@ def _bind_strategy(journal, task_id, token, config, keys):
     fingerprint = _digest(inputs)
     legacy_strategy = {key: value for key, value in strategy.items() if key not in ('summary_format', 'summary_format说明')}
     compatible = [{**legacy_strategy, 'text_system_prompt': prompt} for prompt in old_prompts]
+    if suffix:
+        compatible.append(previous_strategy)
     old_vision_limit = config.get('legacy_vision_max_tokens') if 'storage' in keys else None
     if old_vision_limit is not None:
         compatible.extend({**candidate, 'vision_max_tokens': old_vision_limit}
@@ -84,6 +90,8 @@ def load_pipeline_config(path=None):
         if config['poll_seconds'] > config['poll_timeout']: raise ValueError()
         if config['default_profile'] not in config['strategy']['profiles']: raise ValueError()
         _legacy_text_prompts(config['strategy'])
+        if 'video_notes_prompt_suffix' in config and (not isinstance(config['video_notes_prompt_suffix'], str) or not config['video_notes_prompt_suffix'].strip()):
+            raise ValueError()
         if 'legacy_vision_max_tokens' in config:
             value = config['legacy_vision_max_tokens']
             if type(value) is not int or value <= 0: raise ValueError()

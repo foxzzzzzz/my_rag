@@ -9,7 +9,7 @@ import {CatalogManager} from './catalog-manager';
 import {LibraryView} from './library-view';
 import {TaskList} from './task-list';
 import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
-import {DocumentView} from './document-view';
+import {DocumentView, VideoNoteView} from './document-view';
 import {connectionText, validReview, errorText, textValue, uploadError, statusText, formatDate, htmlBodyPreview} from './helpers';
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
 import ui from './ui-config.json';
@@ -436,9 +436,11 @@ function App() {
               </section>}
               {selectedTab==='visual'&&isVideo(source.kind)&&<h2 className="visual-text-heading">画面识别文字</h2>}
               {!(source.kind==='douyin_album'&&selectedTab==='visual')&&<div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
-                <DocumentView structureSummary={selectedTab==='summary'&&!preview}
+                {selectedTab==='notes'&&isVideo(source.kind)
+                  ? <VideoNoteView key={current.id} value={textValue(result.notes)||'暂无此项内容'}/>
+                  : <DocumentView structureSummary={selectedTab==='summary'&&!preview}
                   summaryStructure={result.summary_structure}
-                  value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>
+                  value={(selectedTab==='summary'&&preview?preview.text:textValue(result[selectedTab]))||'暂无此项内容'}/>}
                 {selectedTab==='summary'&&preview?.omitted&&<p className="muted">… 后续内容已省略，可切换到「正文」查看。</p>}
               </div>}
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}

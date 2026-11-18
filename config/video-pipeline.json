@@ -2,6 +2,7 @@
   "说明": {
     "legacy_vision_max_tokens": "用于匹配已绑定旧视觉输出上限的任务和媒体清单，后续视觉请求使用当前上限",
     "strategy_file": "抽帧及提示策略配置",
+    "video_notes_prompt_suffix": "视频笔记输出要求，写入新任务策略指纹，已绑定任务继续使用原提示词",
     "models_file": "服务及模型配置",
     "storage_file": "音频存储配置",
     "budget": "同一研究账本及单任务和累计人民币上限",
@@ -16,6 +17,7 @@
     "heartbeat_seconds": "模型或上传调用期间续租间隔秒"
   },
   "strategy_file": "config/demo-run.json",
+  "video_notes_prompt_suffix": "视频笔记按主题整理，正文不要插入视频时间点、时间范围或抽帧时间清单。保留有实际含义的时长、日期、性能数值及所有事实限定。时间定位由独立语音转录和画面证据提供。",
   "legacy_vision_max_tokens": 1536,
   "models_file": "config/demo-models.json",
   "storage_file": "config/asr-storage.json",

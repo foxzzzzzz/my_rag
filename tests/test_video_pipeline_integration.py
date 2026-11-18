@@ -123,8 +123,10 @@ class PipelineIntegration(unittest.TestCase):
         legacy = strategy['legacy_text_prompt']['value']
         self.pc['strategy'] = {key: value for key, value in strategy.items() if key not in ('legacy_text_prompt','previous_text_prompt','summary_format','summary_format说明')}
         self.pc['strategy']['text_system_prompt'] = legacy
+        suffix = self.pc.pop('video_notes_prompt_suffix')
         with self.assertRaises(WorkflowError): self.run_pipeline()
         self.pc['strategy'] = strategy
+        self.pc['video_notes_prompt_suffix'] = suffix
         self.assertEqual(self.status(),'needs_attention'); self.s.mode='legacy'; self.run_pipeline(True); self.assertEqual(self.s.submit_count,1); self.assertEqual(self.s.query_count,2)
         c=sqlite3.connect(self.pc['budget']['ledger']); self.addCleanup(c.close); self.assertEqual(c.execute("SELECT count(*) FROM reservations WHERE request_id=?",(self.task+':asr_submit',)).fetchone()[0],1)
     def test_failed_subtask_cleanup(self):
