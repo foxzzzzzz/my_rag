@@ -1,0 +1,22 @@
+/* 阅读、审核与问答沿用资料库的中性表面和清晰层级。 */
+.source-heading { padding-bottom:18px; border-bottom:1px solid var(--rule); }
+.source-title-row h1 { color:var(--text); font-size:var(--detail-title-size); line-height:1.4; }
+.source-heading > .muted { margin-block:8px 0; }
+.source-reading { min-width:0; }
+.source-prose .document-reader { color:var(--text); line-height:1.85; }
+.source-prose .document-reader h2,.source-prose .document-reader h3 { line-height:1.45; font-weight:600; }
+.source-prose .document-reader blockquote { border-color:var(--accent); }
+.content-tabs button { white-space:nowrap; color:var(--muted); }
+.content-tabs button.active { color:var(--accent); }
+.review-panel { color:var(--text); }
+.review-panel h2 { font-weight:600; }
+.review-panel > p { color:var(--muted); }
+.review-panel label { color:var(--muted); margin-block:8px; gap:4px; }
+.review-panel :is(input,select,textarea) { font-size:var(--ui-size); color:var(--text); }
+.review-panel textarea { min-height:var(--review-note-height); resize:vertical; }
+.source-management { border-color:var(--rule); }
+@media(max-width:1050px) { .review-panel { border-color:var(--border); } }
+@media(max-width:600px) {
+  .source-title-row { flex-wrap:wrap; }
+  .source-title-row h1 { flex-basis:100%; font-size:var(--mobile-heading-size); }
+}

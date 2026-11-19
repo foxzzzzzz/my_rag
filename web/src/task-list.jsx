@@ -68,7 +68,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
     <div className="task-identity">
       <strong>{title}</strong>
       {(knownKind||item?.deleted)&&<span className="muted">
-        <MediaTypeBadge kind={item?.kind} fallback={html?'网页':null}/>
+        <MediaTypeBadge kind={item?.kind} includeWeb={html}/>
         {knownKind&&metadata?' · ':null}{metadata}
       </span>}
     </div>

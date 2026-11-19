@@ -1,0 +1,41 @@
+/* Management pages share the library's restrained surfaces and dividers. */
+.import-panel, .trash-panel { color: var(--text); }
+.import-panel > .drop {
+  background:var(--app-bg);
+  border-radius:var(--radius);
+}
+.import-panel .management > label:has(textarea) {
+  display:grid;
+  max-inline-size:var(--import-form-width);
+  margin-block:12px;
+}
+.import-panel > details, .trash-panel > article {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-block: 12px;
+}
+.import-panel summary { color: var(--text); font-weight: 600; cursor: pointer; }
+.import-panel .management { padding-block: 8px; }
+.management h3 { color: var(--text); }
+.management p, .import-panel p { line-height: 1.6; }
+.task-list-controls,.catalog-controls { border-bottom:0; scrollbar-gutter:auto; padding-inline-end:3px; }
+.task-list,.catalog-list {
+  flex:0 1 auto;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding-inline-end:0;
+  scrollbar-gutter:auto;
+}
+.task-table-heading, .catalog-list thead th, .favorites-heading {
+  color: var(--muted);
+  background: var(--sidebar);
+}
+.task-item, .catalog-list tbody :is(th,td), .favorites-row { border-color: var(--rule); }
+.task-item:hover, .favorites-row:not([data-selected]):hover { background: var(--app-bg); }
+.catalog-aliases li { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.catalog-editor, .favorites-mobile-dialog { background: var(--surface); color: var(--text); }
+@media (max-width: 700px) {
+  .import-panel > details, .trash-panel > article { padding: 12px; }
+}

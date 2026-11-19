@@ -3,6 +3,8 @@ import {filterSources, isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './managem
 import {classificationTopicRequired, formatDate} from './helpers';
 import {compareTime, TimeSortButton} from './time-sort';
 import {MediaTypeBadge} from './media-type-badge';
+import {LibraryFilters} from './library-filters';
+import './library.css';
 
 const importTime=source=>source.created_at||source.updated_at;
 
@@ -115,40 +117,25 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
       <h2 data-page-title tabIndex={-1}>资料库</h2>
       <div className="actions">
         <button type="button" disabled={disabled} onClick={onTrash}>回收站</button>
-        <button className="primary" onClick={onImport}>导入资料</button>
+        <button className="primary" onClick={onImport}><span aria-hidden="true" className="library-add">+</span>导入资料</button>
       </div>
     </div>
-    <div className="toolbar">
-      <label className="search">查找<input value={filters.q} placeholder="标题或文件名" onChange={event=>filter('q',event.target.value)}/></label>
-      <label>类型<select value={filters.kind} onChange={event=>filter('kind',event.target.value)}>
-        <option value="">全部类型</option>
-        <option value="html">网页</option>
-        <option value="video">视频</option>
-        <option value="douyin_album">图文</option>
-      </select></label>
-      <label>审核<select value={filters.review} onChange={event=>filter('review',event.target.value)}>
-        <option value="">全部状态</option>
-        <option value="pending">待审核</option>
-        <option value="approve">已批准</option>
-        <option value="rework">返工</option>
-        <option value="reject">拒绝</option>
-      </select></label>
-      <button onClick={onResetFilters}>清空筛选</button>
-    </div>
-    <details className="library-tag-filters">
-      <summary>标签筛选</summary>
-      <Choices catalog={catalog} kind="tag" value={filters.tags} onChange={value=>filter('tags',value)}/>
-    </details>
+    <LibraryFilters filters={filters} filter={filter} onResetFilters={onResetFilters}>
+      <details className="library-tag-filters">
+        <summary>标签筛选{filters.tags.length>0&&<span className="library-tag-count"> {filters.tags.length}</span>}</summary>
+        <Choices catalog={catalog} kind="tag" value={filters.tags} onChange={value=>filter('tags',value)}/>
+      </details>
+    </LibraryFilters>
     </div>
     <div className="list-scroll library-scroll" ref={listRef} role="region" aria-label="资料列表" tabIndex={0}>
-    <div className="library-list-head">
+    <div className="library-list-head" data-selecting={selected.length>0}>
       <label>
         <input type="checkbox" checked={allSelected} disabled={!visible.length||working}
           ref={input=>{if(input)input.indeterminate=!allSelected&&selected.length>0}}
           onChange={event=>toggleAll(event.target.checked)}/>
         全选匹配结果
       </label>
-      <span className="muted" role="status">匹配 {visible.length} 份{selected.length>0&&`，已选 ${selected.length} 份`}</span>
+      <span className="library-selection-meta" role="status">匹配 {visible.length} 份{selected.length>0&&<strong>已选 {selected.length} 份</strong>}</span>
       {!!visible.length&&<TimeSortButton label="导入时间" direction={timeDirection} onClick={toggleTimeDirection} mobile/>}
       {(selected.length>0||hasBatchFeedback)&&<div className="library-selection-actions">
         <button aria-expanded={batchOpen} aria-controls="library-batch-classification"
@@ -172,29 +159,42 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
         {operation==='replace'&&<p>替换会清除原有主题和标签。</p>}
       </>}
       {message&&<p className="error" role="alert">{message}</p>}
-      <div aria-live="polite">{results.map(item=>
-        <p key={item.source_id}>{sources.find(source=>source.id===item.source_id)?.original_name||item.source_id}：{batchStatus[item.status]||'分类更新失败'}</p>)}
+      <div className="library-batch-results" aria-live="polite">{results.map(item=>{
+        const source = sources.find(record=>record.id===item.source_id);
+        return <p key={item.source_id}>
+          <span>{source?.title||source?.original_name||item.source_id}</span>
+          <span data-success={item.status==='success'}>{batchStatus[item.status]||'分类更新失败'}</span>
+        </p>;
+      })}
       </div>
     </div>
-    {!visible.length&&<p>没有匹配的资料，请清空筛选或导入资料。</p>}
+    {!visible.length&&<div className="library-empty">
+      <p><strong>{sources.length?'没有匹配的资料':'资料库暂无资料'}</strong></p>
+      <p className="muted">{sources.length?'清空筛选可查看全部资料。':'导入网页、视频或图文后，即可在这里查找。'}</p>
+      {sources.length?<button onClick={onResetFilters}>清空筛选</button>:<button onClick={onImport}>导入资料</button>}
+    </div>}
     {!!visible.length&&<div className="library-list-columns library-column-head">
       <span/><span>资料名称</span><span>主题 / 标签</span><span>审核状态</span>
       <TimeSortButton label="导入时间" direction={timeDirection} onClick={toggleTimeDirection}/>
     </div>}
     {visible.map(source=>{
       const topicNames=source.classification?.topics?.map(item=>item.name).join('、')||'未分类';
-      const tagNames=source.classification?.tags?.map(item=>item.name).join('、');
+      const sourceTags=source.classification?.tags||[];
       const date=importTime(source);
-      return <div className="source-row library-list-columns library-source-row" key={source.id}>
-        <input aria-label={'选择 '+source.original_name} type="checkbox" disabled={working}
-          checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
+      return <div className="source-row library-list-columns library-source-row" data-selected={Object.hasOwn(selection,source.id)} key={source.id}>
+        <label className="library-row-select">
+          <input aria-label={'选择 '+source.original_name} type="checkbox" disabled={working}
+            checked={Object.hasOwn(selection,source.id)} onChange={event=>toggleSource(source,event.target.checked)}/>
+        </label>
         <div className="library-identity">
           <button type="button" className="source" onClick={()=>open(source.id)}><strong>{source.title||source.original_name}</strong></button>
-          <small><MediaTypeBadge kind={source.kind} fallback="网页"/></small>
+          <small><MediaTypeBadge kind={source.kind} includeWeb/></small>
         </div>
         <div className="library-taxonomy">
           <span>{topicNames}</span>
-          {tagNames&&<small>标签 · {tagNames}</small>}
+          {!!sourceTags.length&&<ul className="library-tags" aria-label="标签">
+            {sourceTags.map(tag=><li key={tag.id}>{tag.name}</li>)}
+          </ul>}
         </div>
         <div className="library-review" data-review={source.review_status}>
           {({approve:'已批准',rework:'返工',reject:'拒绝',pending:'待审核'})[source.review_status]||'待审核'}

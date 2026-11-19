@@ -1,12 +1,21 @@
-/* 色彩、字号和布局参数：对应已批准的第二版样稿。 */
+/* 资料库已确认样稿及其他页面共用的色彩、字号和布局参数。 */
 :root {
- --surface:#fff; --app-bg:#f7f8fa; --sidebar:#f1f3f5; --text:#24282e; --muted:#59616d; --accent:#345ca8; --border:#d9dee5; --danger:#a02e2e;
- --sidebar-width:200px; /* 侧栏宽度 */
+ --surface:#fff; --app-bg:#f9fafb; --sidebar:#f2f4f6; /* 内容、辅助面和侧栏 */
+ --text:#202832; --muted:#566270; /* 正文与次级文字 */
+ --accent:#28567c; --accent-soft:#e9f1f8; /* 主操作与选中背景 */
+ --border:#dce2e8; --rule:#e8edf1; /* 控件外边界与列表分隔线 */
+ --danger:#8c3a44; --danger-soft:#fbf3f4; /* 失败与危险动作 */
+ --status-approved:#35634c; --status-pending:#8d651e; --status-rework:#90513d; /* 流程状态文字 */
+ --overlay:rgb(20 29 44 / .44); /* 模态遮罩 */
+ --sidebar-width:216px; /* 桌面侧栏宽度 */
  --review-width:280px; --column-gap:36px; /* 阅读和审核列 */
- --radius:5px; --ui-size:14px; --body-size:16px; --heading-size:23px;
+ --radius:5px; --control-height:36px; /* 常用控件圆角及高度 */
+ --ui-size:14px; --body-size:16px; --heading-size:28px; --mobile-heading-size:22px; /* 界面、正文及页标题字号 */
  --sidebar-meta-size:13px; /* 侧栏状态和主题标题字号 */
  --connection-online:#285d46; /* 连接正常时的状态点颜色 */
  --detail-meta-size:13px; /* 详情返回文字字号 */
+ --detail-title-size:24px; /* 阅读页长标题字号 */
+ --review-note-height:72px; /* 审核意见输入框的最小高度 */
  --detail-heading-gap:12px; /* 详情标题与返回、管理入口间距 */
  --detail-reading-measure:54em; /* 宽屏摘要和笔记的最大阅读行宽 */
  --detail-reading-block-gap:14px; /* 摘要和笔记段落、列表之间的间距 */
@@ -15,12 +24,12 @@
  --detail-section-gap:24px; /* 摘要和笔记小标题上方的间距 */
  --detail-video-max-height:52dvh; /* 详情视频播放器最大高度 */
  --detail-frame-max-height:84px; /* 横向关键帧缩略图最大高度 */
- --ui-font:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
- --content-pad-x:36px; --content-pad-y:28px; --mobile-pad-x:16px; --mobile-pad-y:22px;
+ --ui-font:"Noto Sans SC","Microsoft YaHei","PingFang SC",sans-serif; /* 中文优先的本机无衬线字体 */
+ --content-pad-x:36px; --content-pad-y:32px; --content-pad-bottom:24px; /* 桌面主区留白 */
+ --mobile-pad-x:12px; --mobile-pad-y:12px; --mobile-pad-bottom:16px; /* 窄屏主区留白 */
  --ask-width:850px;
+ --import-form-width:42rem; /* 分享文本等单列表单的阅读宽度 */
  --rag-scope-list-limit:min(16rem, 38dvh); /* 问答范围选择中的列表滚动高度上限 */
- --library-actions-height:36px; /* 资料列表选择栏最小高度 */
- --library-grid-columns:1.5rem minmax(0,2.1fr) minmax(0,1.35fr) minmax(5rem,.65fr) minmax(9rem,.8fr); /* 宽屏资料列表列宽 */
  --status-dot-size:7px; /* 侧栏连接状态指示点尺寸 */
  --mobile-library-nav-limit:40dvh; /* 手机列表页导航高度上限 */
  --library-tag-filter-limit:18dvh; /* 展开标签筛选时的选项区高度上限 */
@@ -31,12 +40,11 @@
  --favorites-columns:1.25rem minmax(0,1fr) 8.5rem 8.5rem; /* 收藏列表的勾选、标题、类型和状态列 */
  --favorites-confirm-width:18rem; --favorites-layout-gap:20px; /* 桌面导入确认面板宽度与列间距 */
  --favorites-confirm-heading-size:16px; --favorites-dialog-width:28rem; /* 确认区标题字号与手机对话框宽度上限 */
- --media-type-video-bg:#edf2f5; --media-type-video-text:#315466; /* 视频类型标识 */
- --media-type-album-bg:#f0eafa; --media-type-album-text:#62408c; /* 图文类型标识 */
- --favorites-dialog-backdrop:rgb(20 29 44 / .44); /* 手机导入确认对话框的遮罩 */
+ --media-type-web-bg:#1d4ed8; --media-type-video-bg:#c2410c; --media-type-album-bg:#047857; --media-type-text:#fff; /* 资料类型标识 */
+ --favorites-dialog-backdrop:var(--overlay); /* 手机导入确认对话框的遮罩 */
  --favorites-title-lines:2; /* 收藏标题折叠时的行数 */
- --favorites-available-bg:#e7effb; /* 可导入状态与选中筛选按钮的背景 */
- --favorites-selected-bg:#f4f8fe; /* 已勾选行的背景 */
+ --favorites-available-bg:var(--accent-soft); /* 可导入状态与选中筛选背景 */
+ --favorites-selected-bg:var(--accent-soft); /* 收藏已勾选行的背景 */
  --favorites-pending-text:#81501d; --favorites-pending-bg:#fff0dc; /* 排队及处理中的状态色 */
  --favorites-failed-bg:#faecec; /* 下载和转换异常状态的背景 */
 }

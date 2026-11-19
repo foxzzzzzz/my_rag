@@ -2,15 +2,16 @@
   display:inline-flex;
   align-items:center;
   gap:5px;
-  padding:2px 7px;
+  padding:1px 6px;
   border-radius:var(--radius);
   background:var(--media-type-video-bg);
-  color:var(--media-type-video-text);
-  font-size:var(--sidebar-meta-size);
+  color:var(--media-type-text);
+  font-size:12px;
+  font-weight:400;
+  line-height:1.5;
   white-space:nowrap;
   vertical-align:middle;
 }
-.media-type-badge[data-kind="album"] {
-  background:var(--media-type-album-bg);
-  color:var(--media-type-album-text);
-}
+.media-type-badge[data-kind="album"] { background:var(--media-type-album-bg) }
+.media-type-badge[data-kind="web"] { background:var(--media-type-web-bg) }
+.media-type-badge svg { flex:none }

@@ -7,6 +7,7 @@ import {ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {FavoritesPanel} from './favorites-panel';
 import {CatalogManager} from './catalog-manager';
 import {LibraryView} from './library-view';
+import {MediaTypeBadge} from './media-type-badge';
 import {TaskList} from './task-list';
 import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {DocumentView, VideoNoteView} from './document-view';
@@ -14,6 +15,8 @@ import {connectionText, validReview, errorText, textValue, uploadError, statusTe
 import {draftKey, emptyReviewDraft, updateReviewDraft, saveReviewDraft, reviewDraftSaved, canSubmitReview} from './review-drafts';
 import ui from './ui-config.json';
 import './style.css';
+import './reading-ui.css';
+import './management-ui.css';
 
 const fields = {summary:'摘要', notes:'笔记', body:'正文', transcript:'语音转录', visual:'画面证据'};
 const isVideo = kind => ['video','mp4'].includes(kind);
@@ -311,11 +314,11 @@ function App() {
       {authEnabled&&session&&<button className="logout-button" onClick={logout}>退出登录</button>}
     </div></aside>
     <main className="workspace" ref={mainRef}>
-      {error&&<p className="error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
+      {error&&<p className="app-feedback error" role="alert">{error}</p>}{message&&<p className="app-feedback" role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
-      {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
-        <div className="list-page" hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={activeTopic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} listRef={libraryScrollRef} displayTimezone={session.config.display_timezone}/>:<section><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
-        {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section>
+      {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section className="connection-panel"><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
+        <div className="list-page" hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={activeTopic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} listRef={libraryScrollRef} displayTimezone={session.config.display_timezone}/>:<section className="connection-panel"><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section className="trash-panel">
           <button onClick={()=>navigate('library')}>返回资料库</button>
           <p className="muted">删除的资料保留 {trash.retention_days} 天，到期后由定期维护清理。已有备份副本按快照保留策略轮换。</p>
           {!trash.items.length&&<p>回收站为空。</p>}
@@ -355,7 +358,7 @@ function App() {
                 onClick={()=>setSourceManagementOpen(open=>!open)}>资料管理</button>}
             </div>
             <p className="muted">
-              {isVideo(source.kind)?'视频':source.kind==='douyin_album'?'图文':'HTML'} · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
+              <MediaTypeBadge kind={source.kind} includeWeb/> · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
             {source.original_title && source.original_title!==source.title && source.original_title!==source.original_name &&
