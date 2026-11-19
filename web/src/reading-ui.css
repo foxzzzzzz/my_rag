@@ -15,6 +15,12 @@
 .review-panel :is(input,select,textarea) { font-size:var(--ui-size); color:var(--text); }
 .review-panel textarea { min-height:var(--review-note-height); resize:vertical; }
 .source-management { border-color:var(--rule); }
+.source-management .edit-field textarea {
+  min-height:var(--revision-editor-height);
+  resize:vertical;
+  font-size:var(--body-size);
+  line-height:var(--revision-editor-line-height);
+}
 @media(max-width:1050px) { .review-panel { border-color:var(--border); } }
 @media(max-width:600px) {
   .source-title-row { flex-wrap:wrap; }

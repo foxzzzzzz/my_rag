@@ -312,6 +312,72 @@ def verify_ask(page, output):
     screenshot(page, output, "ask")
 
 
+def verify_revision_editor(browser, address, output, width, height):
+    fixture = Fixture()
+    page, errors = open_page(browser, address, fixture, width, height)
+    original = {field: "\n".join(f"{i:02d} {field}：逐段核对内容、引用和时间位置。" for i in range(1, 41))
+                for field in ("summary", "notes", "body", "transcript", "visual")}
+    saves = []
+
+    def detail(route):
+        route.fulfill(json={"source": fixture.sources[0], "eligible": False, "current": {
+            "id": "v1-edited" if saves else "v0", "content_sha256": "b" * 64,
+            "result": {**original, **(saves[-1] if saves else {})},
+        }})
+
+    def save(route):
+        assert route.request.method == "POST"
+        saves.append(route.request.post_data_json)
+        route.fulfill(json={})
+
+    page.route(f"{address}/api/sources/s0", detail)
+    page.route(f"{address}/api/sources/s0/revisions", save)
+    page.locator(".library-source-row .source").first.click()
+    page.get_by_role("button", name="资料管理", exact=True).click()
+    revision = page.locator("#source-management details").filter(has=page.get_by_text("人工修订", exact=True))
+    revision.locator("summary").click()
+    revision.get_by_role("button", name="编辑内容").click()
+    fields = revision.locator("textarea")
+    expect(fields).to_have_count(5)
+    sizes = fields.evaluate_all("""fields => fields.map(e => {
+        const style = getComputedStyle(e);
+        return {height:e.getBoundingClientRect().height, size:style.fontSize, resize:style.resize,
+                scrollable:e.scrollHeight > e.clientHeight};
+    })""")
+    assert all(s['height'] >= 450 and s['size'] == '16px' and s['resize'] == 'vertical' and s['scrollable'] for s in sizes), sizes
+    expect(page.get_by_role("textbox", name="审核意见")).to_have_css("min-height", "72px")
+    transcript = revision.get_by_role("textbox", name="语音转录")
+    expect(transcript).to_have_value(original["transcript"])
+    if width <= 390:
+        revision.locator("summary").evaluate("e => e.scrollIntoView({block:'start'})")
+    screenshot(page, output, "revision-editor")
+    transcript.fill("准备放弃的修订")
+    revision.get_by_role("button", name="放弃修订").click()
+    page.get_by_role("dialog", name="放弃修订").get_by_role("button", name="确认操作").click()
+    expect(fields).to_have_count(0)
+    expect(revision.locator("summary")).to_be_visible()
+    if not revision.evaluate("e => e.open"):
+        revision.locator("summary").click()
+    revision.get_by_role("button", name="编辑内容").click()
+    expect(transcript).to_have_value(original["transcript"])
+    assert not saves
+    updated = original["transcript"] + "\n补齐一段语音转录。"
+    transcript.fill(updated)
+    revision.get_by_role("button", name="保存新版本").click()
+    expect(page.get_by_text("已生成新版本，请重新审核。", exact=True)).to_be_visible()
+    assert saves == [{**original, "expected_version_id": "v0", "transcript": updated}], saves
+    page.get_by_role("button", name=re.compile("返回资料库")).click()
+    page.get_by_role("button", name=re.compile("OpenManus 源码拆解")).click()
+    page.get_by_role("button", name="资料管理", exact=True).click()
+    revision.locator("summary").click()
+    revision.get_by_role("button", name="编辑内容").click()
+    expect(fields).to_have_count(3)
+    assert all(height >= 450 for height in fields.evaluate_all("fields => fields.map(e => e.offsetHeight)"))
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f"{width}px revision editors: {sizes[0]['height']:g}px, long text, discard and save passed")
+    page.close()
+
+
 def verify_management(page, output):
     nav(page, "导入")
     upload = page.get_by_role("button", name="上传文件")
@@ -446,6 +512,8 @@ def main():
             page.close()
         verify_connection(browser, address, args.screenshots)
         verify_scroll(browser, address)
+        for width, height in ((1440, 900), (390, 844)):
+            verify_revision_editor(browser, address, args.screenshots, width, height)
         print("Connection, retry and login assertions passed")
         print("List scroll restoration and sticky header focus assertions passed")
         if args.baseline:
