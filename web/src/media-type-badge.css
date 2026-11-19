@@ -1,10 +1,11 @@
 .media-type-badge {
+  --media-type-color:var(--media-type-video-color);
   display:inline-flex;
   align-items:center;
   gap:5px;
   padding:1px 6px;
   border-radius:var(--radius);
-  background:var(--media-type-video-bg);
+  background:var(--media-type-color);
   color:var(--media-type-text);
   font-size:12px;
   font-weight:400;
@@ -12,6 +13,7 @@
   white-space:nowrap;
   vertical-align:middle;
 }
-.media-type-badge[data-kind="album"] { background:var(--media-type-album-bg) }
-.media-type-badge[data-kind="web"] { background:var(--media-type-web-bg) }
+.media-type-badge[data-kind="album"] { --media-type-color:var(--media-type-album-color) }
+.media-type-badge[data-kind="web"] { --media-type-color:var(--media-type-web-color) }
+.library-view .media-type-badge { background:transparent; color:var(--media-type-color) }
 .media-type-badge svg { flex:none }

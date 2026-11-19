@@ -40,7 +40,7 @@
  --favorites-columns:1.25rem minmax(0,1fr) 8.5rem 8.5rem; /* 收藏列表的勾选、标题、类型和状态列 */
  --favorites-confirm-width:18rem; --favorites-layout-gap:20px; /* 桌面导入确认面板宽度与列间距 */
  --favorites-confirm-heading-size:16px; --favorites-dialog-width:28rem; /* 确认区标题字号与手机对话框宽度上限 */
- --media-type-web-bg:#1d4ed8; --media-type-video-bg:#c2410c; --media-type-album-bg:#047857; --media-type-text:#fff; /* 资料类型标识 */
+ --media-type-web-color:#1d4ed8; --media-type-video-color:#c2410c; --media-type-album-color:#047857; --media-type-text:#fff; /* 资料类型色与实色标识文字 */
  --favorites-dialog-backdrop:var(--overlay); /* 手机导入确认对话框的遮罩 */
  --favorites-title-lines:2; /* 收藏标题折叠时的行数 */
  --favorites-available-bg:var(--accent-soft); /* 可导入状态与选中筛选背景 */

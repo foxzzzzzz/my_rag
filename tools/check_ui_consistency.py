@@ -196,12 +196,15 @@ def verify_library(page, output):
     expect(rows).to_have_count(6)
     screenshot(page, output, "library")
     styles = page.locator(".library-source-row .media-type-badge").evaluate_all("""nodes =>
-        nodes.map(e => [e.dataset.kind, getComputedStyle(e).backgroundColor, getComputedStyle(e).fontSize,
-                        e.querySelector('svg').getBoundingClientRect().width])""")
-    assert {tuple(s) for s in styles} == {
-        ("web", "rgb(29, 78, 216)", "12px", 14), ("video", "rgb(194, 65, 12)", "12px", 14),
-        ("album", "rgb(4, 120, 87)", "12px", 14),
-    }
+        nodes.map(badge => {
+            const style = getComputedStyle(badge), icon = badge.querySelector('svg');
+            return [badge.dataset.kind, style.backgroundColor, style.color, getComputedStyle(icon).stroke,
+                    style.fontSize, icon.getBoundingClientRect().width];
+        })""")
+    colors = {"web": "rgb(29, 78, 216)", "video": "rgb(194, 65, 12)", "album": "rgb(4, 120, 87)"}
+    assert {tuple(style) for style in styles} == {
+        (kind, "rgba(0, 0, 0, 0)", color, color, "12px", 14) for kind, color in colors.items()
+    }, styles
     controls = page.locator(".library-view .list-page-controls")
     list_region = page.get_by_role("region", name="资料列表")
     search = controls.get_by_role("textbox", name="查找")
@@ -267,6 +270,7 @@ def verify_detail(page, fixture, output):
     expect(page.locator(".library-source-row")).to_have_count(1)
     page.locator(".library-source-row .source").first.click()
     expect(page.get_by_role("heading", name=re.compile("从用户反馈改进知识库检索"))).to_be_visible()
+    expect(page.locator('.source-heading .media-type-badge[data-kind="video"]')).to_have_css("background-color", "rgb(194, 65, 12)")
     screenshot(page, output, "detail")
     page.get_by_role("button", name="画面证据", exact=True).click()
     expect(page.get_by_text("画面中的步骤。")).to_be_visible()
@@ -320,10 +324,12 @@ def verify_management(page, output):
     for name in ("抖音分享链接", "上传Obsidian更新", "抖音收藏"):
         page.locator(".import-panel summary").get_by_text(name, exact=True).click()
     expect(page.get_by_text("收藏视频样例", exact=True)).to_be_visible()
+    expect(page.locator('.favorites-list .media-type-badge[data-kind="video"]')).to_have_css("background-color", "rgb(194, 65, 12)")
     screenshot(page, output, "import")
     nav(page, "任务")
     tasks = page.locator(".task-item")
     expect(tasks).to_have_count(5)
+    expect(tasks.locator('.media-type-badge[data-kind="album"]').first).to_have_css("background-color", "rgb(4, 120, 87)")
     screenshot(page, output, "tasks")
     task_sort = page.get_by_role("button", name=re.compile("^按更新时间排序"))
     task_sort.click()
