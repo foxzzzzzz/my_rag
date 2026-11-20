@@ -72,6 +72,7 @@ class Fixture:
         self.unexpected = []
         self.logged_in = True
         self.fail_read = False
+        self.poll_interval_ms = 60000
         self.hold_sources = False
         self.pending_sources = None
         self.citation = {"chunk_id": "a" * 64, "source_id": "s1", "version_id": "v1", "text": "离线复核证据。",
@@ -126,7 +127,7 @@ class Fixture:
                 if not self.logged_in:
                     return reply({"error": "login_required"}, 401)
                 return reply({"csrf_token": "isolated", "config": {
-                    "auth_enabled": True, "poll_interval_ms": 60000, "quality_target": 98,
+                    "auth_enabled": True, "poll_interval_ms": self.poll_interval_ms, "quality_target": 98,
                     "display_timezone": "Asia/Shanghai", "live_html_enabled": False, "live_video_enabled": False,
                     "max_upload_bytes": 1048576, "max_html_bytes": 1048576,
                 }})
@@ -152,7 +153,7 @@ class Fixture:
                         "source": source, "eligible": source["eligible"],
                         "current": {"id": source["current_version_id"], "content_sha256": "b" * 64,
                                     "result": {"summary": "摘要说明。", "notes": "## 阅读笔记\n\n一段可核对的笔记。",
-                                               "body": "## 正文内容\n\n原文保留。", "visual": "画面中的步骤。"}},
+                                               "body": "## 正文内容\n\n原文保留。", "visual": "画面中的步骤。"}} if source["current_version_id"] else None,
                         "review": self.review if source["id"] == "s0" else None,
                     })
             if path == "/rag/status":
@@ -262,6 +263,62 @@ def verify_library(page, output):
     batch.get_by_role("button", name="应用到已选资料").click()
     expect(batch.get_by_text("已完成")).to_be_visible()
     page.get_by_role("button", name="取消选择").click()
+
+
+def verify_library_version_gate(browser, address, width, height):
+    fixture = Fixture()
+    fixture.poll_interval_ms = 500
+    fixture.sources[-1]["classification"]["topics"] = [fixture.topic]
+    fixture.tasks[0].update(status="failed", reprocess=True, error_code="budget_invalid_or_exceeded")
+    for status, title in (("failed", "首次处理失败"), ("running", "首次处理进行中"), ("queued", "首次处理等待中")):
+        source = {**fixture.sources[0], "id": f"first-{status}", "title": title, "original_name": f"{status}.mp4",
+                  "current_version_id": None, "eligible": False, "classification": {"revision": 0, "topics": [], "tags": []}}
+        fixture.sources.append(source)
+        fixture.tasks.append({"id": f"task-{status}", "source_id": source["id"], "status": status,
+                              "error_code": "budget_invalid_or_exceeded" if status == "failed" else None})
+
+    page, errors = open_page(browser, address, fixture, width, height)
+    library = page.locator('.library-view')
+    rows = library.locator('.library-source-row')
+    expect(rows).to_have_count(6)
+    unclassified = page.get_by_role('group', name='主题筛选').get_by_role('button', name='未分类', exact=True)
+    expect(unclassified).to_have_count(0)
+    search = library.get_by_role('textbox', name='查找')
+    search.fill('首次处理')
+    expect(library.get_by_text('没有匹配的资料')).to_be_visible()
+    search.clear()
+    library.get_by_role('combobox', name=re.compile('^审核 ')).click()
+    page.get_by_role('listbox', name='审核').get_by_role('option', name='待审核', exact=True).click()
+    expect(rows).to_have_count(2)
+    library.get_by_role('checkbox', name='全选匹配结果').check()
+    expect(rows.locator('input:checked')).to_have_count(2)
+    library.get_by_role('button', name='清空筛选', exact=True).click()
+    rows.filter(has_text='从用户反馈改进知识库检索').get_by_role('button').click()
+    expect(page.get_by_role('heading', name=re.compile('从用户反馈改进知识库检索'))).to_be_visible()
+    expect(page.get_by_text('摘要说明。', exact=True)).to_be_visible()
+
+    nav(page, '任务')
+    failed = page.locator('.task-item').filter(has_text='首次处理失败')
+    expect(failed.get_by_text('任务或累计预算不足，无法自动重试。')).to_be_visible()
+    expect(failed.get_by_role('button', name='重试')).to_be_visible()
+    failed.get_by_role('button', name='查看资料', exact=True).click()
+    expect(page.get_by_text('尚未生成可审核内容。')).to_be_visible()
+    page.get_by_role('button', name='到任务页处理', exact=True).click()
+    expect(failed.get_by_role('button', name='详情')).to_be_visible()
+
+    nav(page, '资料库')
+    expect(rows).to_have_count(6)
+    new_source = fixture.sources[-1]
+    new_source['current_version_id'] = 'first-result'
+    fixture.tasks[-1]['status'] = 'succeeded'
+    expect(rows).to_have_count(7)
+    expect(rows.filter(has_text=new_source['title'])).to_contain_text('待审核')
+    unclassified.click()
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_contain_text(new_source['title'])
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px library first-version gate, task access and polling passed')
+    page.close()
 
 
 def verify_detail(page, fixture, output):
@@ -390,12 +447,19 @@ def verify_management(page, output):
     for name in ("抖音分享链接", "上传Obsidian更新", "抖音收藏"):
         page.locator(".import-panel summary").get_by_text(name, exact=True).click()
     expect(page.get_by_text("收藏视频样例", exact=True)).to_be_visible()
-    expect(page.locator('.favorites-list .media-type-badge[data-kind="video"]')).to_have_css("background-color", "rgb(194, 65, 12)")
+    badge = page.locator('.favorites-list .media-type-badge[data-kind="video"]')
+    expect(badge).to_have_css("background-color", "rgba(0, 0, 0, 0)")
+    expect(badge).to_have_css("color", "rgb(194, 65, 12)")
+    expect(badge.locator("svg")).to_have_css("stroke", "rgb(194, 65, 12)")
     screenshot(page, output, "import")
     nav(page, "任务")
     tasks = page.locator(".task-item")
     expect(tasks).to_have_count(5)
-    expect(tasks.locator('.media-type-badge[data-kind="album"]').first).to_have_css("background-color", "rgb(4, 120, 87)")
+    for kind, color in (("album", "rgb(4, 120, 87)"), ("video", "rgb(194, 65, 12)"), ("web", "rgb(29, 78, 216)")):
+        badge = tasks.locator(f'.media-type-badge[data-kind="{kind}"]').first
+        expect(badge).to_have_css("background-color", "rgba(0, 0, 0, 0)")
+        expect(badge).to_have_css("color", color)
+        expect(badge.locator("svg")).to_have_css("stroke", color)
     screenshot(page, output, "tasks")
     task_sort = page.get_by_role("button", name=re.compile("^按更新时间排序"))
     task_sort.click()
@@ -424,6 +488,60 @@ def verify_management(page, output):
     screenshot(page, output, "trash")
     page.get_by_role("button", name="撤销删除").click()
     expect(page.get_by_text("回收站为空。")).to_be_visible()
+
+
+def verify_favorites_filters(browser, address, output, width, height):
+    fixture = Fixture()
+    page, errors = open_page(browser, address, fixture, width, height)
+    items = [dict(work_id=f'available-{i}', title=f'可导入作品 {i}', kind='video',
+                  status=None, selectable=True) for i in range(87)]
+    items += [dict(work_id=f'available-image-{i}', title=f'可导入图文 {i}', kind='image',
+                   status=None, selectable=True, image_count=1, image_quote_cny='1.61') for i in range(19)]
+    items += [dict(work_id=f'imported-{i}', title=f'已导入作品 {i}', kind='video',
+                   status='converted', selectable=False) for i in range(15)]
+    items += [dict(work_id=f'image-failed-{i}', title=f'图文异常 {i}', kind='image',
+                   status='conversion_failed', selectable=False, image_count=1, image_quote_cny='1.61') for i in range(7)]
+    items += [dict(work_id=f'video-failed-{i}', title=f'视频异常 {i}', kind='video',
+                   status='conversion_failed', selectable=False) for i in range(3)]
+    items += [dict(work_id=f'image-limit-{i}', title=f'图片超限 {i}', kind='image',
+                   status=None, selectable=False, image_count=41, image_quote_error='album_image_limit') for i in range(2)]
+    # A selectable flag without a valid quote must still stay out of the import selection.
+    items[-1]['selectable'] = True
+
+    def favorites(route):
+        route.fulfill(json={'enabled':True, 'state':'ready', 'download_limit':3,
+                            'manual_video_budget_cny':'0.30', 'items':items})
+    page.route(f'{address}/api/douyin/favorites/sync', favorites)
+    nav(page, '导入')
+    page.locator('.import-panel summary').get_by_text('抖音收藏', exact=True).click()
+    filters = page.get_by_role('group', name='按导入状态筛选')
+    rows = page.locator('.favorites-row')
+    for label, count in [('全部',133), ('可导入',106), ('已导入',15), ('其他状态',12)]:
+        button = filters.get_by_role('button', name=f'{label} {count}', exact=True)
+        button.click()
+        expect(button).to_have_attribute('aria-pressed', 'true')
+        expect(rows).to_have_count(count)
+    expect(rows.filter(has_text='转换异常，请查看任务详情')).to_have_count(10)
+    expect(rows.filter(has_text='图片数量超限')).to_have_count(2)
+    expect(rows.locator('.favorites-checkbox')).to_have_count(0)
+    expect(page.get_by_role('button', name='全选可导入作品')).to_have_count(0)
+    for kind, color in [('video','rgb(194, 65, 12)'), ('album','rgb(4, 120, 87)')]:
+        badge = rows.locator(f'.media-type-badge[data-kind="{kind}"]').first
+        expect(badge).to_have_css('background-color','rgba(0, 0, 0, 0)')
+        expect(badge).to_have_css('color',color)
+        expect(badge.locator('svg')).to_have_css('stroke',color)
+    screenshot(page, output, 'favorites-other')
+    filters.get_by_role('button', name='全部 133', exact=True).click()
+    page.get_by_role('button', name='全选可导入作品').click()
+    expect(rows.locator('input:checked')).to_have_count(106)
+    expect(rows.filter(has_text='转换异常').locator('input:checked')).to_have_count(0)
+    filters.get_by_role('button', name='可导入 106', exact=True).click()
+    expect(rows).to_have_count(106)
+    expect(rows.locator('input:checked')).to_have_count(106)
+    expect(rows.filter(has_text='可导入图文').locator('input:checked')).to_have_count(19)
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px favorites partition, type colors, selection passed')
+    page.close()
 
 
 def verify_connection(browser, address, output):
@@ -513,7 +631,9 @@ def main():
         verify_connection(browser, address, args.screenshots)
         verify_scroll(browser, address)
         for width, height in ((1440, 900), (390, 844)):
+            verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)
+            verify_favorites_filters(browser, address, args.screenshots, width, height)
         print("Connection, retry and login assertions passed")
         print("List scroll restoration and sticky header focus assertions passed")
         if args.baseline:

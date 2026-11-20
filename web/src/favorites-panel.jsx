@@ -19,6 +19,7 @@ const itemStates = {
   deleted:['资料在回收站', 'neutral'],
   skipped:['已跳过', 'neutral'],
 };
+const filterLabels = {all:'全部',available:'可导入',imported:'已导入',other:'其他状态'};
 const reasons = {missing_douyin_cookie:'缺少 Cookie', login_required:'需要重新登录', account_unverified:'无法核实登录账号',
   collection_http_error:'抖音拒绝收藏请求', collection_timeout:'收藏读取超时', pagination_incomplete:'收藏翻页未完成',
   baseline_incomplete:'未读满基线且未到末页', snapshot_gap:'未找到上次同步位置',
@@ -42,26 +43,26 @@ function FavoriteType({item}) {
   const image = item.kind==='image';
   const quoteAvailable = image && batchAmount([item.image_quote_cny])!==null;
   return <div className="favorites-type">
-    <MediaTypeBadge kind={image?'douyin_album':'video'}/>
+    <MediaTypeBadge kind={image?'douyin_album':'video'} variant="text"/>
     {image&&<small className="favorites-type-detail">
       {item.image_count==null?'张数未知':`${item.image_count} 张`} · {quoteAvailable?`上限 ¥${item.image_quote_cny}`:'报价不可用'}
     </small>}
   </div>;
 }
 
-function FavoriteRow({item, checked, canSelect, onChange, onRetry}) {
+function FavoriteRow({item, checked, selectable, canSelect, onChange, onRetry}) {
   const title = item.title || item.work_id;
   const titleId = useId();
   const titleRef = useRef(null);
   const [expanded, setExpanded] = useState(false);
   const [truncated, setTruncated] = useState(false);
-  const Title = item.selectable ? 'label' : 'div';
+  const Title = selectable ? 'label' : 'div';
   const checkboxId = `${titleId}-checkbox`;
   const status = item.status || 'baseline';
   const quoteError = albumQuoteErrors[item.image_quote_error];
   const [statusText, tone] = quoteError&&['baseline','downloaded'].includes(status)
     ? [quoteError, 'neutral']
-    : status==='baseline'&&!item.selectable
+    : status==='baseline'&&!selectable
     ? ['暂不可导入', 'neutral']
     : itemStates[status] || [status, 'neutral'];
 
@@ -76,10 +77,10 @@ function FavoriteRow({item, checked, canSelect, onChange, onRetry}) {
   }, [expanded, title, Title]);
 
   return <li className="favorites-row" data-selected={checked || undefined}>
-    {item.selectable && <input id={checkboxId} className="favorites-checkbox" type="checkbox" disabled={!canSelect}
+    {selectable && <input id={checkboxId} className="favorites-checkbox" type="checkbox" disabled={!canSelect}
       checked={checked} onChange={event => onChange(item.work_id, event.target.checked)}/>}
     <div className="favorites-video">
-      <Title id={titleId} htmlFor={item.selectable ? checkboxId : undefined}
+      <Title id={titleId} htmlFor={selectable ? checkboxId : undefined}
         ref={titleRef} className="favorites-title" data-expanded={expanded || undefined}>{title}</Title>
       {(truncated || expanded) && <button type="button" className="favorites-expand" aria-expanded={expanded}
         aria-controls={titleId} onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '展开'}</button>}
@@ -128,16 +129,16 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
     finally{setBusy(false);}
   }
   const items=data?.items||[];
-  const eligible=items.filter(item=>item.selectable && (item.kind !== 'image' || batchAmount([item.image_quote_cny]) !== null));
-  const imported=items.filter(item=>itemStates[item.status]?.[1]==='imported');
-  const filters=[
-    {key:'all',label:'全部',items},
-    {key:'available',label:'可导入',items:eligible},
-    {key:'imported',label:'已导入',items:imported},
-  ];
-  const visibleItems=filters.find(option=>option.key===filter).items;
-  const eligibleIds=eligible.map(item=>item.work_id);
-  const selectedIds=selected.filter(id=>eligibleIds.includes(id));
+  const groups={all:items,available:[],imported:[],other:[]};
+  for (const item of items) {
+    if (itemStates[item.status]?.[1]==='imported') groups.imported.push(item);
+    else if (item.selectable && (item.kind!=='image' || batchAmount([item.image_quote_cny])!==null)) groups.available.push(item);
+    else groups.other.push(item);
+  }
+  const visibleItems=groups[filter];
+  const eligible=groups.available;
+  const eligibleIds=new Set(eligible.map(item=>item.work_id));
+  const selectedIds=selected.filter(id=>eligibleIds.has(id));
   function selectItem(id, checked) {
     setSelected(previous=>checked?[...previous,id]:previous.filter(value=>value!==id));
   }
@@ -213,12 +214,12 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
         <legend>收藏作品</legend>
         <div className="favorites-toolbar">
           <div className="favorites-filters" role="group" aria-label="按导入状态筛选">
-            {filters.map(option=><button key={option.key} type="button" aria-pressed={filter===option.key}
-              onClick={()=>setFilter(option.key)}>{option.label} <span>{option.items.length}</span></button>)}
+            {Object.entries(filterLabels).map(([key,label])=><button key={key} type="button" aria-pressed={filter===key}
+              onClick={()=>setFilter(key)}>{label} <span>{groups[key].length}</span></button>)}
           </div>
           <div className="favorites-selection">
-            {filter!=='imported'&&<button type="button" disabled={!canSelect||!eligible.length||selectedIds.length===eligible.length}
-              onClick={()=>setSelected(eligibleIds)}>全选可导入作品</button>}
+            {(filter==='all'||filter==='available')&&<button type="button" disabled={!canSelect||!eligible.length||selectedIds.length===eligible.length}
+              onClick={()=>setSelected([...eligibleIds])}>全选可导入作品</button>}
             <button type="button" disabled={blocked||!selectedIds.length} onClick={()=>setSelected([])}>清空选择</button>
             <span className="muted" role="status">已选 {selectedIds.length} 条</span>
           </div>
@@ -227,10 +228,10 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
           <div className="favorites-heading" aria-hidden="true"><span>作品标题</span><span>类型</span><span>导入状态</span></div>
           <ul className="favorites-list" role="list">
             {visibleItems.map(item=><FavoriteRow key={item.work_id} item={item} checked={selectedIds.includes(item.work_id)}
-              canSelect={canSelect && (item.status==='download_failed' || eligibleIds.includes(item.work_id))} onChange={selectItem}
+              selectable={eligibleIds.has(item.work_id)} canSelect={canSelect} onChange={selectItem}
               onRetry={work_id=>action('/douyin/favorites/retry-image',{account_id:data.active_account?.id,work_id},'已重新排队下载。')}/>)}
           </ul>
-        </> : <p className="favorites-empty muted">当前没有{filter==='available'?'可导入':'已导入'}的作品。</p>}
+        </> : <p className="favorites-empty muted">当前没有{filterLabels[filter]}的作品。</p>}
       </fieldset>
       <section className="favorites-confirmation" aria-label="导入确认">
         <h2>导入确认</h2>

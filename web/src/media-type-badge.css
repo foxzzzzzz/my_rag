@@ -15,5 +15,5 @@
 }
 .media-type-badge[data-kind="album"] { --media-type-color:var(--media-type-album-color) }
 .media-type-badge[data-kind="web"] { --media-type-color:var(--media-type-web-color) }
-.library-view .media-type-badge { background:transparent; color:var(--media-type-color) }
+.media-type-badge[data-variant="text"] { background:transparent; color:var(--media-type-color) }
 .media-type-badge svg { flex:none }

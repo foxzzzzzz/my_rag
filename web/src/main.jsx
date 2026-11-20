@@ -50,7 +50,8 @@ function App() {
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
   draftRef.current = drafts; editRef.current = edits; detailRef.current = detail;
   const source = detail?.source, current = detail?.current, result = current?.result || {};
-  const hasUnclassified=sources.some(isUnclassifiedSource);
+  const librarySources=useMemo(()=>sources.filter(item=>item.current_version_id),[sources]);
+  const hasUnclassified=librarySources.some(isUnclassifiedSource);
   const activeTopic=topic===UNCLASSIFIED_TOPIC&&!hasUnclassified?'':topic;
   const key = draftKey(source?.id, current?.id), draft = drafts[key] || inputDraft(), edit = edits[key];
   const titleEdit=titleEdits[source?.id];
@@ -317,7 +318,7 @@ function App() {
       {error&&<p className="app-feedback error" role="alert">{error}</p>}{message&&<p className="app-feedback" role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
       {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section className="connection-panel"><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
-        <div className="list-page" hidden={!libraryActive}>{dataLoaded?<LibraryView sources={sources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={activeTopic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} listRef={libraryScrollRef} displayTimezone={session.config.display_timezone}/>:<section className="connection-panel"><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
+        <div className="list-page" hidden={!libraryActive}>{dataLoaded?<LibraryView sources={librarySources} catalog={catalog} api={api} open={open} changed={changed} disabled={busy} topicId={activeTopic} filters={libraryFilters} setFilters={setLibraryFilters} onResetFilters={resetLibraryFilters} onImport={()=>navigate('import')} onTrash={()=>run(async()=>{setTrash(await api('/trash'));navigate('trash');})} listRef={libraryScrollRef} displayTimezone={session.config.display_timezone}/>:<section className="connection-panel"><h2 {...titleProps}>资料库</h2><p role="status">正在读取资料与分类…</p></section>}</div>
         {page==='trash'&&<><div className="page-heading"><h1 {...titleProps}>回收站</h1></div><section className="trash-panel">
           <button onClick={()=>navigate('library')}>返回资料库</button>
           <p className="muted">删除的资料保留 {trash.retention_days} 天，到期后由定期维护清理。已有备份副本按快照保留策略轮换。</p>

@@ -170,7 +170,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
     </div>
     {!visible.length&&<div className="library-empty">
       <p><strong>{sources.length?'没有匹配的资料':'资料库暂无资料'}</strong></p>
-      <p className="muted">{sources.length?'清空筛选可查看全部资料。':'导入网页、视频或图文后，即可在这里查找。'}</p>
+      <p className="muted">{sources.length?'清空筛选可查看全部资料。':'导入的资料生成内容后会出现在这里。'}</p>
       {sources.length?<button onClick={onResetFilters}>清空筛选</button>:<button onClick={onImport}>导入资料</button>}
     </div>}
     {!!visible.length&&<div className="library-list-columns library-column-head">
@@ -188,7 +188,7 @@ export function LibraryView({sources,catalog,api,open,changed,disabled,topicId,f
         </label>
         <div className="library-identity">
           <button type="button" className="source" onClick={()=>open(source.id)}><strong>{source.title||source.original_name}</strong></button>
-          <small><MediaTypeBadge kind={source.kind} includeWeb/></small>
+          <small><MediaTypeBadge kind={source.kind} includeWeb variant="text"/></small>
         </div>
         <div className="library-taxonomy">
           <span>{topicNames}</span>
