@@ -16,6 +16,7 @@ def _number(x, lo, hi=None):
 _UNSET = object()
 ASR_UPLOAD_STAGES = ('asr_upload_policy', 'asr_audio_upload')
 ASR_UPLOAD_TASK_STAGES = (*ASR_UPLOAD_STAGES, 'asr_upload_prepare')
+EMPTY_TRANSCRIPT_STATUSES = ('no_speech', 'no_audio', 'visual_only')
 
 def title_metadata(connection, source_id):
     row = connection.execute('SELECT title,revision FROM source_title_overrides WHERE source_id=?', (source_id,)).fetchone()
@@ -128,7 +129,7 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
             return [self._row(c,'versions',r[0]) for r in c.execute('SELECT id FROM versions WHERE source_id=? ORDER BY rowid',(source_id,))]
     def _recover(self,c,now):
         c.execute("""UPDATE tasks
-            SET status=CASE WHEN external_started=1 OR stage IN (?,?,?) THEN 'needs_attention'
+            SET status=CASE WHEN external_started=1 OR stage IN (?,?,?,'media_rebuilt') THEN 'needs_attention'
                             WHEN attempts>=? THEN 'failed' ELSE 'queued' END,
                 error_code=CASE WHEN stage IN (?,?,?) THEN 'upload_interrupted' ELSE error_code END,
                 lease_token=NULL, lease_until=NULL, worker_id=NULL
@@ -196,7 +197,14 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
     def _version(self,c,sid,result,parent,human):
         if not isinstance(result,dict) or any(not isinstance(result.get(k),str) or not result[k].strip() for k in ('title','body','summary','notes','scheme_id','scheme_version','output_kind')) or result.get('output_kind') != ('human_edited' if human else 'machine_initial') or result.get('provenance') not in (('human_edited',) if human else ('local_extraction','provider')) or not isinstance(result.get('evidence'),list) or not result['evidence'] or any(not isinstance(e,dict) or not isinstance(e.get('text'),str) or not e['text'].strip() for e in result['evidence']): raise WorkflowError('invalid_result')
         s=self._row(c,'sources',sid)
-        if s['kind'] in ('video','mp4') and any(not isinstance(result.get(k),str) or not result[k].strip() for k in ('transcript','visual')): raise WorkflowError('invalid_result')
+        if s['kind'] in ('video','mp4'):
+            transcript, visual = result.get('transcript'), result.get('visual')
+            if not isinstance(transcript, str) or not isinstance(visual, str) or not visual.strip():
+                raise WorkflowError('invalid_result')
+            status = result.get('transcript_status')
+            if ((status is None and not transcript.strip())
+                    or (status is not None and (status not in EMPTY_TRANSCRIPT_STATUSES or transcript.strip()))):
+                raise WorkflowError('invalid_result')
         try:
             if 'summary_structure' in result and summary_markdown(result['summary_structure']) != result['summary']:
                 raise ValueError('summary text does not match structure')

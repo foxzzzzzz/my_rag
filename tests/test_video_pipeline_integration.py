@@ -58,6 +58,121 @@ class PipelineIntegration(unittest.TestCase):
         status=video_status(self.wc,self.pc,self.task); self.assertEqual(status['assets'][0]['status'],'provider_managed')
         self.assertNotIn('secret',json.dumps(status)); self.assertNotIn(b'secret', (Path(self.wc['data_dir'])/'workflow.sqlite3').read_bytes())
 
+    def test_no_detectable_speech_continues_and_preserves_provenance(self):
+        store = make_store(self.wc)
+        with store._tx() as db:
+            db.execute('INSERT INTO source_display_titles VALUES (?,?)', (store._row(db, 'tasks', self.task)['source_id'], '平台原文'))
+        code = 'SUCCESS_WITH_NO_VALID_FRAGMENT'
+        self.s.query_asr = lambda ident: {'task_status':'FAILED', 'code':code,
+                                          'results':[{'subtask_status':'FAILED', 'code':code}]}
+        version = self.run_pipeline()
+        result = version['result']
+        self.assertEqual((self.status(), version['output_kind']), ('succeeded', 'machine_initial'))
+        self.assertEqual((result['transcript_status'], result['transcript']), ('no_speech', ''))
+        self.assertIn('平台原文', result['body'])
+        self.assertIn('未检测到可转录语音', result['body'])
+        self.assertEqual([item['type'] for item in result['evidence']], ['visual'])
+        self.assertEqual(self.s.vision_count, 1)
+        self.assertEqual(VideoJournal(store).stage(self.task, 'asr_result')['result']['provider_code'], code)
+        self.assertEqual(store.eligible_sources(), [])
+        service = self.recovery_service()
+        sid = version['source_id']
+        notes = service.revise(sid, {'expected_version_id':version['id'], 'notes':'补充笔记'})
+        self.assertEqual(service.detail(sid)['current']['result']['transcript_status'], 'no_speech')
+        service.revise(sid, {'expected_version_id':notes['id'], 'transcript':'人工补写'})
+        self.assertNotIn('transcript_status', service.detail(sid)['current']['result'])
+        self.assertEqual(service.detail(sid, version['id'])['current']['result']['transcript_status'], 'no_speech')
+
+    def test_no_audio_track_does_not_submit_or_reserve_asr(self):
+        def no_audio(source, work, wc, pc, *, heartbeat):
+            return {**media(source, work, wc, pc, heartbeat=heartbeat), 'audio_path':None, 'audio_seconds':0}
+        version = run_video(self.wc, self.pc, {}, task_id=self.task, services=self.s, storage=self.storage, media=no_audio)
+        self.assertEqual(version['result']['transcript_status'], 'no_audio')
+        self.assertEqual(self.s.submit_count, 0)
+        with closing(sqlite3.connect(self.pc['budget']['ledger'])) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reservations WHERE request_id LIKE '%:asr_submit'").fetchone()[0], 0)
+
+    def recovery_service(self):
+        from personalkb.web_service import WebService
+        return WebService(self.wc, self.pc, {'live_video_enabled':True, 'dispatch_recovery_seconds':60},
+            video_runner=lambda wc, pc, keys, **options: run_video(wc, pc, keys, services=self.s,
+                storage=self.storage, media=media, **options))
+
+    def test_legacy_terminal_asr_requires_explicit_visual_recovery(self):
+        self.s.mode = 'subtask_failed'
+        with self.assertRaisesRegex(WorkflowError, 'asr_subtask_failed'):
+            self.run_pipeline()
+        service = self.recovery_service()
+        item = service.tasks()['items'][0]
+        self.assertEqual(item['failure_stage'], 'asr_result')
+        self.assertEqual(item['video_recovery']['mode'], 'visual-only')
+        with self.assertRaisesRegex(WorkflowError, 'video_recovery_conflict'):
+            service.dispatcher.enqueue(self.task, 'resume', True)
+        with self.assertRaisesRegex(WorkflowError, 'paid_consent_required'):
+            service.dispatcher.recover_video(self.task, 'visual-only')
+        queued = service.dispatcher.recover_video(self.task, 'visual-only', allow_paid=True)
+        duplicate = service.dispatcher.recover_video(self.task, 'visual-only', allow_paid=True)
+        self.assertFalse(queued['duplicate'])
+        self.assertTrue(duplicate['duplicate'])
+        self.assertNotIn('video_recovery', service.tasks()['items'][0])
+        self.assertEqual(service.dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual((self.s.submit_count, self.s.query_count), (1, 1))
+        journal = VideoJournal(service.store)
+        self.assertEqual(journal.stage(self.task, 'asr_result')['result']['error'], 'asr_subtask_failed')
+        self.assertEqual(journal.stage(self.task, 'asr_visual_only')['result']['previous_error'], 'asr_subtask_failed')
+        source = service.store.get_task(self.task)['source_id']
+        self.assertEqual(service.detail(source)['current']['result']['transcript_status'], 'visual_only')
+
+    def test_rebuild_legacy_partial_cache_after_regular_attempt_limit(self):
+        service = self.recovery_service()
+        work = Path(self.wc['data_dir'])/'video-work'/self.task
+        work.mkdir(parents=True)
+        (work/'audio.wav').write_bytes(b'partial audio')
+        with service.store._tx() as db:
+            db.execute("UPDATE tasks SET status='failed',stage='preparing_video',attempts=?,error_code='video_processing_failed' WHERE id=?",
+                       (service.store.max_attempts, self.task))
+        task = service.tasks()['items'][0]
+        self.assertEqual(task['failure_code'], 'media_workdir_unverified')
+        self.assertEqual(task['video_recovery']['mode'], 'rebuild-media')
+        with self.assertRaisesRegex(WorkflowError, 'invalid_state'):
+            service.dispatcher.retry(self.task, allow_paid=True)
+        with self.assertRaisesRegex(WorkflowError, 'paid_consent_required'):
+            service.dispatcher.recover_video(self.task, 'rebuild-media')
+        service.dispatcher.recover_video(self.task, 'rebuild-media', allow_paid=True)
+        self.assertEqual(service.dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual(service.store.get_task(self.task)['attempts'], service.store.max_attempts + 1)
+        self.assertEqual((work.with_name('.'+work.name+'-incomplete')/'audio.wav').read_bytes(), b'partial audio')
+        self.assertEqual(self.s.submit_count, 1)
+        with self.assertRaisesRegex(WorkflowError, 'video_recovery_conflict'):
+            service.dispatcher.recover_video(self.task, 'rebuild-media', allow_paid=True)
+
+    def test_interrupted_rebuild_can_continue_from_retained_backup(self):
+        service = self.recovery_service()
+        journal = VideoJournal(service.store)
+        work = Path(self.wc['data_dir'])/'video-work'/self.task
+        work.mkdir(parents=True)
+        (work/'audio.wav').write_bytes(b'original partial cache')
+        with service.store._tx() as db:
+            db.execute("UPDATE tasks SET status='failed',stage='preparing_video',attempts=?,error_code='video_processing_failed' WHERE id=?",
+                       (service.store.max_attempts, self.task))
+        service.dispatcher.recover_video(self.task, 'rebuild-media', allow_paid=True)
+        service.dispatcher._claim()
+        claimed = journal.claim_task(self.task, 'video-worker', rebuild_media=True)
+        token = claimed['lease_token']
+        source = service.store.get_source(claimed['source_id'])
+        journal.record_local_recovery(self.task, token, 'media_rebuilt', source['sha256'], claimed['error_code'])
+        service.store.checkpoint(self.task, token, 'rebuilding_media')
+        backup = work.with_name('.'+work.name+'-incomplete')
+        work.rename(backup)
+        with service.store._tx() as db:
+            db.execute('UPDATE tasks SET lease_until=0 WHERE id=?', (self.task,))
+        self.assertIsNone(service.dispatcher._claim())
+        self.assertEqual(service.tasks()['items'][0]['video_recovery']['mode'], 'rebuild-media')
+        service.dispatcher.recover_video(self.task, 'rebuild-media', allow_paid=True)
+        self.assertEqual(service.dispatcher.process_next()['dispatch_state'], 'done')
+        self.assertEqual((backup/'audio.wav').read_bytes(), b'original partial cache')
+        self.assertEqual(self.s.submit_count, 1)
+
     def test_reprocess_creates_pending_child_and_keeps_prior_review(self):
         from types import SimpleNamespace
         from personalkb.web_dispatch import WebDispatcher

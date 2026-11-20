@@ -1,5 +1,6 @@
 """Persisted, explicit browser processing requests; no implicit paid scans."""
 import os
+import json
 import threading
 import time
 import uuid
@@ -7,6 +8,14 @@ from decimal import Decimal, InvalidOperation
 
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
+from .video_recovery import (PARTIAL_MEDIA_ERRORS, TERMINAL_ASR_ERRORS, can_rebuild_media, can_use_visual_only,
+                             media_workspace, terminal_asr_stage)
+from .workflow import _root
+
+VIDEO_RECOVERY_MODES = ('visual-only', 'rebuild-media')
+HARD_VIDEO_FAILURES = frozenset({'invalid_frame', 'empty_frames', 'media_cache_changed', 'media_workdir_unverified',
+                                'media_missing_duration', 'media_missing_video', 'media_video_timeline_invalid',
+                                'invalid_media_duration', 'audio_not_full_length', 'source_integrity'})
 
 
 def task_stages(connection, task_id):
@@ -49,6 +58,80 @@ class WebDispatcher:
             if 'processing_mode' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
                 c.execute("ALTER TABLE web_dispatch ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'preview'")
             initialize_chat_attempts(c)
+
+    def video_failure(self, c, task, stages):
+        reason = task['error_code']
+        if task['status'] == 'needs_attention':
+            terminal = terminal_asr_stage(c, task['id'], stages)
+            if terminal:
+                failure = {'failure_stage': 'asr_result', 'resume_blocked_reason': terminal['error']}
+                if terminal['provider_code']:
+                    failure['asr_provider_code'] = terminal['provider_code']
+                if can_use_visual_only(task, stages, terminal['error']):
+                    attempt = {'mode': 'visual-only'}
+                    work = media_workspace(_root(self.service.wc), task['id'])
+                    try:
+                        manifest = work / 'media-manifest.json'
+                        if not any(p.is_symlink() for p in (manifest, *manifest.parents)):
+                            count = len(json.loads(manifest.read_text(encoding='utf8'))['frames'])
+                            price = self.service.pc['strategy']['reserve_cny']
+                            if count:
+                                attempt['amount_cny'] = format(Decimal(str(price['text'])) + count * Decimal(str(price['vision'])), 'f')
+                    except (OSError, ValueError, KeyError, TypeError, InvalidOperation):
+                        pass
+                    failure['video_recovery'] = attempt
+                return failure
+            return ({'failure_stage': 'asr_result', 'resume_blocked_reason': reason}
+                    if reason in TERMINAL_ASR_ERRORS else {})
+
+        if task['status'] not in ('failed', 'cancelled'):
+            return {}
+        failure = {}
+        if reason in PARTIAL_MEDIA_ERRORS and task['stage'] in ('preparing_video', 'rebuilding_media'):
+            work = media_workspace(_root(self.service.wc), task['id'])
+            if can_rebuild_media(task, stages, work):
+                failure.update(failure_stage=task['stage'], failure_code='media_workdir_unverified', retry_blocked_reason='media_workdir_unverified',
+                               video_recovery={'mode': 'rebuild-media'})
+        if reason in HARD_VIDEO_FAILURES:
+            failure.setdefault('retry_blocked_reason', reason)
+            failure.setdefault('failure_stage', task['stage'])
+        return failure
+
+    def recover_video(self, task_id, mode, *, allow_paid=False):
+        if mode not in VIDEO_RECOVERY_MODES:
+            raise WorkflowError('invalid_request')
+        if allow_paid is not True:
+            raise WorkflowError('paid_consent_required')
+        if not self.config['live_video_enabled']:
+            raise WorkflowError('video_disabled')
+        with self.store._tx() as c:
+            task = self.store._row(c, 'tasks', task_id)
+            source = self.store._row(c, 'sources', task['source_id'])
+            if source['deleted']:
+                raise WorkflowError('source_deleted')
+            if task_is_archived(c, task_id):
+                raise WorkflowError('task_archived')
+            if source['kind'] not in ('video', 'mp4'):
+                raise WorkflowError('video_recovery_conflict')
+            old = c.execute('SELECT mode,state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
+            if old and old['state'] in ('pending', 'working'):
+                if old['mode'] != mode:
+                    raise WorkflowError('dispatch_conflict')
+                return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
+            recovery = self.video_failure(c, task, task_stages(c, task_id)).get('video_recovery')
+            if not recovery or recovery['mode'] != mode:
+                raise WorkflowError('video_recovery_conflict')
+            if c.execute("""SELECT 1 FROM tasks WHERE source_id=? AND id<>? AND
+                (status IN ('queued','running') OR (status='needs_attention' AND error_code IS NOT 'version_conflict'))""",
+                         (task['source_id'], task_id)).fetchone():
+                raise WorkflowError('video_recovery_conflict')
+            if mode == 'rebuild-media':
+                c.execute("UPDATE tasks SET status='queued' WHERE id=?", (task_id,))
+            c.execute("""INSERT INTO web_dispatch(task_id,mode,state,requested,processing_mode)
+                VALUES(?,?,'pending',?,'preview') ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,
+                state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL,processing_mode='preview'""",
+                      (task_id, mode, time.time()))
+            return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
 
     def model_recovery(self, c, task, stages):
         blocked = [r['name'] for r in stages
@@ -130,15 +213,20 @@ class WebDispatcher:
                 if not allow_paid: raise WorkflowError('paid_consent_required')
             elif mode == 'resume': raise WorkflowError('invalid_state')
             old = c.execute('SELECT * FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
-            if old and old['state'] in ('pending', 'working') and old['mode'] == mode:
-                if old['processing_mode'] != processing_mode: raise WorkflowError('dispatch_conflict')
-                return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
+            if old and old['state'] in ('pending', 'working'):
+                if old['mode'] == mode:
+                    if old['processing_mode'] != processing_mode: raise WorkflowError('dispatch_conflict')
+                    return {'task_id': task_id, 'dispatch_state': old['state'], 'duplicate': True}
+                if old['mode'] in VIDEO_RECOVERY_MODES:
+                    raise WorkflowError('dispatch_conflict')
             expected = 'needs_attention' if mode == 'resume' else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
             if mode == 'resume':
                 if source['kind'] in ('video', 'mp4') and task['error_code'] == 'version_conflict':
                     raise WorkflowError('version_conflict')
                 stages = task_stages(c, task_id)
+                if source['kind'] in ('video', 'mp4') and self.video_failure(c, task, stages).get('resume_blocked_reason'):
+                    raise WorkflowError('video_recovery_conflict')
                 if has_unknown_submission(task, stages, legacy_upload=legacy_upload_interruption(c, task, stages)):
                     raise WorkflowError('unknown_submission')
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,claimed,owner,error_code) VALUES(?,?,'pending',?,NULL,NULL,NULL) ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL", (task_id, mode, time.time()))
@@ -180,7 +268,7 @@ class WebDispatcher:
             row = None
             for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
                 reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
-                if pending['mode'] == 'recover-model' or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                if pending['mode'] in ('recover-model', *VIDEO_RECOVERY_MODES) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
                     row = pending
                     break
             if not row: return None
@@ -263,6 +351,8 @@ class WebDispatcher:
                 raise WorkflowError('invalid_state')
             if task['status'] not in ('failed','cancelled') or task['external_started'] or task['attempts']>=self.store.max_attempts:
                 raise WorkflowError('invalid_state')
+            if source['kind'] in ('video', 'mp4') and self.video_failure(c, task, task_stages(c, task_id)).get('retry_blocked_reason'):
+                raise WorkflowError('video_recovery_conflict')
             if source['kind'] in ('video', 'mp4') and c.execute(
                 """SELECT 1 FROM tasks WHERE source_id=? AND id<>? AND
                    (status IN ('queued','running') OR (status='needs_attention' AND error_code IS NOT 'version_conflict'))""",
@@ -308,7 +398,7 @@ class WebDispatcher:
             task = self.store.get_task(tid)
             source = self.store.get_source(task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
-            resume = job['mode'] in ('resume', 'recover-model')
+            resume = job['mode'] in ('resume', 'recover-model', 'visual-only')
             expected = 'needs_attention' if resume else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
             if source['kind'] == 'html':
@@ -344,7 +434,12 @@ class WebDispatcher:
                     keys.update(os.environ)
                 else:
                     keys = {}  # Injected offline tests do not read secrets.
-                runner(self.service.wc, self.service.pc, keys, task_id=tid, resume=resume)
+                options = {}
+                if job['mode'] == 'visual-only':
+                    options['visual_only'] = True
+                if job['mode'] == 'rebuild-media':
+                    options['rebuild_media'] = True
+                runner(self.service.wc, self.service.pc, keys, task_id=tid, resume=resume, **options)
             else:
                 raise WorkflowError('unsupported_format')
         except Exception as exc:

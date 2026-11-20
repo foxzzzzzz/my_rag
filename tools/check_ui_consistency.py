@@ -72,6 +72,7 @@ class Fixture:
         self.unexpected = []
         self.logged_in = True
         self.fail_read = False
+        self.live_video_enabled = False
         self.poll_interval_ms = 60000
         self.hold_sources = False
         self.pending_sources = None
@@ -110,6 +111,15 @@ class Fixture:
                 self.budget.update(limit_cny='150.25', available_cny='50.809282', revision=1,
                                    changes=[{'previous_limit_cny':'100', 'limit_cny':'150.25', 'changed_at':'2026-11-20T06:30:00Z'}])
                 return reply(self.budget)
+            if path == '/tasks/task0/retry' and method == 'POST':
+                assert body == {'allow_paid': True, 'processing_mode': 'preview'}, body
+                self.tasks[0].update(status='queued', error_code=None, dispatch={'state': 'pending'})
+                return reply({'dispatch_state': 'pending'})
+            if method == 'POST' and re.fullmatch(r'/tasks/task[02]/(visual-only|rebuild-media)', path):
+                assert body == {'allow_paid': True}, body
+                task = next(t for t in self.tasks if t['id'] == path.split('/')[2])
+                task.update(dispatch={'state': 'pending'})
+                return reply({'dispatch_state': 'pending'})
             if path == "/classifications/bulk":
                 updates = []
                 for entry in body["items"]:
@@ -144,7 +154,7 @@ class Fixture:
                     return reply({"error": "login_required"}, 401)
                 return reply({"csrf_token": "isolated", "config": {
                     "auth_enabled": True, "poll_interval_ms": self.poll_interval_ms, "quality_target": 98,
-                    "display_timezone": "Asia/Shanghai", "live_html_enabled": False, "live_video_enabled": False,
+                    "display_timezone": "Asia/Shanghai", "live_html_enabled": False, "live_video_enabled": self.live_video_enabled,
                     "max_upload_bytes": 1048576, "max_html_bytes": 1048576,
                 }})
             if path == "/sources":
@@ -171,7 +181,8 @@ class Fixture:
                         "source": source, "eligible": source["eligible"],
                         "current": {"id": source["current_version_id"], "content_sha256": "b" * 64,
                                     "result": {"summary": "摘要说明。", "notes": "## 阅读笔记\n\n一段可核对的笔记。",
-                                               "body": "## 正文内容\n\n原文保留。", "visual": "画面中的步骤。"}} if source["current_version_id"] else None,
+                                               "body": "## 正文内容\n\n原文保留。", "visual": "画面中的步骤。",
+                                               "transcript_status": source.get('transcript_status')}} if source["current_version_id"] else None,
                         "review": self.review if source["id"] == "s0" else None,
                     })
             if path == "/rag/status":
@@ -318,7 +329,8 @@ def verify_library_version_gate(browser, address, width, height):
     nav(page, '任务')
     failed = page.locator('.task-item').filter(has_text='首次处理失败')
     expect(failed.get_by_text('任务或累计预算不足，无法自动重试。')).to_be_visible()
-    expect(failed.get_by_role('button', name='重试')).to_be_visible()
+    expect(failed.get_by_role('button', name='重试')).to_be_disabled()
+    expect(failed.locator('.task-retry-hint')).to_have_count(0)
     failed.get_by_role('button', name='查看资料', exact=True).click()
     expect(page.get_by_text('尚未生成可审核内容。')).to_be_visible()
     page.get_by_role('button', name='到任务页处理', exact=True).click()
@@ -543,6 +555,122 @@ def verify_task_failure_priority(browser, address, output):
     page.close()
 
 
+def verify_video_recovery(browser, address, output, width, height):
+    fixture = Fixture()
+    fixture.live_video_enabled = True
+    visual, cache = fixture.tasks[0], fixture.tasks[2]
+    visual.update(status='needs_attention', error_code='asr_remote_failed', resume_blocked_reason='asr_remote_failed', failure_stage='asr_result',
+                  video_recovery={'mode':'visual-only', 'amount_cny':'1.20'}, dispatch={'state':'error'})
+    cache.update(status='failed', archived=False, error_code='invalid_frame', retry_blocked_reason='attempts_exhausted',
+                 attempts=3, max_attempts=3, video_recovery={'mode':'rebuild-media'}, dispatch={'state':'error'})
+    page, errors = open_page(browser, address, fixture, width, height)
+    nav(page, '任务')
+    visual_row = page.locator('.task-item').filter(has_text=visual['source']['title'])
+    cache_row = page.locator('.task-item').filter(has_text=cache['source']['title'])
+    expect(visual_row.locator('.task-line')).to_contain_text('语音识别服务未返回可用转录')
+    expect(cache_row.locator('.task-line')).to_contain_text('画面帧无效')
+    expect(cache_row.get_by_role('button', name='重试', exact=True)).to_have_count(0)
+    expect(visual_row.get_by_role('button', name='恢复', exact=True)).to_have_count(0)
+    expect(cache_row.get_by_text('已尝试 3 次 · 常规上限 3 次')).to_be_visible()
+    visual_row.get_by_role('button', name='详情', exact=True).click()
+    expect(visual_row.locator('.task-details dt:text-is("失败阶段") + dd')).to_have_text('获取转录结果')
+    expect(visual_row.locator('.task-details dt:text-is("下一步") + dd')).to_contain_text('已提取的画面')
+    expect(visual_row.get_by_text('剩余步骤预计预留 ¥1.20。', exact=False)).to_be_visible()
+    expect(visual_row.get_by_role('button', name='仅按画面和原文继续')).to_be_disabled()
+    screenshot(page, output, 'video-recovery')
+    page.get_by_text('处理设置', exact=True).click()
+    page.get_by_role('checkbox', name='我同意所选视频或网页模型处理产生费用').check()
+    visual_row.get_by_role('button', name='仅按画面和原文继续').click()
+    expect(visual_row.get_by_text('已排队', exact=True)).to_be_visible()
+    expect(visual_row.get_by_role('button', name='仅按画面和原文继续')).to_have_count(0)
+    cache_row.get_by_role('button', name='重建缓存并重试').click()
+    expect(cache_row.get_by_text('已排队', exact=True)).to_be_visible()
+    assert ('POST', '/tasks/task0/visual-only', {'allow_paid':True}) in fixture.writes
+    assert ('POST', '/tasks/task2/rebuild-media', {'allow_paid':True}) in fixture.writes
+    fixture.sources[0]['transcript_status'] = 'no_speech'
+    visual_row.get_by_role('button', name='查看资料', exact=True).click()
+    page.get_by_role('button', name='语音转录', exact=True).click()
+    expect(page.get_by_text('未检测到可转录语音。', exact=True)).to_be_visible()
+    expect(page.get_by_text('暂无此项内容', exact=True)).to_have_count(0)
+    print(f'{width}px video recovery actions and no-speech reading state passed')
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    page.close()
+
+
+def verify_retry_consent(browser, address, output, width, height):
+    fixture = Fixture()
+    fixture.live_video_enabled = True
+    video, webpage = fixture.tasks[:2]
+    video.update(status='failed', error_code='budget_invalid_or_exceeded')
+    webpage.update(status='failed', error_code='empty_output')
+    page, errors = open_page(browser, address, fixture, width, height)
+    nav(page, '任务')
+    video_row = page.locator('.task-item').filter(has_text=video['source']['title'])
+    web_row = page.locator('.task-item').filter(has_text=webpage['source']['title'])
+    retry = video_row.get_by_role('button', name='重试', exact=True)
+    icon = video_row.get_by_role('button', name='查看重试提示')
+    hint = video_row.locator('.task-retry-hint')
+    budget = video_row.get_by_role('button', name='查看预算')
+    expect(retry).to_be_disabled()
+    expect(icon).to_be_visible()
+    expect(hint).to_be_hidden()
+    expect(retry).to_have_accessible_description('重试前，请在「处理设置」勾选同意模型费用。')
+    expect(budget).to_be_enabled()
+    expect(web_row.get_by_role('button', name='重试', exact=True)).to_be_enabled()
+    expect(web_row.locator('.task-retry-hint')).to_have_count(0)
+    icon_box, button_box = icon.bounding_box(), retry.bounding_box()
+    assert abs(icon_box['x'] - button_box['x'] - button_box['width']) <= 1
+    assert video_row.locator('.task-actions').evaluate('el => el.scrollWidth === el.clientWidth')
+    screenshot(page, output, 'task-retry-icon')
+
+    if width <= 390:
+        icon.tap()
+    else:
+        icon.hover()
+    expect(hint).to_be_visible()
+    hint_box, icon_box = hint.bounding_box(), icon.bounding_box()
+    assert 0 <= hint_box['x'] <= hint_box['x'] + hint_box['width'] <= width
+    assert 0 <= hint_box['y'] <= hint_box['y'] + hint_box['height'] <= height
+    assert hint_box['y'] + hint_box['height'] <= icon_box['y'] or icon_box['y'] + icon_box['height'] <= hint_box['y']
+    screenshot(page, output, 'task-retry-tooltip')
+    if width <= 390:
+        page.get_by_role('heading', name='任务', exact=True).tap()
+    else:
+        hint.hover()
+        expect(hint).to_be_visible()
+        budget.hover()
+    expect(hint).to_be_hidden()
+
+    budget.focus()
+    page.keyboard.press('Tab')
+    expect(icon).to_be_focused()
+    expect(hint).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(hint).to_be_hidden()
+    expect(icon).to_be_focused()
+
+    page.get_by_text('处理设置', exact=True).click()
+    consent = page.get_by_role('checkbox', name='我同意所选视频或网页模型处理产生费用')
+    consent.check()
+    expect(retry).to_be_enabled()
+    expect(hint).to_have_count(0)
+    expect(icon).to_have_count(0)
+    expect(retry).not_to_have_attribute('aria-describedby', re.compile('.+'))
+    consent.uncheck()
+    expect(retry).to_be_disabled()
+    expect(icon).to_be_visible()
+    expect(hint).to_be_hidden()
+    assert not any(path.endswith('/retry') for _, path, _ in fixture.writes)
+    consent.check()
+    retry.click()
+    expect(video_row.get_by_text('已排队', exact=True)).to_be_visible()
+    assert [write for write in fixture.writes if write[1].endswith('/retry')] == [
+        ('POST', '/tasks/task0/retry', {'allow_paid': True, 'processing_mode': 'preview'})]
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px retry consent hint and explicit retry passed')
+    page.close()
+
+
 def verify_budget(browser, address, output, width, height):
     fixture = Fixture()
     page, errors = open_page(browser, address, fixture, width, height)
@@ -709,10 +837,12 @@ def main():
             assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
             print(f"{width}px browser assertions passed")
             page.close()
+            verify_retry_consent(browser, address, args.screenshots, width, height)
         verify_connection(browser, address, args.screenshots)
         verify_scroll(browser, address)
         verify_task_failure_priority(browser, address, args.screenshots)
         for width, height in ((1440, 900), (390, 844)):
+            verify_video_recovery(browser, address, args.screenshots, width, height)
             verify_budget(browser, address, args.screenshots, width, height)
             verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)

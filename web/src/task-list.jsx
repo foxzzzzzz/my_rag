@@ -11,6 +11,25 @@ const statusOptions={
 const actionNames={start:'开始',resume:'恢复',retry:'重试',cancel:'取消'};
 const htmlModes={preview:'离线正文预览',model:'模型摘要与笔记'};
 const failureReasons={
+  invalid_frame:'画面帧无效，视频抽帧失败。',
+  media_workdir_unverified:'视频抽帧未完成，媒体缓存不完整。',
+  media_cache_changed:'媒体缓存发生变化，请检查缓存后再处理。',
+  media_command_failed:'媒体处理命令失败，请检查文件和处理环境。',
+  media_timeout:'媒体准备超时，请检查后台负载后再处理。',
+  resource_limit:'服务器剩余磁盘空间或可用内存不足。',
+  media_workdir_busy:'媒体准备尚未释放工作目录。',
+  media_rebuild_interrupted:'媒体缓存重建中断。',
+  media_missing_video:'原文件中没有可用的画面轨。',
+  media_missing_duration:'无法读取原视频的时长。',
+  media_video_timeline_invalid:'无法确定画面轨的有效时间范围。',
+  audio_not_full_length:'提取的音频与原音轨时长不符。',
+  empty_frames:'未提取到可用于分析的画面。',
+  asr_remote_failed:'语音识别服务未返回可用转录。',
+  asr_subtask_failed:'语音识别未生成可用转录。',
+  asr_pending:'语音识别仍在处理，可继续查询结果。',
+  asr_no_speech:'未检测到有效语音，可仅按画面和原文继续。',
+  asr_empty:'语音识别返回了空转录。',
+  attempts_exhausted:'重试次数已用尽，请检查失败原因。',
   source_deleted:'来源已移入回收站',
   source_integrity:'原始文件校验失败',
   missing_model_credentials:'缺少模型凭据',
@@ -33,10 +52,44 @@ const failureReasons={
 };
 
 function taskStatus(task, queuedForProcessing) {
+  if(queuedForProcessing)return 'queued';
   if(task.status==='queued'||task.status==='pending')return queuedForProcessing?'queued':'waiting';
   if(task.status==='succeeded')return 'completed';
   if(task.status==='failed'||task.status==='needs_attention')return 'attention';
   return task.status;
+}
+
+function RetryConsentHint({taskId,label='重试',prompt='重试前，请在「处理设置」勾选同意模型费用。'}) {
+  const hint=useRef(null);
+  const hintId='task-retry-hint-'+taskId;
+
+  function show(event) {
+    if(!hint.current.matches(':popover-open'))hint.current.showPopover({source:event.currentTarget});
+  }
+
+  function hide() {
+    if(hint.current.matches(':popover-open'))hint.current.hidePopover();
+  }
+
+  return <span className="task-retry-with-hint">
+    <button type="button" disabled aria-describedby={hintId}>{label}</button>
+    <span className="task-retry-hint-target" onPointerLeave={event=>{
+      if(event.pointerType==='mouse'&&!event.currentTarget.querySelector(':focus-visible'))hide();
+    }}>
+      <button type="button" className="task-retry-hint-icon" aria-label="查看重试提示" aria-describedby={hintId}
+        popoverTarget={hintId}
+        onPointerEnter={event=>{if(event.pointerType==='mouse')show(event);}}
+        onFocus={event=>{if(event.currentTarget.matches(':focus-visible'))show(event);}} onBlur={hide}>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.25"/>
+          <path d="M8 4.75v3.75m0 2.5v.25" strokeLinecap="round"/>
+        </svg>
+      </button>
+      <span ref={hint} id={hintId} className="task-retry-hint" role="tooltip" popover="auto">
+        {prompt}
+      </span>
+    </span>
+  </span>;
 }
 
 function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,expanded,toggle}) {
@@ -51,6 +104,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const title=item?.title||item?.original_name||'来源资料不可用';
   const paidNeeded=video||(!album&&mode==='model');
   const enabled=video||album?config.live_video_enabled:mode!=='model'||config.live_html_enabled;
+  const showAction=action&&(action==='cancel'||item&&!item.deleted);
+  const retryNeedsConsent=showAction&&action==='retry'&&paidNeeded&&enabled&&!paid;
   const status=taskStatus(task,queuedForProcessing);
   const label=status==='attention'?statusText(task.status):statusOptions[status]||statusText(task.status);
   const progress=progressText(task.progress,task.status);
@@ -59,7 +114,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const diagnostic=task.model_diagnostic;
   const currentError=task.dispatch?.error_code||task.error_code;
   const recoveryLimit=task.resume_blocked_reason;
-  const problem=currentError&&currentError!=='unknown_submission'?currentError:diagnostic?.code||currentError||recoveryLimit;
+  const problem=task.failure_code||(currentError&&currentError!=='unknown_submission'?currentError:diagnostic?.code||currentError||recoveryLimit);
   const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const previousModelError=diagnostic?.code&&diagnostic.code!==problem?diagnostic.code:null;
   const summary=reason&&reason.startsWith('操作失败：')&&diagnostic?.code!==problem?'查看详情了解原因':reason;
@@ -67,6 +122,15 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const budgetBlock=task.budget_block;
   const detailId='task-detail-'+task.id;
   const recovery=task.model_recovery;
+  const videoRecovery=!queuedForProcessing&&['visual-only','rebuild-media'].includes(task.video_recovery?.mode)?task.video_recovery:null;
+  const visualOnly=videoRecovery?.mode==='visual-only';
+  const recoveryAction=visualOnly?'仅按画面和原文继续':'重建缓存并重试';
+  const videoNextStep=videoRecovery?(visualOnly
+    ? '可以用已提取的画面和来源原文生成待审核内容，语音栏会说明转录未完成。若原片应有人声，请先检查音轨。'
+    : '确认后会保留原片及旧缓存，并重新提取可用画面。')
+    :task.retry_blocked_reason==='attempts_exhausted'?'已达到常规尝试上限，请根据当前原因检查原片或处理环境。'
+    :task.retry_blocked_reason==='unknown_submission'?'先核对原模型请求的状态和费用预留。'
+    :task.retry_blocked_reason?'检查原片是否能完整播放。如需更换原片，请重新导入可用版本。':null;
   const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode]);
   return <article className="task-grid task-item">
     <div className="task-identity">
@@ -78,10 +142,12 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
     </div>
     <div className="task-state">
       <strong data-status={status}>{label}</strong>
-      {summary?<span className="task-line" title={summary}>{summary}</span>
+      {status==='attention'&&summary?<span className={`task-line${videoNextStep?' task-line--diagnosis':''}`} title={summary}>{summary}</span>
         :status==='running'?<span>{[stage,progress].filter(Boolean).join(' · ')}</span>
         :stage&&status==='completed'?<span className="muted">{stage}</span>:null}
-      {budgetBlocked&&budgetBlock&&<span className="muted">本次需预留 ¥{budgetBlock.required_cny}，项目当前可用 ¥{budgetBlock.available_cny}</span>}
+      {status==='attention'&&task.attempts>=task.max_attempts&&task.retry_blocked_reason&&
+        <span className="muted">已尝试 {task.attempts} 次 · 常规上限 {task.max_attempts} 次</span>}
+      {status==='attention'&&budgetBlocked&&budgetBlock&&<span className="muted">本次需预留 ¥{budgetBlock.required_cny}，项目当前可用 ¥{budgetBlock.available_cny}</span>}
     </div>
     <div className="task-updated muted">
       <span className="task-mobile-label">更新时间 </span>
@@ -89,8 +155,11 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
     </div>
     <div className="task-actions">
       {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>处理模型请求</button>}
-      {budgetBlocked&&<button type="button" onClick={onBudget}>查看预算</button>}
-      {action&&(action==='cancel'||item&&!item.deleted)&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
+      {status==='attention'&&budgetBlocked&&<button type="button" onClick={onBudget}>查看预算</button>}
+      {videoRecovery&&item&&!item.deleted&&!task.archived&&(enabled&&!paid
+        ?<RetryConsentHint taskId={task.id} label={recoveryAction} prompt="继续处理前，请在「处理设置」勾选同意模型费用。"/>
+        :<button type="button" disabled={busy||!enabled} onClick={()=>onAction(task.id,videoRecovery.mode,{allow_paid:true})}>{recoveryAction}</button>)}
+      {retryNeedsConsent?<RetryConsentHint taskId={task.id}/>:showAction&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
         onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{taskActionLabel(task,action)||actionNames[action]}</button>}
       {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id,{versionId:task.view_version_id})}>{task.viewing_history?'查看旧版本':task.view_version_id||task.status!=='succeeded'?'查看资料':'查看当前资料'}</button>}
       {(task.archived||task.can_archive)&&<button type="button" disabled={busy}
@@ -101,12 +170,17 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {item?.original_name&&<><dt>原文件名</dt><dd>{item.original_name}</dd></>}
       <dt>任务 ID</dt><dd>{task.id}</dd>
       <dt>创建时间</dt><dd>{formatDate(task.created_at,config.display_timezone)||'—'}</dd>
-      {stage&&<><dt>阶段</dt><dd>{stage}</dd></>}
+      {(stage||task.failure_stage)&&<><dt>{task.failure_stage?'失败阶段':'阶段'}</dt><dd>{task.failure_stage?stageText(task.failure_stage):stage}</dd></>}
       <dt>进度</dt><dd>{queuedForProcessing||task.dispatch?.state==='pending'?'已加入处理队列':progress}</dd>
       {item?.kind==='html'&&<><dt>处理方式</dt><dd>{htmlModes[mode]}</dd></>}
       {problem&&<><dt>当前原因</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {videoNextStep&&<><dt>下一步</dt><dd>{videoNextStep}</dd></>}
       {previousModelError&&<><dt>上次模型失败原因</dt><dd>{failureReasons[previousModelError]||errorText(400,previousModelError)}</dd></>}
       {recoveryLimit&&recoveryLimit!==problem&&<><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
+      {task.retry_blocked_reason&&task.retry_blocked_reason!==problem&&<><dt>重试限制</dt><dd>{failureReasons[task.retry_blocked_reason]||errorText(400,task.retry_blocked_reason)} <code>{task.retry_blocked_reason}</code></dd></>}
+      {task.attempts!=null&&<><dt>尝试次数</dt><dd>{task.attempts} 次{task.max_attempts!=null&&` · 常规上限 ${task.max_attempts} 次`}</dd></>}
+      {videoRecovery&&<><dt>恢复费用</dt><dd>{videoRecovery.amount_cny?`剩余步骤预计预留 ¥${videoRecovery.amount_cny}。`:'沿用项目和来源已有预算限制。'}{!paid&&' 请先在「处理设置」勾选同意模型费用。'}</dd></>}
+      {task.asr_provider_code&&<><dt>转录服务错误码</dt><dd><code>{task.asr_provider_code}</code></dd></>}
       {diagnostic&&<><dt>结束原因</dt><dd>{diagnostic.finish_reason??'未记录'}</dd>
         <dt>输出字符数</dt><dd>{diagnostic.output_chars??'未记录'}</dd>
         <dt>Token 用量</dt><dd>{[

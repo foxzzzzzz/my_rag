@@ -89,8 +89,27 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .task-state [data-status="completed"] { color:var(--connection-online) }
 .task-state [data-status="running"],.task-state [data-status="queued"] { color:var(--accent) }
 .task-line { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--danger) }
+.task-line--diagnosis { white-space:normal }
 .task-actions { gap:6px }
 .task-actions button { padding:4px 8px }
+.task-retry-with-hint { display:inline-flex; white-space:nowrap }
+.task-retry-with-hint > button { border-inline-end:0; border-start-end-radius:0; border-end-end-radius:0; padding-inline-end:3px }
+.task-retry-hint-target { display:inline-flex }
+.task-actions .task-retry-hint-icon {
+  display:grid; place-items:center; min-inline-size:24px; padding-inline:4px;
+  border-inline-start:0; border-start-start-radius:0; border-end-start-radius:0;
+  color:var(--muted);
+}
+.task-actions .task-retry-hint-icon:hover:not(:disabled) { color:var(--accent); border-color:var(--border) }
+.task-retry-hint {
+  inset:auto; margin:0; position-area:block-start center;
+  position-try-fallbacks:flip-block, --task-retry-hint-left, --task-retry-hint-right;
+  inline-size:max-content; max-inline-size:calc(100vw - 2 * var(--mobile-pad-x));
+  padding:var(--radius) var(--mobile-pad-x); border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--surface); color:var(--text); font-size:var(--sidebar-meta-size); white-space:normal;
+}
+@position-try --task-retry-hint-left { position-area:block-start span-inline-start; justify-self:end }
+@position-try --task-retry-hint-right { position-area:block-start span-inline-end; justify-self:start }
 .task-mobile-label { display:none }
 .task-details {
   grid-column:1 / -1; margin:0; padding:8px 10px; border-radius:var(--radius);

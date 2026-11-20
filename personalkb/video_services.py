@@ -113,17 +113,24 @@ class ProviderClient:
 
     def download_asr(self, url, audio_seconds):
         data = self._request(url, download=True)
+        transcripts = data.get('transcripts')
+        if not isinstance(transcripts, list):
+            raise ProviderError('provider_response_invalid')
         segments = []
-        for transcript in data.get('transcripts', []):
-            for s in transcript.get('sentences', []):
-                if not isinstance(s.get('text'), str) or not s['text'].strip():
+        for transcript in transcripts:
+            if not isinstance(transcript, dict) or not isinstance(transcript.get('sentences'), list):
+                raise ProviderError('provider_response_invalid')
+            for s in transcript['sentences']:
+                if not isinstance(s, dict) or not isinstance(s.get('text'), str):
+                    raise ProviderError('provider_response_invalid')
+                if not s['text'].strip():
                     continue
                 a, b = s.get('begin_time'), s.get('end_time')
                 if any(type(x) not in (int, float) or not math.isfinite(x) for x in (a, b)) or not 0 <= a < b <= (audio_seconds + self.config['strategy']['audio_duration_tolerance_seconds']) * 1000:
                     raise RuntimeError('invalid_native_timestamps')
                 segments.append({'start_seconds': a / 1000, 'end_seconds': b / 1000, 'text': s['text']})
         if not segments:
-            raise RuntimeError('asr_empty')
+            return {'text': '', 'segments': [], 'transcript_status': 'no_speech'}
         def tc(value):
             ms = round(value * 1000)
             return f'{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02}.{ms%1000:03}'

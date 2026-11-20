@@ -292,6 +292,9 @@ function App() {
   const availableTabs=Object.keys(fields).filter(name=>(isVideo(source?.kind)||(source?.kind==='douyin_album' && name==='visual')||!['transcript','visual'].includes(name))
     &&!(name==='notes'&&duplicateNotes));
   const selectedTab=availableTabs.includes(tab)?tab:'summary';
+  const transcriptNotice=selectedTab==='transcript'&&({
+    no_speech:'未检测到可转录语音。', no_audio:'原视频无音轨。', visual_only:'语音转录未完成，已按画面和原文继续。'
+  })[result.transcript_status];
   useEffect(()=>{
     const video=videoRef.current;
     if(selectedTab!=='visual'&&video&&!video.paused)video.pause();
@@ -442,7 +445,7 @@ function App() {
               </section>}
               {selectedTab==='visual'&&isVideo(source.kind)&&<h2 className="visual-text-heading">画面识别文字</h2>}
               {!(source.kind==='douyin_album'&&selectedTab==='visual')&&<div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
-                {selectedTab==='notes'&&isVideo(source.kind)
+                {transcriptNotice?<p className="muted">{transcriptNotice}</p>:selectedTab==='notes'&&isVideo(source.kind)
                   ? <VideoNoteView key={current.id} value={textValue(result.notes)||'暂无此项内容'}/>
                   : <DocumentView structureSummary={selectedTab==='summary'&&!preview}
                   summaryStructure={result.summary_structure}

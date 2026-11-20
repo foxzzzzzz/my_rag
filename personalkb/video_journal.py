@@ -48,7 +48,7 @@ class VideoJournal:
         from .execution_guard import execution_guard
         with execution_guard(self.store):
             return self._guarded__claim(*args, **kwargs)
-    def _guarded__claim(self,task_id,worker_id,status):
+    def _guarded__claim(self,task_id,worker_id,status,*,rebuild_media=False):
         if not isinstance(worker_id,str) or not worker_id.strip(): raise WorkflowError('invalid_worker')
         with self.store._tx() as c:
             self.store._recover(c,time.time())
@@ -56,11 +56,22 @@ class VideoJournal:
             source=self.store._row(c,'sources',t['source_id'])
             kind = 'douyin_album' if worker_id == 'douyin-album' else 'video'
             allowed_kinds = ('video', 'mp4') if kind == 'video' else (kind,)
-            if t['status']!=status or source['kind'] not in allowed_kinds or (status=='queued' and t['attempts']>=self.store.max_attempts) or source['deleted'] or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone(): raise WorkflowError('invalid_state')
+            if rebuild_media and (status != 'queued' or source['kind'] not in ('video', 'mp4') or not c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='web_dispatch' AND type='table'").fetchone() or not c.execute(
+                    "SELECT 1 FROM web_dispatch WHERE task_id=? AND mode='rebuild-media' AND state='working'", (task_id,)).fetchone()):
+                raise WorkflowError('video_recovery_unavailable')
+            if t['status']!=status or source['kind'] not in allowed_kinds or (status=='queued' and t['attempts']>=self.store.max_attempts and not rebuild_media) or source['deleted'] or c.execute("SELECT 1 FROM tasks WHERE status='running'").fetchone() or c.execute('SELECT 1 FROM video_maintenance').fetchone(): raise WorkflowError('invalid_state')
             c.execute("UPDATE tasks SET status='running',attempts=attempts+1,worker_id=?,lease_token=?,lease_until=? WHERE id=?",(worker_id,secrets.token_urlsafe(32),time.time()+self.store.lease_seconds,task_id))
             return self.store._row(c,'tasks',task_id)
-    def claim_task(self,task_id,worker_id): return self._claim(task_id,worker_id,'queued')
+    def claim_task(self,task_id,worker_id,*,rebuild_media=False): return self._claim(task_id,worker_id,'queued',rebuild_media=rebuild_media)
     def resume_claim(self,task_id,worker_id): return self._claim(task_id,worker_id,'needs_attention')
+    def record_local_recovery(self, task_id, token, stage, input_sha256, previous_error):
+        raw = _json({'previous_error': previous_error})
+        with self.store._tx() as c:
+            self._lease(c, task_id, token)
+            c.execute("""INSERT INTO video_stages(task_id,name,input_sha256,status,result,result_sha256)
+                VALUES(?,?,?,'completed',?,?)""",
+                      (task_id, stage, input_sha256, raw, hashlib.sha256(raw.encode()).hexdigest()))
     def bind(self,task_id,token,fingerprint,legacy_fingerprint=None,*compatible_fingerprints):
         with self.store._tx() as c:
             self._lease(c,task_id,token)

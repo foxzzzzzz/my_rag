@@ -29,6 +29,13 @@ class ProviderTests(unittest.TestCase):
         c,t = self.client({'transcripts':[{'sentences':[{'begin_time':0,'end_time':1000,'text':'hello'}]}]})
         self.assertEqual(c.download_asr('https://bucket.aliyuncs.com/a', 2)['segments'][0]['end_seconds'], 1)
         self.assertIsNone(t.calls[0][1])
+
+    def test_valid_empty_asr_result_differs_from_malformed_response(self):
+        empty, _ = self.client({'transcripts': [{'sentences': []}]})
+        self.assertEqual(empty.download_asr('https://bucket.aliyuncs.com/a', 2)['transcript_status'], 'no_speech')
+        malformed, _ = self.client({'transcripts': [{'sentences': None}]})
+        with self.assertRaisesRegex(RuntimeError, 'provider_response_invalid'):
+            malformed.download_asr('https://bucket.aliyuncs.com/a', 2)
     def test_reject_download_host(self):
         c,_ = self.client({})
         with self.assertRaises(RuntimeError): c.download_asr('https://evil.com/a', 2)

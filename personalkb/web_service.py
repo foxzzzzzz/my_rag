@@ -238,9 +238,10 @@ class WebService:
         from .web_dispatch import has_unknown_submission, task_can_archive, task_is_archived, task_stages
         from .video_journal import legacy_upload_interruption
         d = {k:t[k] for k in ('id','source_id','status','stage','error_code','attempts','created_at','updated_at')}
+        d['max_attempts'] = self.store.max_attempts
         d['progress'] = dict(completed_stages=None,total_stages=None,completed_frames=None,total_frames=None)
         with self.store._tx() as c:
-            dispatch=c.execute('SELECT state,error_code,processing_mode FROM web_dispatch WHERE task_id=?',(t['id'],)).fetchone()
+            dispatch=c.execute('SELECT state,error_code,processing_mode,mode FROM web_dispatch WHERE task_id=?',(t['id'],)).fetchone()
             d['dispatch'] = dict(dispatch) if dispatch else None
             d['archived'] = task_is_archived(c, t['id'])
             d['can_archive'] = not d['archived'] and task_can_archive(t['status'], dispatch['state'] if dispatch else None)
@@ -264,17 +265,32 @@ class WebService:
                 if (d['resume_blocked_reason'] == 'unknown_submission' and not d['archived']
                         and (not dispatch or dispatch['state'] not in ('pending', 'working'))):
                     d['model_recovery'] = self.dispatcher.model_recovery(c, t, rows)
+            if t['status'] in ('failed', 'cancelled'):
+                if t['attempts'] >= self.store.max_attempts:
+                    d['retry_blocked_reason'] = 'attempts_exhausted'
+                elif t['external_started']:
+                    d['retry_blocked_reason'] = 'unknown_submission'
+            if t['status'] in ('failed', 'needs_attention', 'cancelled'):
+                source = self.store._row(c, 'sources', t['source_id'])
+                if source['kind'] in ('video', 'mp4'):
+                    failure = self.dispatcher.video_failure(c, t, rows)
+                    if (d['archived'] or source['deleted'] or not self.webcfg['live_video_enabled']
+                            or (dispatch and dispatch['state'] in ('pending', 'working'))):
+                        failure.pop('video_recovery', None)
+                    d.update(failure)
             upload_stages = sum(row['name'] in ASR_UPLOAD_STAGES for row in rows)
             if rows:
                 if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
-                d['progress']['completed_stages']=sum(r['status']=='completed' for r in rows)
+                d['progress']['completed_stages']=sum(r['status']=='completed' and r['name'] not in ('media_rebuilt', 'asr_visual_only') for r in rows)
                 if any(r['name'].startswith('vision-') for r in rows):
                     d['progress']['completed_frames']=sum(r['status']=='completed' and r['name'].startswith('vision-') for r in rows)
         manifest=_root(self.wc)/'video-work'/t['id']/'media-manifest.json'
         try:
             if manifest.is_file():
-                d['progress']['total_frames']=len(json.loads(manifest.read_text(encoding='utf8'))['frames'])
-                d['progress']['total_stages']=d['progress']['total_frames']+3+upload_stages
+                material=json.loads(manifest.read_text(encoding='utf8'))
+                d['progress']['total_frames']=len(material['frames'])
+                transcribe_stages=0 if 'audio' in material and material['audio'] is None else 2+upload_stages
+                d['progress']['total_stages']=d['progress']['total_frames']+1+transcribe_stages
         except (OSError,ValueError,KeyError,TypeError): pass
         return d
     def tasks(self):
@@ -388,7 +404,7 @@ class WebService:
                     'review_status':review['decision'] if review else 'pending',
                     'review_revision':review['seq'] if review else None}
         allowed=('id','source_id','content_sha256','output_kind','parent_version_id','created_at','content_pruned_at')
-        result_fields=('title','body','summary','summary_structure','notes','transcript','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','images','processing')
+        result_fields=('title','body','summary','summary_structure','notes','transcript','transcript_status','visual','warnings','evidence','provenance','scheme_id','scheme_version','output_kind','duration_seconds','frames','images','processing')
         if current: current={**{k:current[k] for k in allowed},'result':{k:current['result'][k] for k in result_fields if k in current['result']}}
         if current:
             result=current['result']
@@ -432,6 +448,8 @@ class WebService:
         result['evidence'] = evidence
         for k in ('title','notes','summary','body','transcript','visual'):
             if k in p: result[k]=p[k]
+        if isinstance(result.get('transcript'), str) and result['transcript'].strip():
+            result.pop('transcript_status', None)
         result.update(output_kind='human_edited',provenance='human_edited')
         v=self.store.revise(source_id,p.get('expected_version_id'),result)
         return {k:v[k] for k in ('id','source_id','content_sha256','output_kind','parent_version_id','created_at')}

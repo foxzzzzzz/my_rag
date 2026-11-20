@@ -2,21 +2,29 @@
 import hashlib
 import json
 import math
+import re
 import sqlite3
+import tempfile
 import threading
 import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from contextlib import closing
 from .workflow import ROOT, make_store
-from .workflow_store import ASR_UPLOAD_STAGES, ASR_UPLOAD_TASK_STAGES, WorkflowError
+from .workflow_store import ASR_UPLOAD_STAGES, ASR_UPLOAD_TASK_STAGES, WorkflowError, title_metadata
 from .video_journal import VideoJournal, is_chat_stage
+from .video_recovery import (NO_SPEECH_CODES, TERMINAL_ASR_ERRORS, can_rebuild_media, can_use_visual_only,
+                             incomplete_backup, media_workspace, terminal_asr_stage)
 from tools.api_smoke import reserve
 from .asr_storage import PreparedAudio, StorageError, create_storage
 from .video_services import ProviderError
 from .summary_structure import summary_fields
 
 DEFAULT_CHAT_TIMEOUT_RETRIES = 1
+MEDIA_FAILURES = frozenset({'media_cache_changed', 'media_workdir_busy', 'media_workdir_unverified',
+                           'resource_limit', 'media_timeout', 'media_command_failed', 'media_missing_duration',
+                           'media_missing_video', 'media_video_timeline_invalid', 'audio_not_full_length',
+                           'invalid_frame', 'empty_frames', 'invalid_media_duration', 'media_probe_failed'})
 
 
 def _positive(value):
@@ -350,22 +358,24 @@ def run_video(*args, **kwargs):
         return _guarded_run_video(*args, **kwargs)
 
 def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=None, resume=False,
-              services=None, media=None, storage=None):
+              services=None, media=None, storage=None, rebuild_media=False, visual_only=False):
     """Process one explicitly selected imported video; unknown POSTs never repeat."""
     from .video_services import ProviderClient
     from .video_media import prepare_media
     from .workflow import _hash, _root
     pc = dict(pipeline_config)
-    # Validate credentials before taking a lease or spending on any capability.
-    if services is None:
-        for kind in ('asr', 'vision', 'text'):
+    def require_credentials(*kinds):
+        for kind in kinds if services is None else ():
             spec = pc['models']['models'][kind]
             ref = pc['models']['providers'][spec['provider']]['api_key_env']
             if not isinstance(secrets.get(ref), str) or not secrets[ref].strip():
                 raise WorkflowError('missing_model_credentials')
-    # Constructor checks are local; invalid storage must not consume a model
-    # reservation or strand a task in an apparent unknown submission state.
-    if storage is None:
+
+    require_credentials('vision', 'text')
+    if (rebuild_media and resume) or (visual_only and not resume):
+        raise WorkflowError('video_recovery_unavailable')
+    if storage is None and not visual_only:
+        # Validate deployment configuration before taking a lease or starting work.
         try:
             create_storage(pc['storage'], secrets)
             if pc['storage']['backend'] == 'managed_oss':
@@ -376,9 +386,17 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     store = make_store(workflow_config)
     journal = VideoJournal(store)
     if task_id is None: raise WorkflowError('task_id_required')
-    task = journal.resume_claim(task_id, 'video-resume') if resume else journal.claim_task(task_id, 'video-worker')
+    if resume and not visual_only:
+        stages = journal.list_stages(task_id)
+        with store._tx() as db:
+            terminal = terminal_asr_stage(db, task_id, stages)
+        if terminal:
+            raise WorkflowError(terminal['error'])
+    task = (journal.resume_claim(task_id, 'video-resume') if resume
+            else journal.claim_task(task_id, 'video-worker', rebuild_media=rebuild_media))
     token = task['lease_token']
     preparing_upload = False
+    valid_rebuilt_media = False
     try:
         vision_limit = pc['strategy']['vision_max_tokens']
         fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
@@ -387,7 +405,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         restored = set()
         recovering_chat = False
         # Resolve all unknown requests before preparing media or uploading.
-        for row in journal.list_stages(task_id):
+        stages = journal.list_stages(task_id)
+        for row in stages:
             if row['status'] == 'in_flight' and row['name'] not in ASR_UPLOAD_STAGES and (row['name'] != 'asr_submit' or not row['remote_task_id']):
                 name = row['name']
                 if is_chat_stage(name):
@@ -403,6 +422,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         source = store.get_source(task['source_id'])
         with store._tx() as db:
             base = db.execute('SELECT base_version_id FROM video_reprocess WHERE task_id=?', (task_id,)).fetchone()
+            original_title = title_metadata(db, source['id'])['original_title']
         if base and source['current_version_id'] != base[0] and not task['remote_task_id']:
             raise WorkflowError('version_conflict')
         root = _root(workflow_config).resolve()
@@ -410,8 +430,25 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         blob = candidate.resolve()
         if any(p.is_symlink() or (hasattr(p, 'is_junction') and p.is_junction()) for p in (candidate, *candidate.parents)) or not blob.is_relative_to(root) or not blob.is_file() or _hash(blob) != source['sha256']:
             raise WorkflowError('source_integrity')
-        work = root / 'video-work' / task_id
+        work = media_workspace(root, task_id)
         if any(p.is_symlink() for p in (work, *work.parents)): raise WorkflowError('invalid_work_path')
+        if rebuild_media:
+            if not can_rebuild_media(task, stages, work):
+                raise WorkflowError('video_recovery_unavailable')
+            if not stages:
+                journal.record_local_recovery(task_id, token, 'media_rebuilt', source['sha256'], task['error_code'])
+            store.checkpoint(task_id, token, 'rebuilding_media')
+            backup = incomplete_backup(work)
+            try:
+                if not backup.exists():
+                    work.rename(backup)
+                elif work.is_dir() and not (work / 'media-manifest.json').is_file():
+                    interrupted = Path(tempfile.mkdtemp(dir=work.parent, prefix='.'+task_id+'-rebuild-'))
+                    work.rename(interrupted / 'workspace')
+                elif work.is_dir():
+                    (work / '.media.lock').unlink(missing_ok=True)
+            except OSError:
+                raise WorkflowError('media_rebuild_interrupted') from None
         if recovering_chat and not (work / 'media-manifest.json').is_file():
             raise WorkflowError('recovery_media_missing')
         work.mkdir(parents=True, exist_ok=True)
@@ -421,97 +458,116 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
         provider = services or ProviderClient(pc['models'], provider_config, secrets)
         with _Heartbeat(store, task_id, token, pc['heartbeat_seconds']) as beat:
             # Preserve the durable upload phase until a resumed upload starts.
-            if not legacy_upload and not (resume and task['stage'] in ASR_UPLOAD_TASK_STAGES):
+            if not rebuild_media and not legacy_upload and not (resume and task['stage'] in (*ASR_UPLOAD_TASK_STAGES, 'asr_result', 'media_rebuilt')):
                 store.checkpoint(task_id, token, 'preparing_video')
             material = (media or prepare_media)(blob, work, workflow_config, pc, heartbeat=beat.check)
-            audio = Path(material['audio_path'])
-            if not audio.resolve().is_relative_to(work) or not audio.is_file(): raise WorkflowError('invalid_audio_path')
-            audio_hash = _hash(audio)
+            audio = Path(material['audio_path']) if material['audio_path'] is not None else None
             audio_seconds = material['audio_seconds']
-            if isinstance(audio_seconds, bool) or not isinstance(audio_seconds, (float, int)) or not math.isfinite(audio_seconds) or audio_seconds <= 0:
+            if isinstance(audio_seconds, bool) or not isinstance(audio_seconds, (float, int)) or not math.isfinite(audio_seconds) or (audio_seconds <= 0 if audio is not None else audio_seconds != 0):
                 raise WorkflowError('invalid_audio_duration')
+            if audio is not None and (not audio.resolve().is_relative_to(work) or not audio.is_file()):
+                raise WorkflowError('invalid_audio_path')
             frames = material['frames']
             if not isinstance(frames, list) or not frames: raise WorkflowError('empty_frames')
-            asr_price = Decimal(str(pc['prices']['asr_per_second']))
-            asr_amount = max(Decimal(str(pc['strategy']['reserve_cny']['asr'])), Decimal(str(audio_seconds)) * asr_price)
-            amounts = {'asr_submit':asr_amount, 'text':Decimal(str(pc['strategy']['reserve_cny']['text']))}
+            valid_rebuilt_media = rebuild_media or any(row['name'] == 'media_rebuilt' for row in stages)
+            asr = {'text':'', 'segments':[], 'transcript_status':'no_audio'} if audio is None else None
+            if visual_only:
+                previous = journal.stage(task_id, 'asr_result')
+                previous_result = previous['result'] if previous else None
+                terminal = previous_result.get('error') if isinstance(previous_result, dict) else None
+                if not can_use_visual_only(task, stages, terminal if isinstance(terminal, str) and terminal in TERMINAL_ASR_ERRORS else None):
+                    raise WorkflowError('video_recovery_unavailable')
+                journal.record_local_recovery(task_id, token, 'asr_visual_only', previous['result_sha256'], terminal)
+            if visual_only or any(row['name'] == 'asr_visual_only' and row['status'] == 'completed' for row in stages):
+                asr = {'text':'', 'segments':[], 'transcript_status':'visual_only'}
+                restored.add('asr_submit')
+            amounts = {'text':Decimal(str(pc['strategy']['reserve_cny']['text']))}
+            if audio is not None:
+                asr_price = Decimal(str(pc['prices']['asr_per_second']))
+                asr_amount = max(Decimal(str(pc['strategy']['reserve_cny']['asr'])), Decimal(str(audio_seconds)) * asr_price)
+                amounts['asr_submit'] = asr_amount
             amounts.update({'vision-' + str(f['index']):Decimal(str(pc['strategy']['reserve_cny']['vision'])) for f in frames})
             _favorites_budget_preflight(store, task_id, amounts)
             _preflight(journal, task_id, pc, amounts, retries, restored)
-            voice_digest = _digest({'audio': audio_hash, 'model': pc['models']['models']['asr']})
-            journal.begin(task_id, token, 'asr_submit', voice_digest)
-            row = journal.stage(task_id, 'asr_submit')
-            if row['status'] == 'in_flight':
-                if not row['remote_task_id']: raise WorkflowError('unknown_submission')
-                remote_id = row['remote_task_id']
-                journal.complete(task_id, token, 'asr_submit', {'remote_task_id':remote_id,
-                    'audio_seconds':audio_seconds, 'reserved_upper_cny':str(asr_amount),
-                    'request_id':task_id + ':asr_submit'})
-            elif row['status'] == 'completed':
-                remote_id = row['result']['remote_task_id']
-            else:
-                from .asr_storage_temporary import TemporaryStorage
-
-                def upload_progress(stage, completed):
-                    beat.check()
-                    journal.upload_progress(task_id, token, stage, voice_digest, completed)
-
-                preparing_upload = True
-                adapter = storage or _scope_storage(journal, task_id, token, pc['storage'], secrets)
-                model = pc['models']['models']['asr']['model']
-                if isinstance(adapter, TemporaryStorage):
-                    asset = adapter.prepare(audio, model, on_stage=upload_progress)
+            if rebuild_media:
+                store.checkpoint(task_id, token, 'media_rebuilt')
+            if audio is not None and asr is None:
+                require_credentials('asr')
+                audio_hash = _hash(audio)
+                voice_digest = _digest({'audio': audio_hash, 'model': pc['models']['models']['asr']})
+                journal.begin(task_id, token, 'asr_submit', voice_digest)
+                row = journal.stage(task_id, 'asr_submit')
+                if row['status'] == 'in_flight':
+                    if not row['remote_task_id']: raise WorkflowError('unknown_submission')
+                    remote_id = row['remote_task_id']
+                    journal.complete(task_id, token, 'asr_submit', {'remote_task_id':remote_id,
+                        'audio_seconds':audio_seconds, 'reserved_upper_cny':str(asr_amount),
+                        'request_id':task_id + ':asr_submit'})
+                elif row['status'] == 'completed':
+                    remote_id = row['result']['remote_task_id']
                 else:
-                    upload_progress('asr_audio_upload', False)
-                    asset = adapter.prepare(audio, model)
-                    upload_progress('asr_audio_upload', True)
-                if asset.backend == 'temporary':
-                    journal.register_asset(task_id, token, dict(asset_id=asset.asset_id, backend='temporary',
-                        object_key='', source_sha256=audio_hash, size_bytes=asset.size_bytes, model=asset.model,
-                        expires_at=asset.expires_at, scope={}))
-                beat.check()
-                if asset.is_expired():
-                    raise WorkflowError('audio_url_expired')
-                preparing_upload = False
+                    from .asr_storage_temporary import TemporaryStorage
 
-                def submit():
-                    remote = provider.submit_asr(asset)
-                    journal.save_remote(task_id, token, 'asr_submit', remote)
-                    return {'remote_task_id': remote, 'audio_seconds': audio_seconds}
-                submission = _record_call(journal, task_id, token, 'asr_submit', voice_digest, asr_amount, pc, submit, beat)
-                remote_id = submission['remote_task_id']
-            result_digest = _digest({'remote_id': remote_id, 'audio': audio_hash})
-            journal.begin(task_id, token, 'asr_result', result_digest)
-            row = journal.stage(task_id, 'asr_result')
-            if row['status'] == 'completed':
-                asr = row['result']
-            else:
-                if row['status'] == 'prepared': journal.mark_started(task_id, token, 'asr_result')
-                start = time.monotonic()
-                while True:
+                    def upload_progress(stage, completed):
+                        beat.check()
+                        journal.upload_progress(task_id, token, stage, voice_digest, completed)
+
+                    preparing_upload = True
+                    adapter = storage or _scope_storage(journal, task_id, token, pc['storage'], secrets)
+                    model = pc['models']['models']['asr']['model']
+                    if isinstance(adapter, TemporaryStorage):
+                        asset = adapter.prepare(audio, model, on_stage=upload_progress)
+                    else:
+                        upload_progress('asr_audio_upload', False)
+                        asset = adapter.prepare(audio, model)
+                        upload_progress('asr_audio_upload', True)
+                    if asset.backend == 'temporary':
+                        journal.register_asset(task_id, token, dict(asset_id=asset.asset_id, backend='temporary',
+                            object_key='', source_sha256=audio_hash, size_bytes=asset.size_bytes, model=asset.model,
+                            expires_at=asset.expires_at, scope={}))
                     beat.check()
-                    output = provider.query_asr(remote_id)
-                    state = output.get('task_status')
-                    if state == 'SUCCEEDED':
-                        results = output.get('results', [])
-                        if not results or results[0].get('subtask_status') != 'SUCCEEDED':
-                            for a in journal.assets(task_id):
-                                if a['status'] == 'registered': journal.asset_terminal(task_id, token, a['asset_id'])
-                            journal.complete(task_id, token, 'asr_result', {'error':'asr_subtask_failed'})
-                            raise WorkflowError('asr_subtask_failed')
-                        asr = provider.download_asr(results[0]['transcription_url'], audio_seconds)
-                        journal.complete(task_id, token, 'asr_result', asr)
-                        break
-                    if state not in ('PENDING', 'RUNNING'):
-                        for a in journal.assets(task_id):
-                            if a['status'] == 'registered': journal.asset_terminal(task_id, token, a['asset_id'])
-                        journal.complete(task_id, token, 'asr_result', {'error': 'asr_remote_failed'})
-                        raise WorkflowError('asr_remote_failed')
-                    if time.monotonic() - start >= pc['poll_timeout']: raise WorkflowError('asr_pending')
-                    beat.stop.wait(min(pc['poll_seconds'], max(0, pc['poll_timeout'] - (time.monotonic() - start))))
-            if asr.get('error'): raise WorkflowError(asr['error'])
+                    if asset.is_expired():
+                        raise WorkflowError('audio_url_expired')
+                    preparing_upload = False
+
+                    def submit():
+                        remote = provider.submit_asr(asset)
+                        journal.save_remote(task_id, token, 'asr_submit', remote)
+                        return {'remote_task_id': remote, 'audio_seconds': audio_seconds}
+                    submission = _record_call(journal, task_id, token, 'asr_submit', voice_digest, asr_amount, pc, submit, beat)
+                    remote_id = submission['remote_task_id']
+                result_digest = _digest({'remote_id': remote_id, 'audio': audio_hash})
+                journal.begin(task_id, token, 'asr_result', result_digest)
+                row = journal.stage(task_id, 'asr_result')
+                if row['status'] == 'completed':
+                    asr = row['result']
+                else:
+                    if row['status'] == 'prepared': journal.mark_started(task_id, token, 'asr_result')
+                    start = time.monotonic()
+                    while True:
+                        beat.check()
+                        output = provider.query_asr(remote_id)
+                        state = output.get('task_status')
+                        if state not in ('PENDING', 'RUNNING'):
+                            results = output.get('results')
+                            subtask = results[0] if isinstance(results, list) and len(results) == 1 and isinstance(results[0], dict) else {}
+                            if state == 'SUCCEEDED' and subtask.get('subtask_status') == 'SUCCEEDED':
+                                asr = provider.download_asr(subtask['transcription_url'], audio_seconds)
+                            else:
+                                code = subtask.get('code') or output.get('code')
+                                detail = {'provider_code': code} if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}', code) else {}
+                                if isinstance(code, str) and code in NO_SPEECH_CODES and state in ('SUCCEEDED', 'FAILED'):
+                                    asr = {'text': '', 'segments': [], 'transcript_status': 'no_speech', **detail}
+                                else:
+                                    error = 'asr_subtask_failed' if state == 'SUCCEEDED' else 'asr_remote_failed'
+                                    asr = {'error': error, **detail}
+                            journal.complete(task_id, token, 'asr_result', asr)
+                            break
+                        if time.monotonic() - start >= pc['poll_timeout']: raise WorkflowError('asr_pending')
+                        beat.stop.wait(min(pc['poll_seconds'], max(0, pc['poll_timeout'] - (time.monotonic() - start))))
             for a in journal.assets(task_id):
                 if a['status'] == 'registered': journal.asset_terminal(task_id, token, a['asset_id'])
+            if asr.get('error'): raise WorkflowError(asr['error'])
             if base and store.get_source(task['source_id'])['current_version_id'] != base[0]:
                 raise WorkflowError('version_conflict')
             visual, evidence = [], [dict(type='audio', **s) for s in asr['segments']]
@@ -529,7 +585,17 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                 visual.append(f'## [{frame["seconds"]:.3f}s]\n' + val['content'])
                 evidence.append({'type':'visual', 'seconds':frame['seconds'], 'text':val['content'], 'image_sha256':frame['sha256']})
             visual_text = '\n\n'.join(visual)
-            body = '## 完整语音转录\n' + asr['text'] + '\n\n## 抽样画面材料\n' + visual_text
+            transcript_status = asr.get('transcript_status')
+            if transcript_status:
+                notice = {
+                    'no_speech': '未检测到可转录语音。',
+                    'no_audio': '原视频无音轨。',
+                    'visual_only': '语音转录未完成，已按画面和原文继续。'
+                }[transcript_status]
+                original = '\n\n## 来源原文\n' + original_title if original_title else ''
+                body = notice + original + '\n\n## 抽样画面材料\n' + visual_text
+            else:
+                body = '## 完整语音转录\n' + asr['text'] + '\n\n## 抽样画面材料\n' + visual_text
             amount = Decimal(str(pc['strategy']['reserve_cny']['text']))
             upper = (Decimal(len((body + source['original_name'] + pc['strategy']['text_system_prompt']).encode('utf8'))) * Decimal(str(pc['prices']['text'][0])) + Decimal(pc['strategy']['text_max_tokens']) * Decimal(str(pc['prices']['text'][1]))) / 1000000
             if upper > amount: raise WorkflowError('text_reservation_too_small')
@@ -543,11 +609,23 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                 **summary, evidence=evidence,
                 provenance='provider', output_kind='machine_initial', scheme_id='video-pipeline', scheme_version=fingerprint,
                 duration_seconds=material['duration_seconds'], frames=[{k:f[k] for k in ('index','seconds','sha256')} for f in frames])
+            if transcript_status:
+                result['transcript_status'] = transcript_status
             beat.check()
         version = store.finish(task_id, token, result)
     except Exception as exc:
-        code = exc.code if isinstance(exc, (WorkflowError, StorageError, ProviderError)) else 'video_processing_failed'
-        try: store.fail(task_id, token, code, needs_attention=preparing_upload)
+        if isinstance(exc, (WorkflowError, StorageError, ProviderError)):
+            code = exc.code
+        elif isinstance(exc, RuntimeError) and str(exc) in MEDIA_FAILURES:
+            code = str(exc)
+        else:
+            code = 'video_processing_failed'
+        budget_pause = valid_rebuilt_media and code in ('budget_invalid_or_exceeded', 'favorites_budget_exceeded')
+        try:
+            if rebuild_media and code in ('invalid_frame', 'media_missing_video', 'media_missing_duration',
+                                          'media_video_timeline_invalid', 'audio_not_full_length', 'invalid_media_duration'):
+                store.checkpoint(task_id, token, 'preparing_video')
+            store.fail(task_id, token, code, needs_attention=preparing_upload or budget_pause)
         except WorkflowError: pass
         if code == 'version_conflict':
             try: cleanup_video(workflow_config, pc, secrets, task_id, storage=storage)
