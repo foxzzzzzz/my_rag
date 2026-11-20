@@ -5,6 +5,7 @@ The API smoke runner is not implemented; this module does not make network calls
 import sqlite3
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
+from personalkb.model_budget import effective_limit
 
 def reserve(db_path, run_id, request_id, amount, run_limit, research_limit, *, reuse_prepared=False):
     """Reserve once before a request. Outstanding reservations remain charged."""
@@ -20,6 +21,7 @@ def reserve(db_path, run_id, request_id, amount, run_limit, research_limit, *, r
         db.execute('BEGIN IMMEDIATE')
         try:
             db.execute('CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, amount TEXT NOT NULL)')
+            research_limit = effective_limit(db, research_limit)
             if reuse_prepared:
                 prior = db.execute('SELECT run_id, amount FROM reservations WHERE request_id=?', (request_id,)).fetchone()
                 if prior:
@@ -33,6 +35,8 @@ def reserve(db_path, run_id, request_id, amount, run_limit, research_limit, *, r
             if total+amount>research_limit or run_total+amount>run_limit:
                 raise ValueError('预算不足')
             db.execute('INSERT INTO reservations VALUES (?,?,?)',(request_id,run_id,str(amount)))
+            db.execute('CREATE TABLE IF NOT EXISTS budget_reservation_limits (request_id TEXT PRIMARY KEY, reserved_limit_cny TEXT NOT NULL)')
+            db.execute('INSERT INTO budget_reservation_limits VALUES (?,?)', (request_id, str(amount)))
             db.execute('COMMIT')
         except BaseException:
             db.execute('ROLLBACK')

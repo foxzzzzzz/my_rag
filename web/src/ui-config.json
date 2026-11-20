@@ -7,7 +7,7 @@
   "frame_preview_width说明": "关键帧缩略图宽度px，窄屏受CSS最大宽度约束",
   "navigation": [
     {"id":"library","label":"资料库"}, {"id":"ask","label":"问答"},
-    {"id":"import","label":"导入"}, {"id":"tasks","label":"任务"}, {"id":"catalog","label":"分类"}
+    {"id":"import","label":"导入"}, {"id":"tasks","label":"任务"}, {"id":"budget","label":"预算"}, {"id":"catalog","label":"分类"}
   ],
   "navigation说明": "正式侧栏顺序与中文名称，页面内部ID由App识别"
 }

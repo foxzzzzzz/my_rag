@@ -206,6 +206,11 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     def classifications(): return {'items':service.classifications.catalog()}
     @app.get('/api/tasks')
     def tasks(): return service.tasks()
+    @app.get('/api/budget')
+    def budget(): return service.budget()
+    @app.patch('/api/budget')
+    async def change_budget(req:Request):
+        return await run_in_threadpool(service.change_budget, await read_object(req))
     @app.get('/api/douyin/status')
     def douyin_status(): return service.douyin.status()
     @app.get('/api/douyin/favorites/sync')

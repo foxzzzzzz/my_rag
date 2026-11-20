@@ -21,7 +21,7 @@
 | `/app/config` | 外置公开配置，只读挂载；不得放API Key/密码 |
 | `/run/secrets/personalkb.env` | 单独私密挂载，账号、密码哈希及模型/存储凭据引用；不打包 |
 | `/state/workflow` | SQLite、长期Markdown、证据/帧、保留期内媒体及索引 |
-| `/state/budget.sqlite` | 所有模型共用的累计预算/未决预留账本，迁移和备份必须包含 |
+| `/state/budget.sqlite` | 所有模型共用的累计预算与预留账本，包含预算调整及估算记录。迁移和备份必须包含。[预算模块](model-budget.md) |
 | `/app/tmp` | 自有临时上传/解析工作目录挂载，不与宿主系统tmp混用 |
 | `/backups` | 与数据目录分离的快照对象库；同盘可用但不代表外部灾备 |
 

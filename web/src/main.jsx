@@ -9,6 +9,7 @@ import {CatalogManager} from './catalog-manager';
 import {LibraryView} from './library-view';
 import {MediaTypeBadge} from './media-type-badge';
 import {TaskList} from './task-list';
+import {BudgetPanel} from './budget-panel';
 import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {DocumentView, VideoNoteView} from './document-view';
 import {connectionText, validReview, errorText, textValue, uploadError, statusText, formatDate, htmlBodyPreview} from './helpers';
@@ -301,7 +302,7 @@ function App() {
   const sidebarTopics=catalog.filter(item=>item.kind==='topic');
   return <div className={libraryActive||tasksActive||catalogActive?'shell shell--list':'shell'}>
     <aside className="app-nav"><div className="app-brand"><span className="brand-mark" aria-hidden="true">知</span>个人知识库</div><nav aria-label="主导航">
-      {ui.navigation.map(item=><button key={item.id} aria-current={(page===item.id||page==='detail'&&item.id==='library')?'page':undefined} onClick={()=>navigate(item.id)}><svg className="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={({library:"M4 5h6a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4z M20 5h-4a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h4z",ask:"M4 5h16v11H9l-5 4z",import:"M4 14v5h16v-5 M12 3v11 M8 10l4 4 4-4",tasks:"M5 5h2 M10 5h9 M5 12h2 M10 12h9 M5 19h2 M10 19h9",catalog:"M3 4h9l9 9-8 8-10-10z M7 8h.01"})[item.id]}/></svg>{item.label}</button>)}
+      {ui.navigation.map(item=><button key={item.id} aria-current={(page===item.id||page==='detail'&&item.id==='library')?'page':undefined} onClick={()=>navigate(item.id)}><svg className="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={({library:"M4 5h6a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4z M20 5h-4a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h4z",ask:"M4 5h16v11H9l-5 4z",import:"M4 14v5h16v-5 M12 3v11 M8 10l4 4 4-4",tasks:"M5 5h2 M10 5h9 M5 12h2 M10 12h9 M5 19h2 M10 19h9",budget:"M4 6h16v13H4z M4 10h16 M14 14h3",catalog:"M3 4h9l9 9-8 8-10-10z M7 8h.01"})[item.id]}/></svg>{item.label}</button>)}
     </nav>
     {session&&dataLoaded&&<div className="sidebar-topics" role="group" aria-label="主题筛选">
       <h2><button className="topics-heading" aria-label="主题，显示全部资料" title="显示全部资料"
@@ -345,7 +346,8 @@ function App() {
           <FavoritesPanel api={api} pollInterval={session.config.poll_interval_ms} disabled={busy}/>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></>}
-        <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy}
+        {page==='budget'&&<BudgetPanel api={api} disabled={busy} titleProps={titleProps} displayTimezone={session.config.display_timezone} onSaved={refresh}/>}
+        <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')}
           open={open} onAction={(id,action,body)=>run(async()=>{
             await api('/tasks/'+id+'/'+action,{method:'POST',body:JSON.stringify(body)});
             await refresh();

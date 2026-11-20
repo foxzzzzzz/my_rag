@@ -75,6 +75,15 @@ class Fixture:
         self.poll_interval_ms = 60000
         self.hold_sources = False
         self.pending_sources = None
+        self.budget = {
+            'limit_cny': '100', 'reserved_cny': '99.440718', 'available_cny': '0.559282',
+            'estimated_cost_cny': '0.25', 'unknown_count': 1, 'revision': 0,
+            'run_limits': {'video':'5', 'html':'2', 'rag':'2', 'classification':'2'}, 'changes': [],
+            'entries': [{'request_id':'rag-run:answer', 'run_id':'rag-run', 'label':'知识库检索与问答',
+                         'stage':'生成回答', 'reserved_cny':'1', 'reserved_limit_cny':'1.25', 'estimated_cost_cny':'0.25'},
+                        {'request_id':'task4:text', 'run_id':'task4', 'label':'从灵感到归档：图文笔记',
+                         'stage':'生成文本', 'reserved_cny':'98.440718', 'estimated_cost_cny':None}],
+        }
         self.citation = {"chunk_id": "a" * 64, "source_id": "s1", "version_id": "v1", "text": "离线复核证据。",
                          "locator": {"type": "text", "offset": 0, "end_offset": 7}}
 
@@ -94,6 +103,13 @@ class Fixture:
                 return reply({})
             if path == "/auth/activity":
                 return reply({})
+            if path == '/budget' and method == 'PATCH':
+                assert body == {'limit_cny':'150.25', 'expected_revision':0}, body
+                if self.budget['revision'] != body['expected_revision']:
+                    return reply({'error':'budget_revision_conflict'}, 409)
+                self.budget.update(limit_cny='150.25', available_cny='50.809282', revision=1,
+                                   changes=[{'previous_limit_cny':'100', 'limit_cny':'150.25', 'changed_at':'2026-11-20T06:30:00Z'}])
+                return reply(self.budget)
             if path == "/classifications/bulk":
                 updates = []
                 for entry in body["items"]:
@@ -138,6 +154,8 @@ class Fixture:
                 return reply({"items": self.sources})
             if path == "/tasks":
                 return reply({"items": self.tasks})
+            if path == '/budget':
+                return reply(self.budget)
             if path == "/classifications":
                 return reply({"items": [self.topic, *self.tags]})
             if path == "/classification-suggestions/status":
@@ -490,6 +508,69 @@ def verify_management(page, output):
     expect(page.get_by_text("回收站为空。")).to_be_visible()
 
 
+def verify_task_failure_priority(browser, address, output):
+    fixture = Fixture()
+    budget_error = 'budget_invalid_or_exceeded'
+    model_error = 'provider_http_402'
+    blocked, original = fixture.tasks[4], fixture.tasks[1]
+    for task, code in ((blocked, budget_error), (original, model_error)):
+        task.update(status='needs_attention', stage='text', error_code=code,
+                    resume_blocked_reason='unknown_submission', dispatch={'state': 'error', 'error_code': code},
+                    model_diagnostic={'stage': 'text', 'code': model_error})
+    blocked['model_recovery'] = {'stage': 'text', 'mode': 'restore', 'attempt': 1, 'amount': None,
+                                 'reason': None, 'authorized_amount': '0.705536'}
+    blocked['budget_block'] = {'required_cny':'0.705536', 'available_cny':'0.559282'}
+
+    page, errors = open_page(browser, address, fixture, 1440, 900)
+    nav(page, '任务')
+    blocked_row = page.locator('.task-item').filter(has_text=blocked['source']['title'])
+    original_row = page.locator('.task-item').filter(has_text=original['source']['title'])
+    expect(blocked_row.locator('.task-line')).to_have_text('任务或累计预算不足，无法自动重试。')
+    expect(original_row.locator('.task-line')).to_contain_text(model_error)
+    blocked_row.get_by_role('button', name='处理模型请求').click()
+    details = blocked_row.locator('.task-details')
+    expect(details.locator('dt:text-is("当前原因") + dd')).to_contain_text(budget_error)
+    expect(details.locator('dt:text-is("上次模型失败原因") + dd')).to_contain_text(model_error)
+    expect(details.locator('dt:text-is("恢复限制") + dd')).to_contain_text('unknown_submission')
+    expect(blocked_row.get_by_role('button', name='继续已授权的重试')).to_be_visible()
+    screenshot(page, output, 'task-current-error')
+    expect(blocked_row.get_by_text('本次需预留 ¥0.705536，项目当前可用 ¥0.559282')).to_be_visible()
+    blocked_row.get_by_role('button', name='查看预算').click()
+    expect(page.get_by_role('heading', name='预算', exact=True)).to_be_visible()
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    assert not any(path.endswith('/recover-model') for _, path, _ in fixture.writes)
+    print('Task rows prioritize the latest blocking error and retain the previous model error in details')
+    page.close()
+
+
+def verify_budget(browser, address, output, width, height):
+    fixture = Fixture()
+    page, errors = open_page(browser, address, fixture, width, height)
+    nav(page, '预算')
+    panel = page.locator('.budget-page')
+    expect(panel.get_by_text('¥0.559282', exact=True)).to_be_visible()
+    expect(panel.get_by_text('待核对 1 项', exact=True)).to_be_visible()
+    expect(panel.get_by_role('row').filter(has_text='图文笔记')).to_contain_text('待核对')
+    expect(panel.get_by_role('row').filter(has_text='知识库检索与问答')).to_contain_text('预留上限 ¥1.25')
+    assert panel.locator('.budget-table-wrap').evaluate('element => element.scrollWidth === element.clientWidth')
+    assert page.get_by_role('navigation', name='主导航').evaluate('element => element.scrollWidth === element.clientWidth')
+    amount = panel.get_by_role('textbox', name='项目累计上限（元）')
+    save = panel.get_by_role('button', name='保存上限')
+    amount.fill('150.251')
+    expect(save).to_be_disabled()
+    amount.fill('150.25')
+    expect(panel.get_by_text('当前上限 ¥100，调整后 ¥150.25，预计可用 ¥50.809282。')).to_be_visible()
+    screenshot(page, output, 'budget')
+    save.click()
+    expect(panel.get_by_text('预算上限已保存。')).to_be_visible()
+    expect(panel.get_by_text('¥50.809282', exact=True)).to_be_visible()
+    expect(panel.get_by_text(re.compile('¥100 → ¥150.25'))).to_be_visible()
+    assert [path for _, path, _ in fixture.writes if path != '/auth/activity'] == ['/budget']
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px budget totals, edit preview and save passed')
+    page.close()
+
+
 def verify_favorites_filters(browser, address, output, width, height):
     fixture = Fixture()
     page, errors = open_page(browser, address, fixture, width, height)
@@ -630,7 +711,9 @@ def main():
             page.close()
         verify_connection(browser, address, args.screenshots)
         verify_scroll(browser, address)
+        verify_task_failure_priority(browser, address, args.screenshots)
         for width, height in ((1440, 900), (390, 844)):
+            verify_budget(browser, address, args.screenshots, width, height)
             verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)
             verify_favorites_filters(browser, address, args.screenshots, width, height)

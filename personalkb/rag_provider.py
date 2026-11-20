@@ -93,6 +93,11 @@ class RagProvider:
                 if cost is not None:
                     with sqlite3.connect(ledger,timeout=30) as db:
                         db.execute('UPDATE reservations SET amount=? WHERE request_id=? AND run_id=?',(str(cost),request_id,run_id))
+                    from .model_budget import record_estimate
+                    try:
+                        record_estimate(ledger, request_id, cost)
+                    except (OSError, sqlite3.Error, ValueError):
+                        pass
                 with self.store._tx() as c:
                     c.execute('UPDATE rag_requests SET result=? WHERE id=?',(_json({'usage':usage,'estimated_cost_cny':str(cost) if cost is not None else None}),request_id))
                 if cost is not None and cost>amount:

@@ -110,6 +110,11 @@ class SuggestionService:
                 if cost is not None:
                     cost=Decimal(str(cost))
                     if not cost.is_finite() or cost<0: raise ValueError()
+                    from .model_budget import record_estimate
+                    try:
+                        record_estimate(ledger, sid, cost)
+                    except (OSError, sqlite3.Error, ValueError):
+                        pass
                     if cost>amount:
                         with sqlite3.connect(ledger, timeout=30) as db:
                             db.execute('UPDATE reservations SET amount=? WHERE request_id=? AND run_id=?',(str(cost),sid,sid))

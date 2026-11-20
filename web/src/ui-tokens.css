@@ -16,6 +16,7 @@
  --detail-meta-size:13px; /* 详情返回文字字号 */
  --detail-title-size:24px; /* 阅读页长标题字号 */
  --review-note-height:72px; /* 审核意见输入框的最小高度 */
+ --budget-page-width:76rem; --budget-amount-size:20px; /* 预算页面宽度与金额字号 */
  --revision-editor-height:480px; --revision-editor-line-height:1.65; /* 人工修订编辑框最小高度与行距 */
  --detail-heading-gap:12px; /* 详情标题与返回、管理入口间距 */
  --detail-reading-measure:54em; /* 宽屏摘要和笔记的最大阅读行宽 */

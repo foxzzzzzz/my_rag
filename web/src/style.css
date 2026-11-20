@@ -209,7 +209,8 @@ dialog .actions { margin-bottom:0 }
  .sidebar-session { order:-1; margin:0 0 0 auto; padding:0; border:0 }
  .app-nav .logout-button { padding-inline:var(--radius) }
  .app-nav > nav { flex-wrap:nowrap; overflow-x:auto; min-width:0; gap:3px }
- .app-nav > nav button { flex:0 0 auto; width:auto; gap:var(--radius); padding:5px 6px; min-height:32px }
+ .app-nav > nav button { flex:0 0 auto; width:auto; gap:3px; padding:5px 4px; min-height:32px }
+ .app-nav > nav .nav-icon { width:16px; height:16px }
  .sidebar-topics { display:flex; flex-wrap:nowrap; overflow-x:auto; min-width:0; gap:3px; margin:0; padding:0; border:0 }
  .sidebar-topics h2 { flex:none; align-self:center }
  .app-nav .sidebar-topics button { flex:0 0 auto; width:auto; white-space:nowrap }

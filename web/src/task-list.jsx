@@ -39,7 +39,7 @@ function taskStatus(task, queuedForProcessing) {
   return task.status;
 }
 
-function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,toggle}) {
+function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,expanded,toggle}) {
   const [recoveryAgreement,setRecoveryAgreement]=useState(null);
   const {mode,action:defaultAction,queuedForProcessing}=controls;
   const video=['video','mp4'].includes(item?.kind);
@@ -56,11 +56,15 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   const progress=progressText(task.progress,task.status);
   const stageText=value=>album&&/^vision-\d+$/.test(value)?`图文识别 · 图 ${value.slice(7)}`:statusText(value);
   const stage=task.stage?stageText(task.stage):'';
-  const problem=task.resume_blocked_reason||task.error_code||task.dispatch?.error_code;
-  const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const diagnostic=task.model_diagnostic;
-  const diagnosticReason=diagnostic && (failureReasons[diagnostic.code] || errorText(400,diagnostic.code));
-  const summary=diagnosticReason||(problem?(reason.startsWith('操作失败：')?'查看详情了解原因':reason):'');
+  const currentError=task.dispatch?.error_code||task.error_code;
+  const recoveryLimit=task.resume_blocked_reason;
+  const problem=currentError&&currentError!=='unknown_submission'?currentError:diagnostic?.code||currentError||recoveryLimit;
+  const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
+  const previousModelError=diagnostic?.code&&diagnostic.code!==problem?diagnostic.code:null;
+  const summary=reason&&reason.startsWith('操作失败：')&&diagnostic?.code!==problem?'查看详情了解原因':reason;
+  const budgetBlocked=problem==='budget_invalid_or_exceeded'||problem==='favorites_budget_exceeded';
+  const budgetBlock=task.budget_block;
   const detailId='task-detail-'+task.id;
   const recovery=task.model_recovery;
   const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode]);
@@ -77,6 +81,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
       {summary?<span className="task-line" title={summary}>{summary}</span>
         :status==='running'?<span>{[stage,progress].filter(Boolean).join(' · ')}</span>
         :stage&&status==='completed'?<span className="muted">{stage}</span>:null}
+      {budgetBlocked&&budgetBlock&&<span className="muted">本次需预留 ¥{budgetBlock.required_cny}，项目当前可用 ¥{budgetBlock.available_cny}</span>}
     </div>
     <div className="task-updated muted">
       <span className="task-mobile-label">更新时间 </span>
@@ -84,6 +89,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
     </div>
     <div className="task-actions">
       {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>处理模型请求</button>}
+      {budgetBlocked&&<button type="button" onClick={onBudget}>查看预算</button>}
       {action&&(action==='cancel'||item&&!item.deleted)&&<button type="button" disabled={busy||(action!=='cancel'&&paidNeeded&&(!paid||!enabled))}
         onClick={()=>onAction(task.id,action,action==='cancel'?{}:{allow_paid:paid,processing_mode:video?'preview':mode})}>{taskActionLabel(task,action)||actionNames[action]}</button>}
       {item&&!item.deleted&&<button type="button" onClick={()=>open(item.id,{versionId:task.view_version_id})}>{task.viewing_history?'查看旧版本':task.view_version_id||task.status!=='succeeded'?'查看资料':'查看当前资料'}</button>}
@@ -98,8 +104,9 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
       {stage&&<><dt>阶段</dt><dd>{stage}</dd></>}
       <dt>进度</dt><dd>{queuedForProcessing||task.dispatch?.state==='pending'?'已加入处理队列':progress}</dd>
       {item?.kind==='html'&&<><dt>处理方式</dt><dd>{htmlModes[mode]}</dd></>}
-      {problem&&<><dt>原因</dt><dd>{reason} <code>{problem}</code></dd></>}
-      {diagnosticReason&&<><dt>模型失败原因</dt><dd>{diagnosticReason}</dd></>}
+      {problem&&<><dt>当前原因</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {previousModelError&&<><dt>上次模型失败原因</dt><dd>{failureReasons[previousModelError]||errorText(400,previousModelError)}</dd></>}
+      {recoveryLimit&&recoveryLimit!==problem&&<><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
       {diagnostic&&<><dt>结束原因</dt><dd>{diagnostic.finish_reason??'未记录'}</dd>
         <dt>输出字符数</dt><dd>{diagnostic.output_chars??'未记录'}</dd>
         <dt>Token 用量</dt><dd>{[
@@ -109,8 +116,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
         ].filter(Boolean).join(' · ')||'未记录'}</dd></>}
       {diagnostic?.provider_request_id&&<><dt>模型请求号</dt><dd>{diagnostic.provider_request_id}</dd></>}
       {recovery&&item&&!item.deleted&&!task.archived&&<><dt>继续处理</dt><dd>
-        <p>中断步骤 {stageText(recovery.stage)}{!diagnosticReason&&recovery.reason&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
-        {['budget_invalid_or_exceeded','favorites_budget_exceeded'].includes(task.error_code)&&<p>{failureReasons[task.error_code]}</p>}
+        <p>中断步骤 {stageText(recovery.stage)}{!diagnostic&&recovery.reason&&recovery.reason!==problem&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
         {recovery.mode==='restore'?<p>{recovery.authorized_amount
           ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`
           :'已保存模型结果，可以从该步骤继续。后续步骤按原预算处理。'}</p>:<>
@@ -126,7 +132,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,expanded,tog
   </article>;
 }
 
-export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}) {
+export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,onBudget}) {
   const [archived,setArchived]=useState(false);
   const [timeDirection,setTimeDirection]=useState('desc');
   const [filters,setFilters]=useState(emptyFilters);
@@ -208,7 +214,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction}
       </div>}
       {loaded&&!filtered.length&&<p>{filtering?'没有符合筛选条件的任务。':archived?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}
       {filtered.map(({task,item,controls})=><TaskRow key={task.id} task={task} item={item} controls={controls}
-        config={config} busy={busy} paid={paid} open={open} onAction={onAction}
+        config={config} busy={busy} paid={paid} open={open} onAction={onAction} onBudget={onBudget}
         expanded={expandedId===task.id} toggle={()=>setExpandedId(id=>id===task.id?null:task.id)}/>)}
     </div>
   </section>;

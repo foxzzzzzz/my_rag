@@ -66,6 +66,40 @@ class WebApiTests(unittest.TestCase):
         client,h=self.client,self.h
         assert client.post('/api/sources/foo/reviews',content='[]',headers=h).status_code==400
 
+    def test_budget_overview_update_and_legacy_estimates(self):
+        from decimal import Decimal
+        from tools.api_smoke import reserve
+        from personalkb.video_pipeline import _preflight
+
+        ledger = self.tmp_path / 'budget.sqlite'
+        cfg = {'budget': {'ledger': str(ledger), 'run_limit': '5', 'research_limit': '100'}}
+        self.service.pc = cfg
+        reserve(ledger, 'old', 'unknown-old', '98.440718', '100', '100')
+        reserve(ledger, 'rag-run', 'rag-run:answer', '1', '2', '100')
+        with self.service.store._tx() as db:
+            db.execute('CREATE TABLE rag_requests (id TEXT PRIMARY KEY, input_sha TEXT NOT NULL, status TEXT NOT NULL, result TEXT)')
+            db.execute('INSERT INTO rag_requests VALUES (?,?,?,?)',
+                       ('rag-run:answer', 'sample', 'completed', '{"estimated_cost_cny":"0.25"}'))
+        client, headers = self.client, self.h
+        budget = client.get('/api/budget').json()
+        assert budget['limit_cny'] == '100' and budget['available_cny'] == '0.559282'
+        assert budget['unknown_count'] == 1 and budget['estimated_cost_cny'] == '0.25'
+        assert budget['entries'][0]['stage'] == '生成回答' and budget['entries'][1]['estimated_cost_cny'] is None
+        assert budget['run_limits'] == {'video':'5', 'html':'2', 'rag':'2', 'classification':'2'}
+        edit = {'limit_cny':'150.25', 'expected_revision':0}
+        assert client.patch('/api/budget', json=edit).status_code == 403
+        assert client.patch('/api/budget', json={**edit, 'limit_cny':'NaN'}, headers=headers).status_code == 400
+        changed = client.patch('/api/budget', json=edit, headers=headers)
+        assert changed.status_code == 200, changed.text
+        result = changed.json()
+        assert result['limit_cny'] == '150.25' and result['available_cny'] == '50.809282' and result['revision'] == 1
+        assert result['changes'][0]['previous_limit_cny'] == '100'
+        assert client.patch('/api/budget', json=edit, headers=headers).status_code == 409
+        _preflight(None, 'retry-task', cfg, {'text': Decimal('0.705536')})
+        reserve(ledger, 'next-rag', 'next-rag:answer', '1', '2', '100')
+        assert client.get('/api/budget').json()['reserved_cny'] == '100.440718'
+        assert self.calls == []
+
     def test_static_paths_rejected(self):
         client=self.client
         assert client.get('/assets/missing.js').status_code==404

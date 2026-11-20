@@ -12,6 +12,8 @@ export function errorText(status, code) {
   if (code==='unknown_submission') return '模型请求结果未知，系统已阻止重发。原预算预留已保留。';
   if (code==='task_archived') return '任务已归档，请先取消归档。';
   if (code==='model_recovery_conflict') return '模型步骤或费用已更新，请刷新任务后重新确认。';
+  if (code==='budget_revision_conflict') return '累计上限已在别处修改，请刷新预算后再确认。';
+  if (code==='invalid_budget_limit') return '请输入大于零、最多两位小数的预算金额。';
   if (code==='version_conflict') return '资料版本已更新，请在最新版本上重新操作。';
   if (code==='title_conflict') return '资料标题已在别处更新，请重新加载详情后再修改。';
   if (code==='invalid_title') return '资料标题过长或含换行等无效字符。';

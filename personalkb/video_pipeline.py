@@ -125,7 +125,7 @@ def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call
     try:
         amount = _positive(amount)
         b = config['budget']
-        if amount > _positive(b['run_limit']) or _positive(b['research_limit']) > 100: raise ValueError()
+        if amount > _positive(b['run_limit']): raise ValueError()
         journal.begin(task_id, token, name, input_sha256)
         stage = journal.stage(task_id, name)
         if stage['status'] == 'completed': return stage['result']
@@ -150,6 +150,12 @@ def paid_stage(journal, task_id, token, name, input_sha256, amount, config, call
             journal.start_chat_retry(task_id, token, name, retry_attempt)
         result = call()
         journal.complete(task_id, token, name, result)
+        if isinstance(result, dict) and result.get('estimated_cost_cny') is not None:
+            from .model_budget import record_estimate
+            try:
+                record_estimate(ledger, request_id, result['estimated_cost_cny'])
+            except (OSError, sqlite3.Error, ValueError):
+                pass
         return result
     except WorkflowError: raise
     except (ValueError, InvalidOperation): raise WorkflowError('budget_invalid_or_exceeded') from None
@@ -301,15 +307,21 @@ def _preflight(journal, tid, pc, amounts, retries=None, restored=(), *, extra=De
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(ledger)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, amount TEXT NOT NULL)')
+        db.execute('BEGIN')
         rows = db.execute('SELECT request_id,run_id,amount FROM reservations').fetchall()
+        from .model_budget import effective_limit
+        cumulative_limit = effective_limit(db, pc['budget']['research_limit'])
     existing = {r[0]:r for r in rows}
     remaining = sum((value for name,value in amounts.items()
                      if name not in restored and tid + ':' + name not in existing), Decimal(0))
     remaining += sum((amounts[name] for name, attempt in (retries or {}).items()
                       if _stage_request_id(tid, name, attempt) not in existing), Decimal(0))
+    additional = remaining + extra
+    if not additional:
+        return
     total = sum((Decimal(r[2]) for r in rows), Decimal(0))
     run_total = sum((Decimal(r[2]) for r in rows if r[1]==tid), Decimal(0))
-    if total + remaining + extra > Decimal(str(pc['budget']['research_limit'])) or run_total + remaining + extra > Decimal(str(pc['budget']['run_limit'])):
+    if total + additional > cumulative_limit or run_total + additional > Decimal(str(pc['budget']['run_limit'])):
         raise WorkflowError('budget_invalid_or_exceeded')
 
 

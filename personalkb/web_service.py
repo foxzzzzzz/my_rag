@@ -303,8 +303,19 @@ class WebService:
                 }
                 views.update(_task_views(grouped[sid], catalog))
         items = []
+        budget = self.pc.get('budget')
+        available = None
         for task in tasks:
             item = self._task(task)
+            error = (item.get('dispatch') or {}).get('error_code') or item['error_code']
+            recovery = item.get('model_recovery') or {}
+            amount = recovery.get('authorized_amount') or recovery.get('amount')
+            if error == 'budget_invalid_or_exceeded' and amount and budget:
+                if available is None:
+                    from .model_budget import budget_snapshot
+                    from .workflow import ROOT
+                    available = budget_snapshot(ROOT / budget['ledger'], budget['research_limit'])['available_cny']
+                item['budget_block'] = {'required_cny': amount, 'available_cny': available}
             sid = task['source_id']
             source = sources.get(sid)
             view = views.get(task['id'])
@@ -314,6 +325,14 @@ class WebService:
                 item['source'] = {**source, 'title': catalogs[sid][view]['title']}
             items.append(item)
         return {'items': items}
+    def budget(self):
+        from .budget_view import overview
+        return overview(self.store, self.pc['budget'], self.webcfg)
+
+    def change_budget(self, payload):
+        from .budget_view import change_limit
+        return change_limit(self.store, self.pc['budget'], self.webcfg, payload)
+
     def trash(self):
         from datetime import datetime, timezone
         items = self.store.list_trash()
