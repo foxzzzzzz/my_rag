@@ -36,6 +36,8 @@ const failureReasons={
   media_tool_missing:'未找到视频检测工具',
   empty_output:'未提取到有效正文',
   invalid_summary_json:'模型返回格式无效',
+  invalid_summary_json_syntax:'模型返回的摘要 JSON 语法无效',
+  invalid_summary_schema:'模型返回的摘要结构不符合要求',
   invalid_size:'文件大小超出限制',
   disk_low:'磁盘空间不足',
   recovery_media_missing:'原任务的音频和画面缓存缺失，无法继续。',
@@ -177,7 +179,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {problem&&<><dt>当前原因</dt><dd>{reason} <code>{problem}</code></dd></>}
       {videoNextStep&&<><dt>下一步</dt><dd>{videoNextStep}</dd></>}
       {previousModelError&&<><dt>上次模型失败原因</dt><dd>{failureReasons[previousModelError]||errorText(400,previousModelError)}</dd></>}
-      {recoveryLimit&&recoveryLimit!==problem&&<><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
+      {recoveryLimit&&recoveryLimit!==problem&&!(albumTextRetry&&recoveryLimit==='unknown_submission')&&
+        <><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
       {!albumTextRetry&&task.retry_blocked_reason&&task.retry_blocked_reason!==problem&&<><dt>重试限制</dt><dd>{failureReasons[task.retry_blocked_reason]||errorText(400,task.retry_blocked_reason)} <code>{task.retry_blocked_reason}</code></dd></>}
       {task.attempts!=null&&<><dt>尝试次数</dt><dd>{task.attempts} 次{task.max_attempts!=null&&` · 常规上限 ${task.max_attempts} 次`}</dd></>}
       {videoRecovery&&<><dt>恢复费用</dt><dd>{videoRecovery.amount_cny?`剩余步骤预计预留 ¥${videoRecovery.amount_cny}。`:'沿用项目和来源已有预算限制。'}{!paid&&' 请先在「处理设置」勾选同意模型费用。'}</dd></>}
@@ -194,6 +197,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
         <p>中断步骤 {stageText(recovery.stage)}{!diagnostic&&recovery.reason&&recovery.reason!==problem&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
         {albumTextRetry?<><p>复用已保存的 {recovery.image_count} 张图片识别结果，仅重新生成精简文本汇总。</p>
           <p>本次额外费用上限 ¥{recovery.ceiling_cny}。</p>
+          <p>原请求的费用预留仍保留。</p>
           <label><input type="checkbox" checked={recoveryAgreement===recoveryKey} onChange={event=>setRecoveryAgreement(event.target.checked?recoveryKey:null)}/> 我同意本次文本汇总的额外费用</label>
         </>:recovery.mode==='restore'?<p>{recovery.authorized_amount
           ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`

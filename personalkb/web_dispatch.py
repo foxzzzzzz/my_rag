@@ -7,6 +7,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 from .douyin_album_processing import ALBUM_TEXT_RETRY_MODE, album_text_retry_plan
+from .video_services import SUMMARY_FORMAT_ERRORS
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
 from .video_recovery import (PARTIAL_MEDIA_ERRORS, TERMINAL_ASR_ERRORS, can_rebuild_media, can_use_visual_only,
@@ -147,10 +148,12 @@ class WebDispatcher:
                     plan = None
                 if plan or task['status'] == 'cancelled':
                     return plan
-                latest = c.execute("""SELECT album_text_retry_key,response_sha256 FROM video_chat_attempts
+                latest = c.execute("""SELECT album_text_retry_key,response_sha256,diagnostic FROM video_chat_attempts
                     WHERE task_id=? AND stage='text' ORDER BY (response_sha256 IS NOT NULL) DESC,attempt DESC LIMIT 1""",
                                    (task['id'],)).fetchone()
-                if latest and latest['album_text_retry_key'] and not latest['response_sha256']:
+                if latest and not latest['response_sha256'] and (
+                    latest['album_text_retry_key'] or latest['diagnostic'] in SUMMARY_FORMAT_ERRORS
+                ):
                     return None
         blocked = [r['name'] for r in stages
                    if r['status'] == 'in_flight' and r['name'] not in (*ASR_UPLOAD_STAGES, 'asr_result')

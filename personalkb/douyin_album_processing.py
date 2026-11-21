@@ -13,7 +13,7 @@ from .video_pipeline import (
     _Heartbeat, _bind_strategy, _chat_recovery, _digest,
     _favorites_budget_preflight, _preflight, _record_call,
 )
-from .video_services import ProviderClient, ProviderError
+from .video_services import SUMMARY_FORMAT_ERRORS, ProviderClient, ProviderError
 from .workflow import ROOT
 from .workflow_store import WorkflowError
 
@@ -37,7 +37,7 @@ def _text_retry_config(album):
         raise WorkflowError('album_text_retry_unavailable')
     pc = pipeline_config(album)
     pc['strategy'].update(text_system_prompt=prompt.strip() + '\n' + album.config['text_prompt_suffix'],
-                          summary_format='structured')
+                          summary_format='structured', summary_validation_diagnostics=True)
     return pc
 
 
@@ -91,10 +91,11 @@ def _prepare_album_text_retry(album, db, task, source):
         return None
     latest = attempts[0]
     pending = latest['album_text_retry_key'] and not latest['started'] and latest['diagnostic'] is None
-    if task['status'] != 'cancelled' and not latest['album_text_retry_key']:
+    format_failed = latest['diagnostic'] in SUMMARY_FORMAT_ERRORS
+    if task['status'] != 'cancelled' and not latest['album_text_retry_key'] and not format_failed:
         return None
-    if not pending and not (task['error_code'] == 'model_output_truncated' and
-                            latest['diagnostic'] == 'model_output_truncated'):
+    if not pending and not (task['error_code'] == latest['diagnostic'] and
+                            (format_failed or latest['diagnostic'] == 'model_output_truncated')):
         return None
     original = db.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (task['id'],)).fetchone()
     if not original or not Decimal(original['amount']).is_finite() or Decimal(original['amount']) <= 0:

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+import json
 import sqlite3
 from zoneinfo import ZoneInfo
 
@@ -466,11 +467,15 @@ def test_expired_image_urls_refresh_without_fetching_completed_image(system, mon
     assert downloads == [image['image_urls'][0], fresh[1]]
 
 
-@pytest.mark.parametrize('case', ('success', 'budget', 'changed_config', 'incomplete', 'timeout'))
-def test_cancelled_album_text_only_retry(system, monkeypatch, case):
+@pytest.mark.parametrize('case', (
+    'success', 'budget', 'changed_config', 'incomplete', 'timeout',
+    'legacy_format', 'legacy_format_incomplete', 'syntax', 'schema',
+))
+def test_album_text_only_retry(system, monkeypatch, case):
     from fastapi.testclient import TestClient
     from personalkb import douyin_album_processing
     from personalkb.model_budget import update_budget_limit
+    from personalkb.summary_structure import summary_fields
     from personalkb.video_journal import VideoJournal
     from personalkb.video_services import ProviderClient
 
@@ -483,6 +488,14 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
     tick(items)
     vision_calls = []
     text_calls = []
+    legacy_format = case in ('legacy_format', 'legacy_format_incomplete')
+    initial_error = 'invalid_summary_json' if legacy_format else 'model_output_truncated'
+    valid_response = '{"summary":{"overview":"精简概述","key_points":[],"limitations":""},"notes":"参见图 1 和图 2"}'
+    format_failures = {
+        'syntax': ('invalid_summary_json_syntax', '{"summary":', {'kind': 'syntax', 'line': 1, 'column': 12}),
+        'schema': ('invalid_summary_schema', valid_response.replace('[]', '"不是数组"'),
+                   {'kind': 'schema', 'reason': 'invalid summary key points'}),
+    }
 
     class InitialModels:
         def vision(self, path, *, mime):
@@ -490,17 +503,21 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
             return {'content': '已保存图文证据'}
 
         def summarize(self, body, title):
-            raise ProviderError('model_output_truncated', 'initial-text', metrics={'finish_reason': 'length'})
+            raise ProviderError(initial_error, 'initial-text',
+                                metrics={'finish_reason': 'stop' if legacy_format else 'length'})
 
     def fake_request(_client, url, key=None, payload=None):
         assert url.endswith('/chat/completions')
-        assert '不超过 1500 字' in payload['messages'][0]['content']
+        prompt = payload['messages'][0]['content']
+        assert '不超过 1500 字' in prompt
+        example, _ = json.JSONDecoder().raw_decode(prompt[prompt.index('{"summary":'):])
+        assert '\n' in summary_fields(example, {'summary_format': 'structured'})['notes']
         assert '## 图 1' in payload['messages'][1]['content'] and '## 图 2' in payload['messages'][1]['content']
         text_calls.append(payload['max_tokens'])
         if case == 'timeout':
             raise ProviderError('provider_timeout')
-        return {'choices': [{'finish_reason': 'stop', 'message': {'content':
-            '{"summary":{"overview":"精简概述","key_points":[],"limitations":""},"notes":"参见图 1 和图 2"}'}}]}
+        content = format_failures[case][1] if case in format_failures and len(text_calls) == 1 else valid_response
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]}
 
     def fake_services(_album, pc, kinds):
         assert kinds == ('text',)
@@ -512,11 +529,13 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
     monkeypatch.setattr(douyin_album_processing, '_album_services', fake_services)
     monkeypatch.setattr(ProviderClient, '_request', fake_request)
     result = service.dispatcher.process_next()
-    assert result['error'] == 'model_output_truncated'
+    assert result['error'] == initial_error
     tid = result['task_id']
-    journal = VideoJournal(service.store)
-    journal.resume_claim(tid, 'douyin-album')
-    service.dispatcher.cancel(tid)
+    initial_status = 'needs_attention'
+    if not legacy_format:
+        VideoJournal(service.store).resume_claim(tid, 'douyin-album')
+        service.dispatcher.cancel(tid)
+        initial_status = 'cancelled'
     ledger = service.pc['budget']['ledger']
 
     def reservations():
@@ -524,7 +543,7 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
             return set(db.execute('SELECT request_id,amount FROM reservations WHERE run_id=?', (tid,)).fetchall())
 
     baseline = reservations()
-    if case == 'incomplete':
+    if case in ('incomplete', 'legacy_format_incomplete'):
         with service.store._tx() as db:
             db.execute("UPDATE video_stages SET result=NULL WHERE task_id=? AND name='vision-2'", (tid,))
         assert service.tasks()['items'][0]['model_recovery'] is None
@@ -537,7 +556,7 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
         row = next(item for item in client.get('/api/tasks').json()['items'] if item['id'] == tid)
         recovery = row['model_recovery']
         assert (row['status'], recovery['mode'], recovery['stage'], recovery['image_count']) == (
-            'cancelled', 'retry-album-text', 'text', 2)
+            initial_status, 'retry-album-text', 'text', 2)
         assert recovery['ceiling_cny'] == '0.71'
         url = f'/api/tasks/{tid}/recover-model'
         assert client.post(url, json=recovery, headers=headers).json()['error'] == 'paid_consent_required'
@@ -566,6 +585,27 @@ def test_cancelled_album_text_only_retry(system, monkeypatch, case):
         assert execution['error'] == 'provider_timeout'
         assert service.tasks()['items'][0]['model_recovery'] is None
         return
+    if case in format_failures:
+        expected_code, _, expected_validation = format_failures[case]
+        assert execution['error'] == expected_code
+        task = next(item for item in service.tasks()['items'] if item['id'] == tid)
+        assert task['status'] == 'needs_attention'
+        assert task['model_diagnostic']['code'] == expected_code
+        assert task['model_diagnostic']['summary_validation'] == expected_validation
+        new_quote = task['model_recovery']
+        assert new_quote['attempt'] == recovery['attempt'] + 1
+        assert new_quote['image_count'] == 2 and new_quote['ceiling_cny'] == recovery['ceiling_cny']
+        with pytest.raises(WorkflowError, match='paid_consent_required'):
+            service.dispatcher.recover_model(tid, new_quote)
+        with pytest.raises(WorkflowError, match='model_recovery_conflict'):
+            service.dispatcher.recover_model(tid, consent)
+        assert text_calls == [8192]
+        assert service.dispatcher.recover_model(tid, {**new_quote, 'allow_paid': True})['dispatch_state'] == 'pending'
+        execution = service.dispatcher.process_next()
+        assert text_calls == [8192, 8192] and len(vision_calls) == len(downloads) == 2
+        assert reservations() - baseline == {
+            (f"{tid}:text:retry:{quote['attempt']}", quote['amount']) for quote in (recovery, new_quote)
+        }
     assert execution['dispatch_state'] == 'done'
     detail = service.detail(row['source_id'])
     assert not detail['eligible']

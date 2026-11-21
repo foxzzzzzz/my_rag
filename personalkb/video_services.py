@@ -13,6 +13,9 @@ from urllib.error import URLError
 from .summary_structure import summary_fields
 
 
+SUMMARY_FORMAT_ERRORS = frozenset({'invalid_summary_json', 'invalid_summary_json_syntax', 'invalid_summary_schema'})
+
+
 class ProviderError(RuntimeError):
     def __init__(self, code, request_id=None, *, metrics=None):
         self.code = code
@@ -176,10 +179,21 @@ class ProviderClient:
         if len(body.encode('utf-8')) > strategy['max_context_utf8_bytes']:
             raise RuntimeError('context_too_large')
         result = self._chat('text', [{'role': 'system', 'content': strategy['text_system_prompt']}, {'role': 'user', 'content': title + '\n\n' + body}])
+        detailed = strategy.get('summary_validation_diagnostics') is True
         try:
             structured = json.loads(result['content'])
+        except (ValueError, TypeError) as exc:
+            validation = {'kind': 'syntax'}
+            if isinstance(exc, json.JSONDecodeError):
+                validation.update(line=exc.lineno, column=exc.colno)
+            metrics = {**result['response_metrics'], 'summary_validation': validation}
+            code = 'invalid_summary_json_syntax' if detailed else 'invalid_summary_json'
+            raise ProviderError(code, result.get('provider_request_id'), metrics=metrics) from None
+        try:
             summary_fields(structured, strategy)
-        except (ValueError, TypeError):
-            raise ProviderError('invalid_summary_json', result.get('provider_request_id'), metrics=result['response_metrics']) from None
+        except ValueError as exc:
+            metrics = {**result['response_metrics'], 'summary_validation': dict(kind='schema', reason=str(exc))}
+            code = 'invalid_summary_schema' if detailed else 'invalid_summary_json'
+            raise ProviderError(code, result.get('provider_request_id'), metrics=metrics) from None
         result['structured'] = structured
         return result
