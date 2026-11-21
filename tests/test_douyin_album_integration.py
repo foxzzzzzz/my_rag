@@ -466,6 +466,112 @@ def test_expired_image_urls_refresh_without_fetching_completed_image(system, mon
     assert downloads == [image['image_urls'][0], fresh[1]]
 
 
+@pytest.mark.parametrize('case', ('success', 'budget', 'changed_config', 'incomplete', 'timeout'))
+def test_cancelled_album_text_only_retry(system, monkeypatch, case):
+    from fastapi.testclient import TestClient
+    from personalkb import douyin_album_processing
+    from personalkb.model_budget import update_budget_limit
+    from personalkb.video_journal import VideoJournal
+    from personalkb.video_services import ProviderClient
+
+    service, album, sync, tick, now, downloads = system
+    items = [work(100, 'image')]
+    establish(sync, tick, items, now)
+    sync.select('a', ['100'], COOKIE, rights_confirmed=True, allow_paid=True, video_budget_cny='4.05',
+                image_quotes={'100': str(album.quote(2))})
+    tick(items)
+    tick(items)
+    vision_calls = []
+    text_calls = []
+
+    class InitialModels:
+        def vision(self, path, *, mime):
+            vision_calls.append(path)
+            return {'content': '已保存图文证据'}
+
+        def summarize(self, body, title):
+            raise ProviderError('model_output_truncated', 'initial-text', metrics={'finish_reason': 'length'})
+
+    def fake_request(_client, url, key=None, payload=None):
+        assert url.endswith('/chat/completions')
+        assert '不超过 1500 字' in payload['messages'][0]['content']
+        assert '## 图 1' in payload['messages'][1]['content'] and '## 图 2' in payload['messages'][1]['content']
+        text_calls.append(payload['max_tokens'])
+        if case == 'timeout':
+            raise ProviderError('provider_timeout')
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content':
+            '{"summary":{"overview":"精简概述","key_points":[],"limitations":""},"notes":"参见图 1 和图 2"}'}}]}
+
+    def fake_services(_album, pc, kinds):
+        assert kinds == ('text',)
+        provider = pc['models']['models']['text']['provider']
+        ref = pc['models']['providers'][provider]['api_key_env']
+        return ProviderClient(pc['models'], pc, {ref: 'test-key'})
+
+    monkeypatch.setattr(douyin_album_processing, 'run_album', lambda *a, **kw: run_album(*a, **kw, services=InitialModels()))
+    monkeypatch.setattr(douyin_album_processing, '_album_services', fake_services)
+    monkeypatch.setattr(ProviderClient, '_request', fake_request)
+    result = service.dispatcher.process_next()
+    assert result['error'] == 'model_output_truncated'
+    tid = result['task_id']
+    journal = VideoJournal(service.store)
+    journal.resume_claim(tid, 'douyin-album')
+    service.dispatcher.cancel(tid)
+    ledger = service.pc['budget']['ledger']
+
+    def reservations():
+        with sqlite3.connect(ledger) as db:
+            return set(db.execute('SELECT request_id,amount FROM reservations WHERE run_id=?', (tid,)).fetchall())
+
+    baseline = reservations()
+    if case == 'incomplete':
+        with service.store._tx() as db:
+            db.execute("UPDATE video_stages SET result=NULL WHERE task_id=? AND name='vision-2'", (tid,))
+        assert service.tasks()['items'][0]['model_recovery'] is None
+        assert reservations() == baseline and not text_calls
+        return
+    monkeypatch.setattr(service, 'start', lambda: None)
+    monkeypatch.setattr(service, 'stop', lambda: None)
+    with TestClient(create_app(service.wc, service.pc, service.webcfg, service)) as client:
+        headers = {'x-csrf-token': client.get('/api/session').json()['csrf_token']}
+        row = next(item for item in client.get('/api/tasks').json()['items'] if item['id'] == tid)
+        recovery = row['model_recovery']
+        assert (row['status'], recovery['mode'], recovery['stage'], recovery['image_count']) == (
+            'cancelled', 'retry-album-text', 'text', 2)
+        assert recovery['ceiling_cny'] == '0.71'
+        url = f'/api/tasks/{tid}/recover-model'
+        assert client.post(url, json=recovery, headers=headers).json()['error'] == 'paid_consent_required'
+        assert client.post(url, json={**recovery, 'allow_paid': True, 'quote_key': 'old'}, headers=headers).status_code == 409
+        consent = {**recovery, 'allow_paid': True}
+        assert client.post(url, json=consent, headers=headers).json()['dispatch_state'] == 'pending'
+        assert client.post(url, json=consent, headers=headers).status_code == 409
+    assert reservations() == baseline and not text_calls
+    if case == 'changed_config':
+        album.config['text_retry_prompt'] += ' 汇总时优先保留可执行步骤。'
+        assert service.dispatcher.process_next()['error'] == 'model_recovery_conflict'
+        assert service.tasks()['items'][0]['model_recovery']['quote_key'] != recovery['quote_key']
+        assert reservations() == baseline and not text_calls
+        return
+    if case == 'budget':
+        limit = str(sum(Decimal(amount) for _, amount in baseline).quantize(Decimal('.01')))
+        update_budget_limit(ledger, '100', limit, 0)
+        assert service.dispatcher.process_next()['error'] == 'budget_invalid_or_exceeded'
+        assert reservations() == baseline and not text_calls
+        update_budget_limit(ledger, '100', '100', 1)
+        assert service.dispatcher.recover_model(tid, consent)['dispatch_state'] == 'pending'
+    execution = service.dispatcher.process_next()
+    assert text_calls == [8192] and len(vision_calls) == len(downloads) == 2
+    assert reservations()-baseline == {(tid+f':text:retry:{recovery["attempt"]}', recovery['amount'])}
+    if case == 'timeout':
+        assert execution['error'] == 'provider_timeout'
+        assert service.tasks()['items'][0]['model_recovery'] is None
+        return
+    assert execution['dispatch_state'] == 'done'
+    detail = service.detail(row['source_id'])
+    assert not detail['eligible']
+    assert [image['index'] for image in detail['current']['result']['images']] == [1, 2]
+
+
 def test_manual_quote_model_recovery_approved_index_and_cross_account_dedupe(system, monkeypatch):
     from fastapi.testclient import TestClient
     from personalkb import douyin_album_processing

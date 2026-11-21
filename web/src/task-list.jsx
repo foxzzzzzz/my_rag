@@ -122,16 +122,17 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const budgetBlock=task.budget_block;
   const detailId='task-detail-'+task.id;
   const recovery=task.model_recovery;
+  const albumTextRetry=recovery?.mode==='retry-album-text';
   const videoRecovery=!queuedForProcessing&&['visual-only','rebuild-media'].includes(task.video_recovery?.mode)?task.video_recovery:null;
   const visualOnly=videoRecovery?.mode==='visual-only';
   const recoveryAction=visualOnly?'仅按画面和原文继续':'重建缓存并重试';
-  const videoNextStep=videoRecovery?(visualOnly
+  const videoNextStep=albumTextRetry?null:videoRecovery?(visualOnly
     ? '可以用已提取的画面和来源原文生成待审核内容，语音栏会说明转录未完成。若原片应有人声，请先检查音轨。'
     : '确认后会保留原片及旧缓存，并重新提取可用画面。')
     :task.retry_blocked_reason==='attempts_exhausted'?'已达到常规尝试上限，请根据当前原因检查原片或处理环境。'
     :task.retry_blocked_reason==='unknown_submission'?'先核对原模型请求的状态和费用预留。'
     :task.retry_blocked_reason?'检查原片是否能完整播放。如需更换原片，请重新导入可用版本。':null;
-  const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode]);
+  const recoveryKey=recovery&&JSON.stringify([task.id,recovery.stage,recovery.attempt,recovery.amount,recovery.mode,recovery.quote_key]);
   return <article className="task-grid task-item">
     <div className="task-identity">
       <strong>{title}</strong>
@@ -154,7 +155,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {task.updated_at?<time dateTime={task.updated_at}>{formatDate(task.updated_at,config.display_timezone)}</time>:'—'}
     </div>
     <div className="task-actions">
-      {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>处理模型请求</button>}
+      {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>{albumTextRetry?'仅重试文本汇总':'处理模型请求'}</button>}
       {status==='attention'&&budgetBlocked&&<button type="button" onClick={onBudget}>查看预算</button>}
       {videoRecovery&&item&&!item.deleted&&!task.archived&&(enabled&&!paid
         ?<RetryConsentHint taskId={task.id} label={recoveryAction} prompt="继续处理前，请在「处理设置」勾选同意模型费用。"/>
@@ -177,7 +178,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {videoNextStep&&<><dt>下一步</dt><dd>{videoNextStep}</dd></>}
       {previousModelError&&<><dt>上次模型失败原因</dt><dd>{failureReasons[previousModelError]||errorText(400,previousModelError)}</dd></>}
       {recoveryLimit&&recoveryLimit!==problem&&<><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
-      {task.retry_blocked_reason&&task.retry_blocked_reason!==problem&&<><dt>重试限制</dt><dd>{failureReasons[task.retry_blocked_reason]||errorText(400,task.retry_blocked_reason)} <code>{task.retry_blocked_reason}</code></dd></>}
+      {!albumTextRetry&&task.retry_blocked_reason&&task.retry_blocked_reason!==problem&&<><dt>重试限制</dt><dd>{failureReasons[task.retry_blocked_reason]||errorText(400,task.retry_blocked_reason)} <code>{task.retry_blocked_reason}</code></dd></>}
       {task.attempts!=null&&<><dt>尝试次数</dt><dd>{task.attempts} 次{task.max_attempts!=null&&` · 常规上限 ${task.max_attempts} 次`}</dd></>}
       {videoRecovery&&<><dt>恢复费用</dt><dd>{videoRecovery.amount_cny?`剩余步骤预计预留 ¥${videoRecovery.amount_cny}。`:'沿用项目和来源已有预算限制。'}{!paid&&' 请先在「处理设置」勾选同意模型费用。'}</dd></>}
       {task.asr_provider_code&&<><dt>转录服务错误码</dt><dd><code>{task.asr_provider_code}</code></dd></>}
@@ -191,16 +192,19 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {diagnostic?.provider_request_id&&<><dt>模型请求号</dt><dd>{diagnostic.provider_request_id}</dd></>}
       {recovery&&item&&!item.deleted&&!task.archived&&<><dt>继续处理</dt><dd>
         <p>中断步骤 {stageText(recovery.stage)}{!diagnostic&&recovery.reason&&recovery.reason!==problem&&` · ${failureReasons[recovery.reason]||recovery.reason}`}</p>
-        {recovery.mode==='restore'?<p>{recovery.authorized_amount
+        {albumTextRetry?<><p>复用已保存的 {recovery.image_count} 张图片识别结果，仅重新生成精简文本汇总。</p>
+          <p>本次额外费用上限 ¥{recovery.ceiling_cny}。</p>
+          <label><input type="checkbox" checked={recoveryAgreement===recoveryKey} onChange={event=>setRecoveryAgreement(event.target.checked?recoveryKey:null)}/> 我同意本次文本汇总的额外费用</label>
+        </>:recovery.mode==='restore'?<p>{recovery.authorized_amount
           ?`此步骤已授权重试，额外费用上限 ¥${recovery.authorized_amount}。`
           :'已保存模型结果，可以从该步骤继续。后续步骤按原预算处理。'}</p>:<>
           <p>当前没有可用的模型结果，原请求可能已计费。重试此步骤会增加最高 ¥{recovery.amount} 的费用预留，后续步骤按原预算处理。</p>
           <label><input type="checkbox" checked={recoveryAgreement===recoveryKey} onChange={event=>setRecoveryAgreement(event.target.checked?recoveryKey:null)}/> 我同意重新请求此步骤产生的费用</label>
         </>}
-        <button type="button" disabled={busy||!enabled||(recovery.mode==='retry'&&recoveryAgreement!==recoveryKey)} onClick={()=>{
+        <button type="button" disabled={busy||!enabled||((recovery.mode==='retry'||albumTextRetry)&&recoveryAgreement!==recoveryKey)} onClick={()=>{
           setRecoveryAgreement(null);
-          onAction(task.id,'recover-model',{stage:recovery.stage,attempt:recovery.attempt,mode:recovery.mode,allow_paid:recovery.mode==='retry',amount:recovery.amount});
-        }}>{recovery.mode==='restore'?(recovery.authorized_amount?'继续已授权的重试':'使用已保存结果继续'):'确认费用并重试此步骤'}</button>
+          onAction(task.id,'recover-model',{stage:recovery.stage,attempt:recovery.attempt,mode:recovery.mode,allow_paid:recovery.mode==='retry'||albumTextRetry,amount:recovery.amount,...(albumTextRetry?{quote_key:recovery.quote_key}:{})});
+        }}>{albumTextRetry?'确认费用并仅重试文本汇总':recovery.mode==='restore'?(recovery.authorized_amount?'继续已授权的重试':'使用已保存结果继续'):'确认费用并重试此步骤'}</button>
       </dd></>}
     </dl>}
   </article>;

@@ -5,7 +5,7 @@ from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError, _json
 CHAT_ATTEMPTS_SCHEMA = """CREATE TABLE IF NOT EXISTS video_chat_attempts (
     task_id TEXT NOT NULL, stage TEXT NOT NULL, attempt INTEGER NOT NULL,
     amount TEXT, response TEXT, response_sha256 TEXT, diagnostic TEXT, provider_request_id TEXT, response_metrics TEXT,
-    started INTEGER NOT NULL DEFAULT 0, automatic INTEGER NOT NULL DEFAULT 0,
+    started INTEGER NOT NULL DEFAULT 0, automatic INTEGER NOT NULL DEFAULT 0, album_text_retry_key TEXT,
     PRIMARY KEY(task_id,stage,attempt))"""
 
 
@@ -16,6 +16,8 @@ def initialize_chat_attempts(connection):
         connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0')
     if 'response_metrics' not in columns:
         connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN response_metrics TEXT')
+    if 'album_text_retry_key' not in columns:
+        connection.execute('ALTER TABLE video_chat_attempts ADD COLUMN album_text_retry_key TEXT')
 
 
 def is_chat_stage(name):

@@ -157,7 +157,9 @@ class DouyinAlbum:
             raise WorkflowError('source_integrity') from None
 
     def manifest(self, source_id):
-        source = self.store.get_source(source_id)
+        return self._manifest(self.store.get_source(source_id))
+
+    def _manifest(self, source):
         if source['kind'] != 'douyin_album' or source['deleted']:
             raise WorkflowError('invalid_source')
         root = self._root()

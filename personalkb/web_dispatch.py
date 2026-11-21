@@ -6,6 +6,7 @@ import time
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from .douyin_album_processing import ALBUM_TEXT_RETRY_MODE, album_text_retry_plan
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
 from .video_recovery import (PARTIAL_MEDIA_ERRORS, TERMINAL_ASR_ERRORS, can_rebuild_media, can_use_visual_only,
@@ -13,6 +14,7 @@ from .video_recovery import (PARTIAL_MEDIA_ERRORS, TERMINAL_ASR_ERRORS, can_rebu
 from .workflow import _root
 
 VIDEO_RECOVERY_MODES = ('visual-only', 'rebuild-media')
+MODEL_RECOVERY_DISPATCH_MODES = ('recover-model', 'recover-album-text')
 HARD_VIDEO_FAILURES = frozenset({'invalid_frame', 'empty_frames', 'media_cache_changed', 'media_workdir_unverified',
                                 'media_missing_duration', 'media_missing_video', 'media_video_timeline_invalid',
                                 'invalid_media_duration', 'audio_not_full_length', 'source_integrity'})
@@ -134,6 +136,22 @@ class WebDispatcher:
             return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
 
     def model_recovery(self, c, task, stages):
+        if self.config['live_video_enabled'] and task['status'] in ('cancelled', 'needs_attention') and task['stage'] == 'text':
+            source = self.store._row(c, 'sources', task['source_id'])
+            if source['kind'] == 'douyin_album':
+                try:
+                    plan = album_text_retry_plan(self.service.douyin_album, c, task, source)
+                except WorkflowError as exc:
+                    if exc.code != 'invalid_album_config':
+                        raise
+                    plan = None
+                if plan or task['status'] == 'cancelled':
+                    return plan
+                latest = c.execute("""SELECT album_text_retry_key,response_sha256 FROM video_chat_attempts
+                    WHERE task_id=? AND stage='text' ORDER BY (response_sha256 IS NOT NULL) DESC,attempt DESC LIMIT 1""",
+                                   (task['id'],)).fetchone()
+                if latest and latest['album_text_retry_key'] and not latest['response_sha256']:
+                    return None
         blocked = [r['name'] for r in stages
                    if r['status'] == 'in_flight' and r['name'] not in (*ASR_UPLOAD_STAGES, 'asr_result')
                    and not (r['name'] == 'asr_submit' and r['remote_task_id'])]
@@ -183,14 +201,25 @@ class WebDispatcher:
             if (not recovery or type(payload.get('attempt')) is not int
                     or any(payload.get(key) != recovery[key] for key in ('stage', 'attempt', 'mode', 'amount'))):
                 raise WorkflowError('model_recovery_conflict')
-            if recovery['mode'] == 'retry':
+            mode = 'recover-model'
+            if recovery['mode'] == ALBUM_TEXT_RETRY_MODE:
+                if payload.get('quote_key') != recovery['quote_key']:
+                    raise WorkflowError('model_recovery_conflict')
+                if payload.get('allow_paid') is not True:
+                    raise WorkflowError('paid_consent_required')
+                c.execute("""INSERT OR IGNORE INTO video_chat_attempts(task_id,stage,attempt,amount,album_text_retry_key)
+                             VALUES(?,'text',?,?,?)""",
+                          (task_id, recovery['attempt'], recovery['amount'], recovery['quote_key']))
+                c.execute("UPDATE tasks SET status='needs_attention' WHERE id=? AND status='cancelled'", (task_id,))
+                mode = 'recover-album-text'
+            elif recovery['mode'] == 'retry':
                 if payload.get('allow_paid') is not True:
                     raise WorkflowError('paid_consent_required')
                 c.execute('INSERT INTO video_chat_attempts(task_id,stage,attempt,amount) VALUES(?,?,?,?)',
                           (task_id, recovery['stage'], recovery['attempt'], recovery['amount']))
-            c.execute("""INSERT INTO web_dispatch(task_id,mode,state,requested) VALUES(?,'recover-model','pending',?)
+            c.execute("""INSERT INTO web_dispatch(task_id,mode,state,requested,processing_mode) VALUES(?,?,'pending',?,'model')
                 ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,
-                claimed=NULL,owner=NULL,error_code=NULL""", (task_id, time.time()))
+                claimed=NULL,owner=NULL,error_code=NULL""", (task_id, mode, time.time()))
             return {'task_id': task_id, 'dispatch_state': 'pending'}
 
     def enqueue(self, task_id, mode='run', allow_paid=False, processing_mode='preview'):
@@ -268,7 +297,7 @@ class WebDispatcher:
             row = None
             for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
                 reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
-                if pending['mode'] in ('recover-model', *VIDEO_RECOVERY_MODES) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                if pending['mode'] in (*MODEL_RECOVERY_DISPATCH_MODES, *VIDEO_RECOVERY_MODES) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
                     row = pending
                     break
             if not row: return None
@@ -398,7 +427,7 @@ class WebDispatcher:
             task = self.store.get_task(tid)
             source = self.store.get_source(task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
-            resume = job['mode'] in ('resume', 'recover-model', 'visual-only')
+            resume = job['mode'] in ('resume', *MODEL_RECOVERY_DISPATCH_MODES, 'visual-only')
             expected = 'needs_attention' if resume else 'queued'
             if task['status'] != expected: raise WorkflowError('invalid_state')
             if source['kind'] == 'html':
@@ -415,13 +444,16 @@ class WebDispatcher:
                     if not result or 'error' in result: raise WorkflowError(result.get('error','invalid_state') if result else 'invalid_state')
             elif source['kind'] == 'douyin_album':
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
-                from .douyin_album_processing import run_album
+                from .douyin_album_processing import run_album, run_album_text_retry
 
                 with self.store._tx() as c:
                     reservation = c.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (tid,)).fetchone()
                 if not reservation:
                     raise WorkflowError('invalid_state')
-                run_album(self.service.douyin_album, tid, reservation['amount'], resume=resume)
+                if job['mode'] == 'recover-album-text':
+                    run_album_text_retry(self.service.douyin_album, tid)
+                else:
+                    run_album(self.service.douyin_album, tid, reservation['amount'], resume=resume)
             elif source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 runner = self.service.video_runner

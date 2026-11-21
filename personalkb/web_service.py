@@ -275,6 +275,9 @@ class WebService:
                     d['retry_blocked_reason'] = 'attempts_exhausted'
                 elif t['external_started']:
                     d['retry_blocked_reason'] = 'unknown_submission'
+            if (t['status'] == 'cancelled' and not d['archived']
+                    and (not dispatch or dispatch['state'] not in ('pending', 'working'))):
+                d['model_recovery'] = self.dispatcher.model_recovery(c, t, rows)
             if t['status'] in ('failed', 'needs_attention', 'cancelled'):
                 source = self.store._row(c, 'sources', t['source_id'])
                 if source['kind'] in ('video', 'mp4'):
