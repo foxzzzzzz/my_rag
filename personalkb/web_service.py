@@ -184,13 +184,18 @@ class WebService:
         stamp = path.stat().st_mtime_ns if path.is_file() else None
         if not hasattr(self, '_favorites_sync') or self._favorites_stamp != stamp:
             config = load_config(path) if stamp is not None else {'enabled': False}
-            self._favorites_sync = (FavoritesSync(self.store, config, image_quote=self._album_quote)
+            self._favorites_sync = (FavoritesSync(self.store, config, image_quote=self._album_quote,
+                                                  image_limits=self._album_limits)
                                     if config['enabled'] else None)
             self._favorites_stamp = stamp
         return self._favorites_sync
 
-    def _album_quote(self, image_count, *, work_id, manual):
-        return self.douyin_album.quote(image_count, work_id=work_id, manual=manual)
+    def _album_quote(self, image_count, *, work_id, manual, extended_image_count=None):
+        return self.douyin_album.quote(image_count, work_id=work_id, manual=manual,
+                                       extended_image_count=extended_image_count)
+
+    def _album_limits(self, image_count, *, work_id):
+        return self.douyin_album.limit_details(image_count, work_id=work_id)
 
     def favorites_cookie(self):
         import os
@@ -343,11 +348,32 @@ class WebService:
         return {'items': items}
     def budget(self):
         from .budget_view import overview
-        return overview(self.store, self.pc['budget'], self.webcfg)
+        result = overview(self.store, self.pc['budget'], self.webcfg)
+        return {**result, **self._favorites_budget_limits()}
 
     def change_budget(self, payload):
         from .budget_view import change_limit
-        return change_limit(self.store, self.pc['budget'], self.webcfg, payload)
+        limits = self._favorites_budget_limits()
+        result = change_limit(self.store, self.pc['budget'], self.webcfg, payload)
+        return {**result, **limits}
+
+    def _favorites_budget_limits(self):
+        sync = self.favorites_sync
+        if not sync:
+            return {}
+        try:
+            max_images = self.douyin_album.config['max_images']
+        except WorkflowError as exc:
+            if exc.code == 'invalid_album_config' and not sync.config.get('mixed_enabled', False):
+                return {}
+            raise
+        return {'favorites_limits': sync.limits(max_images)}
+
+    def change_favorites_limits(self, payload):
+        sync = self.favorites_sync
+        if not sync:
+            raise WorkflowError('favorites_disabled')
+        return sync.limits(self.douyin_album.config['max_images'], payload=payload)
 
     def trash(self):
         from datetime import datetime, timezone

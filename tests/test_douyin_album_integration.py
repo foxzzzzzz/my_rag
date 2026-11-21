@@ -19,6 +19,8 @@ from personalkb.workflow_store import WorkflowError
 
 COOKIE = 'test-cookie'
 AUTHORIZED_WORK = '7707297968927829478'
+EXTENDED_WORK = '7683044048454544229'
+LARGE_WORK = '7700865500990255594'
 
 
 def work(number, kind='video', image_count=2):
@@ -63,7 +65,7 @@ def system(tmp_path, monkeypatch):
     album = DouyinAlbum(service, downloader=image_download)
     config = load_config('config/douyin-daily-sync.json')
     config.update(enabled=True, mixed_enabled=True, schedule_enabled=True, auto_download=True, conversion_enabled=True)
-    sync = FavoritesSync(service.store, config, image_quote=album.quote)
+    sync = FavoritesSync(service.store, config, image_quote=album.quote, image_limits=album.limit_details)
     monkeypatch.setattr(WebService, 'favorites_sync', property(lambda _: sync))
     monkeypatch.setattr(WebService, 'douyin_album', property(lambda _: album))
     monkeypatch.setattr(WebService, 'favorites_cookie', lambda _: COOKIE)
@@ -85,16 +87,22 @@ def establish(sync, tick, items, day, account='a'):
 
 
 @pytest.mark.parametrize('budget_case', ('complete', 'cumulative_limit', 'missing_consent'))
-def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case):
+@pytest.mark.parametrize('work_id,image_count,ceiling', (
+    (AUTHORIZED_WORK, 37, '8.54'),
+    (EXTENDED_WORK, 45, '10.08'),
+))
+def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case, work_id, image_count, ceiling):
     from fastapi.testclient import TestClient
     from personalkb import douyin_album_processing
     from tools.api_smoke import reserve
 
     service, album, sync, tick, now, downloads = system
-    items = [work(AUTHORIZED_WORK, 'image', 37), work(100, 'image', 37), work(99, 'image', 41)]
+    extended = image_count > album.config['max_images']
+    items = [work(work_id, 'image', image_count), work(100, 'image', 37), work(LARGE_WORK, 'image', 99)]
     establish(sync, tick, items, now)
-    with pytest.raises(WorkflowError, match='album_quote_over_run_budget'):
-        album.quote(37, work_id=AUTHORIZED_WORK)
+    regular_error = 'album_image_limit' if extended else 'album_quote_over_run_budget'
+    with pytest.raises(WorkflowError, match=regular_error):
+        album.quote(image_count, work_id=work_id)
     calls = {}
 
     def timeout_once(stage):
@@ -110,7 +118,8 @@ def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case):
 
         def summarize(self, body, title):
             timeout_once('text')
-            return {'structured': {'summary': {'overview': '概述', 'key_points': [], 'limitations': ''}, 'notes': '参见图 37'}}
+            return {'structured': {'summary': {'overview': '概述', 'key_points': [], 'limitations': ''},
+                                   'notes': f'参见图 {image_count}'}}
 
     monkeypatch.setattr(douyin_album_processing, 'run_album', lambda *a, **kw: run_album(*a, **kw, services=Models()))
     monkeypatch.setattr(service, 'start', lambda: None)
@@ -118,24 +127,49 @@ def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case):
     with TestClient(create_app(service.wc, service.pc, service.webcfg, service)) as client:
         headers = {'x-csrf-token': client.get('/api/session').json()['csrf_token']}
         rows = {row['work_id']: row for row in client.get('/api/douyin/favorites/sync').json()['items']}
-        assert rows[AUTHORIZED_WORK]['selectable'] and rows[AUTHORIZED_WORK]['image_quote_cny'] == '8.54'
+        if extended:
+            assert not rows[work_id]['selectable'] and rows[work_id]['image_quote_cny'] is None
+            assert rows[work_id]['image_limits'] == dict(max_images=40, manual_max_images=45, manual_quote_cny=ceiling,
+                                                       estimate_cny=ceiling, can_import=True)
+            limits = client.get('/api/budget').json()['favorites_limits']
+            assert (limits['max_images'], limits['download_limit'], limits['downloads_used']) == (40, 3, 0)
+            assert limits['revision'] == 0 and limits['changes'] == []
+        else:
+            assert rows[work_id]['selectable'] and rows[work_id]['image_quote_cny'] == ceiling
         assert not rows['100']['selectable'] and rows['100']['image_quote_error'] == 'album_quote_over_run_budget'
-        assert not rows['99']['selectable'] and rows['99']['image_quote_error'] == 'album_image_limit'
+        assert not rows[LARGE_WORK]['selectable'] and rows[LARGE_WORK]['image_quote_error'] == 'album_image_limit'
+        assert rows[LARGE_WORK]['image_limits']['manual_quote_cny'] is None
+        assert not rows[LARGE_WORK]['image_limits']['can_import']
         url = '/api/douyin/favorites/import'
-        consent = {'account_id': 'a', 'work_ids': [AUTHORIZED_WORK], 'rights_confirmed': True,
-                   'allow_paid': True, 'video_budget_cny': '4.05', 'image_quotes': {AUTHORIZED_WORK: '8.54'}}
+        consent = {'account_id': 'a', 'work_ids': [work_id], 'rights_confirmed': True,
+                   'allow_paid': True, 'video_budget_cny': '4.05', 'image_quotes': {work_id: ceiling}}
+        if extended:
+            assert client.post(url, json=consent, headers=headers).json()['error'] == 'album_image_limit'
+            consent['extended_image_count'] = image_count
+            assert client.post(url, json={**consent, 'extended_image_count': image_count - 1},
+                               headers=headers).json()['error'] == 'favorites_price_changed'
+            assert client.post(url, json={**consent, 'work_ids': [work_id, LARGE_WORK]},
+                               headers=headers).json()['error'] == 'invalid_request'
+            assert client.post(url, json={**consent, 'work_ids': [LARGE_WORK], 'extended_image_count': 99},
+                               headers=headers).json()['error'] == 'album_image_limit'
+        assert client.post(url, json={**consent, 'rights_confirmed': False}, headers=headers).json()['error'] == 'rights_required'
         assert client.post(url, json={**consent, 'allow_paid': False}, headers=headers).json()['error'] == 'paid_consent_required'
-        assert client.post(url, json={**consent, 'image_quotes': {AUTHORIZED_WORK: '8.55'}}, headers=headers).json()['error'] == 'favorites_price_changed'
-        assert client.post(url, json={**consent, 'work_ids': ['100'], 'image_quotes': {'100': '8.54'}},
+        assert client.post(url, json={**consent, 'image_quotes': {work_id: '10.09'}}, headers=headers).json()['error'] == 'favorites_price_changed'
+        assert client.post(url, json={**consent, 'work_ids': ['100'], 'image_quotes': {'100': '8.54'}, 'extended_image_count': None},
                            headers=headers).json()['error'] == 'album_quote_over_run_budget'
+        with service.store._tx() as db:
+            assert not db.execute('SELECT 1 FROM favorites_queue').fetchone()
         assert client.post(url, json=consent, headers=headers).json() == {'queued': 1}
+        assert client.post(url, json=consent, headers=headers).json() == {'queued': 0}
     tick(items)
     tick(items)
     with service.store._tx() as db:
         assert db.execute('SELECT COUNT(*) FROM favorites_queue').fetchone()[0] == 1
         assert db.execute('SELECT COUNT(*) FROM favorites_download_slots').fetchone()[0] == 0
         assert db.execute('SELECT COUNT(*) FROM favorites_conversion_slots').fetchone()[0] == 0
-        assert db.execute('SELECT amount FROM favorites_conversion').fetchone()[0] == '8.54'
+        assert db.execute('SELECT amount FROM favorites_conversion').fetchone()[0] == ceiling
+        counts = [row[0] for row in db.execute('SELECT image_count FROM favorites_manual_album_extensions')]
+        assert counts == ([image_count] if extended else [])
         if budget_case == 'missing_consent':
             db.execute('DELETE FROM favorites_manual_consent')
     budget = service.pc['budget']
@@ -145,33 +179,184 @@ def test_manual_work_budget_quote_and_ledger(system, monkeypatch, budget_case):
     if budget_case == 'cumulative_limit':
         assert result['error'] == 'budget_invalid_or_exceeded' and not calls
     elif budget_case == 'missing_consent':
-        assert result['error'] == 'album_quote_over_run_budget' and not calls
+        assert result['error'] == regular_error and not calls
     else:
         assert result['dispatch_state'] == 'done'
         source_id = service.store.get_task(result['task_id'])['source_id']
         document = service.detail(source_id)
-        assert not document['eligible'] and len(document['current']['result']['images']) == 37
+        assert not document['eligible']
+        assert [image['index'] for image in document['current']['result']['images']] == list(range(1, image_count + 1))
         with sqlite3.connect(budget['ledger']) as db:
             amounts = [Decimal(row[0]) for row in db.execute('SELECT amount FROM reservations WHERE run_id=?', (result['task_id'],))]
-        assert len(amounts) == sum(calls.values()) == 76
-        assert sum(amounts) == Decimal('8.534016') < Decimal('8.54')
-    assert len(downloads) == 37 and budget['run_limit'] == '5'
+        assert len(amounts) == sum(calls.values()) == 2 * (image_count + 1)
+        assert sum(amounts) == 2 * (image_count * Decimal('0.096256') + Decimal('0.705536')) < Decimal(ceiling)
+    assert len(downloads) == image_count and budget['run_limit'] == '5'
 
 
-def test_scheduled_work_does_not_use_manual_budget(system):
+@pytest.mark.parametrize('work_id,image_count,status,error', (
+    (AUTHORIZED_WORK, 37, 'downloaded', 'album_quote_over_run_budget'),
+    (EXTENDED_WORK, 45, 'download_failed', 'album_image_limit'),
+))
+def test_scheduled_work_does_not_use_manual_budget(system, work_id, image_count, status, error):
     service, _, sync, tick, now, _ = system
     baseline = [work(100)]
     establish(sync, tick, baseline, now - timedelta(days=1))
-    items = [work(AUTHORIZED_WORK, 'image', 37), *baseline]
+    items = [work(work_id, 'image', image_count), *baseline]
     tick(items)
     tick(items)
     assert tick(items) is None
     with service.store._tx() as db:
-        row = db.execute('SELECT automatic,status FROM favorites_queue WHERE work_id=?', (AUTHORIZED_WORK,)).fetchone()
-        assert tuple(row) == (1, 'downloaded')
+        row = db.execute('SELECT automatic,status FROM favorites_queue WHERE work_id=?', (work_id,)).fetchone()
+        assert tuple(row) == (1, status)
         assert db.execute('SELECT COUNT(*) FROM favorites_conversion').fetchone()[0] == 0
-    row = next(item for item in sync.status(COOKIE)['items'] if item['work_id'] == AUTHORIZED_WORK)
-    assert row['image_quote_error'] == 'album_quote_over_run_budget' and not row['selectable']
+    row = next(item for item in sync.status(COOKIE)['items'] if item['work_id'] == work_id)
+    assert row['image_quote_error'] == error and not row['selectable']
+
+
+def test_budget_limits_save_with_revision_and_apply_to_existing_album(system, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    service, album, sync, tick, now, downloads = system
+    items = [work(101, 'image', 4), work(EXTENDED_WORK, 'image', 45), work(LARGE_WORK, 'image', 99)]
+    establish(sync, tick, items, now)
+    monkeypatch.setattr(service, 'start', lambda: None)
+    monkeypatch.setattr(service, 'stop', lambda: None)
+    with TestClient(create_app(service.wc, service.pc, service.webcfg, service)) as client:
+        url = '/api/budget/favorites-limits'
+        headers = {'x-csrf-token': client.get('/api/session').json()['csrf_token']}
+        before = client.get('/api/budget').json()
+        assert before['favorites_limits']['day'] == now.date().isoformat()
+        update = dict(max_images=3, download_limit=0, expected_revision=0)
+        assert client.patch(url, json=update).status_code == 403
+        for invalid in ({'max_images': 0}, {'max_images': True}, {'max_images': 2**53}, {'download_limit': -1},
+                        {'download_limit': 0.5}, {'expected_revision': False}):
+            result = client.patch(url, json={**update, **invalid}, headers=headers)
+            assert result.json()['error'] == 'invalid_favorites_limits'
+        assert client.get('/api/budget').json()['favorites_limits'] == before['favorites_limits']
+        result = client.patch(url, json=update, headers=headers)
+        assert result.status_code == 200
+        saved = result.json()
+        assert (saved['max_images'], saved['download_limit'], saved['revision']) == (3, 0, 1)
+        assert saved['downloads_used'] == 0
+        assert len(saved['changes']) == 1
+        change = saved['changes'][0]
+        assert (change['previous_max_images'], change['max_images']) == (40, 3)
+        assert (change['previous_download_limit'], change['download_limit']) == (3, 0)
+        assert client.patch(url, json={**update, 'download_limit': 6}, headers=headers).status_code == 409
+        assert client.patch(url, json={**update, 'expected_revision': 1}, headers=headers).json() == saved
+        after = client.get('/api/budget').json()
+        assert after['favorites_limits'] == saved
+        assert {key: value for key, value in after.items() if key != 'favorites_limits'} == {
+            key: value for key, value in before.items() if key != 'favorites_limits'
+        }
+        status = client.get('/api/douyin/favorites/sync').json()
+        assert status['download_limit'] == 0
+        rows = {row['work_id']: row for row in status['items']}
+        assert rows['101']['image_quote_error'] == 'album_image_limit'
+        assert rows[EXTENDED_WORK]['image_limits']['manual_quote_cny'] == '10.08'
+        assert rows[EXTENDED_WORK]['image_limits']['can_import']
+        with pytest.raises(WorkflowError, match='album_image_limit'):
+            album.download('101', items[0]['title'], items[0]['image_urls'])
+        assert downloads == []
+        raised = client.patch(url, json={**update, 'max_images': 99, 'expected_revision': 1}, headers=headers).json()
+        assert raised['revision'] == 2
+        assert album.quote(4) == Decimal('2.19')
+        with pytest.raises(WorkflowError, match='album_quote_over_run_budget'):
+            album.quote(45, work_id=EXTENDED_WORK)
+        with pytest.raises(WorkflowError, match='album_single_import_required'):
+            album.quote(45, manual=True, work_id=EXTENDED_WORK)
+        rows = {row['work_id']: row for row in client.get('/api/douyin/favorites/sync').json()['items']}
+        assert not rows[EXTENDED_WORK]['selectable'] and rows[EXTENDED_WORK]['image_limits']['can_import']
+        assert rows[LARGE_WORK]['image_quote_error'] == 'album_quote_over_run_budget'
+        assert not rows[LARGE_WORK]['image_limits']['can_import'] and not rows[LARGE_WORK]['selectable']
+    reopened = FavoritesSync(workflow.make_store(service.wc), sync.config)
+    assert reopened.limits(40)['revision'] == 2
+
+
+def test_changed_count_can_be_reconfirmed_on_original_download(system):
+    service, _, sync, tick, now, downloads = system
+    initial = [work(EXTENDED_WORK, 'image', 45)]
+    establish(sync, tick, initial, now)
+    rights = dict(rights_confirmed=True, allow_paid=True, video_budget_cny='4.05')
+    assert sync.select('a', [EXTENDED_WORK], COOKIE, **rights,
+                       image_quotes={EXTENDED_WORK: '10.08'}, extended_image_count=45) == {'queued': 1}
+    latest = [work(EXTENDED_WORK, 'image', 44)]
+    sync.request_scan()
+    tick(latest)
+    assert tick(latest)['error_code'] == 'favorites_price_changed'
+    assert not downloads
+    with service.store._tx() as db:
+        original = tuple(db.execute('SELECT seq,job_id FROM favorites_queue').fetchone())
+    item = sync.status(COOKIE, manual_conversion_available=True)['items'][0]
+    assert item['image_limits']['can_import'] and item['image_limits']['manual_quote_cny'] == '9.89'
+    with pytest.raises(WorkflowError, match='invalid_state'):
+        sync.retry_image_download('a', EXTENDED_WORK, COOKIE)
+    with pytest.raises(WorkflowError, match='favorites_price_changed'):
+        sync.select('a', [EXTENDED_WORK], COOKIE, **rights,
+                    image_quotes={EXTENDED_WORK: '10.08'}, extended_image_count=44)
+    consent = dict(**rights, image_quotes={EXTENDED_WORK: '9.89'}, extended_image_count=44)
+    assert sync.select('a', [EXTENDED_WORK], COOKIE, **consent) == {'queued': 1}
+    assert sync.select('a', [EXTENDED_WORK], COOKIE, **consent) == {'queued': 0}
+    assert tick(latest)['favorites'] == 'downloaded'
+    assert tick(latest)['favorites'] == 'conversion_queued'
+    assert len(downloads) == 44
+    with service.store._tx() as db:
+        assert [tuple(row) for row in db.execute('SELECT seq,job_id FROM favorites_queue')] == [original]
+        assert db.execute('SELECT amount FROM favorites_conversion').fetchone()[0] == '9.89'
+        assert db.execute('SELECT COUNT(*) FROM favorites_download_slots').fetchone()[0] == 0
+
+
+def test_video_only_favorites_without_album_config_preserve_budget(system, monkeypatch):
+    service, _, sync, *_ = system
+    sync.config['mixed_enabled'] = False
+
+    def missing_album(_):
+        raise WorkflowError('invalid_album_config')
+
+    monkeypatch.setattr(WebService, 'douyin_album', property(missing_album))
+    before = service.budget()
+    result = service.change_budget({'limit_cny': '110', 'expected_revision': before['revision']})
+    assert result['limit_cny'] == '110' and 'favorites_limits' not in result
+    assert service.budget()['limit_cny'] == '110'
+    with pytest.raises(WorkflowError, match='invalid_album_config'):
+        service.change_favorites_limits({'max_images': 40, 'download_limit': 3, 'expected_revision': 0})
+
+
+def test_lower_download_limit_preserves_dispatched_jobs_and_manual_import(system, monkeypatch):
+    service, album, sync, tick, now, _ = system
+    historical = [work(EXTENDED_WORK, 'image', 45), work(100)]
+    establish(sync, tick, historical, now - timedelta(days=1))
+    items = [work(101), work(102), *historical]
+    tick(items)
+    downloader = service.douyin
+    finish = downloader.process_next
+    monkeypatch.setattr(downloader, 'process_next', lambda **_: {'error_code': None})
+    tick(items)
+    with service.store._tx() as db:
+        pending = db.execute('SELECT job_id FROM favorites_queue WHERE work_id=?', ('101',)).fetchone()[0]
+        assert db.execute('SELECT status FROM douyin_jobs WHERE id=?', (pending,)).fetchone()[0] == 'queued'
+    update = dict(max_images=40, download_limit=0, expected_revision=0)
+    assert sync.limits(40, payload=update)['downloads_used'] == 1
+    monkeypatch.setattr(downloader, 'process_next', finish)
+    assert tick(items)['status'] == 'succeeded'
+    assert tick(items)['favorites'] == 'conversion_queued'
+    assert tick(items) is None
+    assert sync.select('a', [EXTENDED_WORK], COOKIE, rights_confirmed=True, allow_paid=True,
+                       video_budget_cny='4.05', image_quotes={EXTENDED_WORK: '10.08'}, extended_image_count=45) == {'queued': 1}
+    assert tick(items)['favorites'] == 'downloaded'
+    assert tick(items)['favorites'] == 'conversion_queued'
+    with service.store._tx() as db:
+        assert db.execute('SELECT COUNT(*) FROM favorites_download_slots').fetchone()[0] == 1
+        assert db.execute('SELECT job_id FROM favorites_queue WHERE work_id=?', ('102',)).fetchone()[0] is None
+    sync.limits(40, payload={**update, 'download_limit': 1, 'expected_revision': 1})
+    assert tick(items) is None
+    tomorrow = now + timedelta(days=1)
+    assert tick(items, day=tomorrow)['favorites'] == 'scanned'
+    assert tick(items, day=tomorrow)['status'] == 'succeeded'
+    with service.store._tx() as db:
+        assert [row[0] for row in db.execute('SELECT day FROM favorites_download_slots ORDER BY seq')] == [
+            now.date().isoformat(), tomorrow.date().isoformat()
+        ]
 
 
 def test_mixed_daily_count_budget_and_continuation(system):

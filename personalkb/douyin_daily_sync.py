@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .execution_guard import execution_guard
+from . import favorites_limits
 from .workflow_store import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,9 @@ def load_config(path):
 
 
 class FavoritesSync:
-    def __init__(self, store, config, *, image_quote=None):
+    def __init__(self, store, config, *, image_quote=None, image_limits=None):
         self.image_quote = image_quote
+        self.image_limits = image_limits
         self.store = store
         self.config = config
         with store._tx() as db:
@@ -162,10 +164,13 @@ class FavoritesSync:
             items = []
             mixed = self.config.get('mixed_enabled', False)
             for row in db.execute("""SELECT i.work_id,i.title,i.kind,i.image_urls,i.baseline,q.status,j.error_code AS image_download_error,
-                  (m.queue_seq IS NOT NULL AND q.account_id=i.account_id) AS paid
+                  (m.queue_seq IS NOT NULL AND q.account_id=i.account_id) AS paid,
+                  (e.queue_seq IS NOT NULL AND q.account_id=i.account_id AND q.automatic=0
+                   AND j.status='failed' AND j.source_id IS NULL) AS failed_extension
                   FROM favorites_items i LEFT JOIN favorites_queue q USING(work_id)
                   LEFT JOIN douyin_jobs j ON j.id=q.job_id
                   LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                  LEFT JOIN favorites_manual_album_extensions e ON e.queue_seq=m.queue_seq
                   WHERE i.account_id=? AND (i.baseline=1 OR (? AND i.kind='image' AND i.account_id=q.account_id))
                   ORDER BY i.baseline DESC,CASE WHEN i.baseline=1 THEN i.position ELSE q.seq END""", (s['active'], mixed)):
                 status = row['status']
@@ -191,6 +196,15 @@ class FavoritesSync:
                                   kind=row['kind'], image_count=len(urls), image_quote_cny=quote, image_quote_error=quote_error,
                                   image_download_error=row['image_download_error'] if row['kind'] == 'image' else None,
                                   selectable=bool(ready and row['baseline'] and not status and (row['kind'] != 'image' or quote is not None))))
+                reconfirm = status == 'download_failed' and row['failed_extension'] and row['image_download_error'] == 'favorites_price_changed'
+                if self.image_limits and (reconfirm or quote_error in (
+                    'album_image_limit', 'album_quote_over_run_budget', 'album_single_import_required',
+                )):
+                    limits = self.image_limits(len(urls), work_id=row['work_id'])
+                    limits['can_import'] = bool(ready and row['baseline'] and (not status or reconfirm) and
+                                                manual_conversion_available and self.config['manual_video_budget_cny'] is not None and
+                                                limits['manual_quote_cny'] is not None)
+                    items[-1]['image_limits'] = limits
             counts = dict(db.execute('SELECT status, COUNT(*) FROM favorites_queue WHERE account_id=? GROUP BY status',
                                      (s['active'],)).fetchall())
             scan = db.execute("""SELECT day, state, error_code, read_count, queued_count
@@ -198,7 +212,7 @@ class FavoritesSync:
             return dict(enabled=self.config['enabled'], state=state, error_code=s['error_code'],
                         active_account=dict(id=account['id'], label=account['label']) if account else None,
                         pending_account=dict(id=s['pending'], label=s['pending_label']) if s['pending'] else None,
-                        items=items, download_limit=self.config['download_limit'], baseline_limit=self.config['baseline_limit'],
+                        items=items, download_limit=self._download_limit(db), baseline_limit=self.config['baseline_limit'],
                         queue_counts=counts,
                         last_scan=dict(scan) if scan else None,
                         manual_conversion_available=manual_conversion_available and self.config['manual_video_budget_cny'] is not None,
@@ -226,7 +240,8 @@ class FavoritesSync:
                        state='baseline_pending',scan_requested=1 WHERE id=1""", (account_id,))
         return {'confirmed': True}
 
-    def select(self, account_id, work_ids, cookie, *, rights_confirmed, allow_paid=False, video_budget_cny=None, image_quotes=None):
+    def select(self, account_id, work_ids, cookie, *, rights_confirmed, allow_paid=False,
+               video_budget_cny=None, image_quotes=None, extended_image_count=None):
         self._enabled()
         if rights_confirmed is not True:
             raise WorkflowError('rights_required')
@@ -241,6 +256,10 @@ class FavoritesSync:
             not isinstance(item, str) or not re.fullmatch(r'[0-9]+', item) for item in work_ids
         ):
             raise WorkflowError('invalid_request')
+        if extended_image_count is not None and (
+            len(work_ids) != 1 or type(extended_image_count) is not int or extended_image_count <= 0
+        ):
+            raise WorkflowError('invalid_request')
         with self.store._tx() as db:
             s = self._state(db)
             if not cookie or account_id != s['active'] or s['state'] != 'ready' or s['scan_requested'] or self._credential(cookie) != s['credential']:
@@ -250,14 +269,25 @@ class FavoritesSync:
             available = [row['work_id'] for row in records]
             amounts = {}
             for item in records:
-                if item['work_id'] in wanted and item['kind'] == 'image':
-                    urls = json.loads(item['image_urls'] or '[]')
-                    if not self.config.get('mixed_enabled') or not self.image_quote or not urls:
+                work_id = item['work_id']
+                if work_id not in wanted:
+                    continue
+                if item['kind'] != 'image':
+                    if extended_image_count is not None:
+                        raise WorkflowError('invalid_request')
+                    continue
+                urls = json.loads(item['image_urls'] or '[]')
+                if not self.config.get('mixed_enabled') or not self.image_quote or not urls:
+                    raise WorkflowError('favorites_price_changed')
+                quote_options = {}
+                if extended_image_count is not None:
+                    if len(urls) != extended_image_count:
                         raise WorkflowError('favorites_price_changed')
-                    quote = format(Decimal(str(self.image_quote(len(urls), work_id=item['work_id'], manual=True))), '.2f')
-                    if not isinstance(image_quotes, dict) or image_quotes.get(item['work_id']) != quote:
-                        raise WorkflowError('favorites_price_changed')
-                    amounts[item['work_id']] = quote
+                    quote_options['extended_image_count'] = extended_image_count
+                quote = format(Decimal(str(self.image_quote(len(urls), work_id=work_id, manual=True, **quote_options))), '.2f')
+                if not isinstance(image_quotes, dict) or image_quotes.get(work_id) != quote:
+                    raise WorkflowError('favorites_price_changed')
+                amounts[work_id] = quote
             if not wanted.issubset(available):
                 raise WorkflowError('invalid_request')
             count = 0
@@ -267,8 +297,44 @@ class FavoritesSync:
                                      (account_id, work))
                     if row.rowcount:
                         db.execute('INSERT INTO favorites_manual_consent VALUES (?,?)', (row.lastrowid, amounts.get(work, amount)))
+                        if extended_image_count is not None:
+                            db.execute('INSERT INTO favorites_manual_album_extensions VALUES (?,?)',
+                                       (row.lastrowid, extended_image_count))
+                        count += 1
+                    elif extended_image_count is not None and self._reconfirm_image(
+                        db, account_id, work, extended_image_count, amounts[work],
+                    ):
                         count += 1
         return {'queued': count}
+
+    @staticmethod
+    def _reconfirm_image(db, account_id, work_id, image_count, amount):
+        row = db.execute("""SELECT q.seq,j.id FROM favorites_queue q
+            JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+            JOIN favorites_manual_album_extensions e ON e.queue_seq=q.seq
+            JOIN douyin_jobs j ON j.id=q.job_id AND j.work_id=q.work_id
+            WHERE q.account_id=? AND q.work_id=? AND q.automatic=0 AND q.status='download_failed'
+              AND j.status='failed' AND j.source_id IS NULL AND j.error_code='favorites_price_changed'
+        """, (account_id, work_id)).fetchone()
+        if not row:
+            return False
+        db.execute('UPDATE favorites_manual_consent SET video_budget_cny=? WHERE queue_seq=?', (amount, row['seq']))
+        db.execute('UPDATE favorites_manual_album_extensions SET image_count=? WHERE queue_seq=?', (image_count, row['seq']))
+        db.execute("UPDATE douyin_jobs SET status='queued',error_code=NULL,updated_at=? WHERE id=?", (time.time(), row['id']))
+        db.execute("UPDATE favorites_queue SET status='downloading' WHERE seq=?", (row['seq'],))
+        return True
+
+    def _download_limit(self, db):
+        settings = favorites_limits.saved_limits(db)
+        return settings['download_limit'] if settings else self.config['download_limit']
+
+    def limits(self, default_max_images, *, payload=None):
+        defaults = dict(max_images=default_max_images, download_limit=self.config['download_limit'])
+        with self.store._tx() as db:
+            day = datetime.now(ZoneInfo(self.config['timezone'])).date().isoformat()
+            if payload is None:
+                return favorites_limits.snapshot(db, defaults, day)
+            return favorites_limits.change_limits(db, defaults, day, payload)
 
     def _pause(self, db, code):
         db.execute("""UPDATE favorites_state SET state='paused', error_code=?,pending=NULL,
@@ -421,7 +487,8 @@ class FavoritesSync:
                              ON i.account_id=q.account_id AND i.work_id=q.work_id
                              WHERE q.account_id=? AND q.work_id=? AND q.status='download_failed' AND i.kind='image'""",
                              (account_id, work_id)).fetchone()
-            if not row or not db.execute("UPDATE douyin_jobs SET status='queued',error_code=NULL,updated_at=? WHERE id=? AND status='failed'",
+            if not row or not db.execute("""UPDATE douyin_jobs SET status='queued',error_code=NULL,updated_at=?
+                                        WHERE id=? AND status='failed' AND error_code IS NOT 'favorites_price_changed'""",
                                         (time.time(), row['job_id'])).rowcount:
                 raise WorkflowError('invalid_state')
             db.execute("UPDATE favorites_queue SET status='downloading' WHERE seq=?", (row['seq'],))
@@ -452,8 +519,8 @@ class FavoritesSync:
                 return {'favorites': 'conversion_queued'}
             if not all(downloader.status().values()):
                 return None
-            count = db.execute('SELECT COUNT(*) FROM favorites_download_slots WHERE day=?', (day,)).fetchone()[0]
-            has_slot = count < self.config['download_limit']
+            count = favorites_limits.downloads_used(db, day)
+            has_slot = count < self._download_limit(db)
             pending = db.execute("""SELECT q.job_id,q.work_id,q.download_day,m.queue_seq AS paid,i.kind
                     FROM favorites_queue q JOIN douyin_jobs j ON j.id=q.job_id
                     LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
@@ -511,13 +578,19 @@ class FavoritesSync:
         # completion so a process interruption can resume its image checkpoints.
         with self.store._tx() as db:
             item = db.execute('SELECT * FROM favorites_items WHERE account_id=? AND work_id=?', (account, work)).fetchone()
+            consent = db.execute("""SELECT e.image_count FROM favorites_queue q
+                                  JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                                  JOIN favorites_manual_album_extensions e ON e.queue_seq=q.seq
+                                  WHERE q.job_id=? AND q.automatic=0""", (job_id,)).fetchone()
             db.execute('UPDATE douyin_jobs SET attempts=attempts+1,updated_at=? WHERE id=?', (time.time(), job_id))
         error = source = None
         try:
             data = dict(item)
             urls = json.loads(data['image_urls'])
+            extended_count = consent['image_count'] if consent else None
+            metadata = dict(description=data['description'], author=data['author'], extended_image_count=extended_count)
             try:
-                result = album.download(work, data['title'], urls, description=data['description'], author=data['author'])
+                result = album.download(work, data['title'], urls, **metadata)
             except WorkflowError as exc:
                 if exc.code != 'douyin_http_failed' or refresh_image is None:
                     raise
@@ -527,7 +600,7 @@ class FavoritesSync:
                 with self.store._tx() as db:
                     db.execute('UPDATE favorites_items SET image_urls=? WHERE account_id=? AND work_id=?',
                                (json.dumps(refreshed), account, work))
-                result = album.download(work, data['title'], refreshed, description=data['description'], author=data['author'])
+                result = album.download(work, data['title'], refreshed, **metadata)
             source = result['source']
         except (WorkflowError, OSError, TypeError, ValueError) as exc:
             error = exc.code if isinstance(exc, WorkflowError) else 'album_download_failed'
@@ -545,12 +618,13 @@ class FavoritesSync:
         used = [Decimal(row[0]) for row in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
         remaining = Decimal(str(self.config['daily_budget_cny'])) - sum(used, Decimal(0))
         can_schedule = scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
-        rows = db.execute("""SELECT q.seq,t.id,q.work_id,m.video_budget_cny,i.kind,i.image_urls FROM favorites_queue q
+        rows = db.execute("""SELECT q.seq,t.id,q.work_id,m.video_budget_cny,e.image_count,i.kind,i.image_urls FROM favorites_queue q
                 JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
                 JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
                 LEFT JOIN web_task_archive a ON a.task_id=t.id
                 LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
                 LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                LEFT JOIN favorites_manual_album_extensions e ON e.queue_seq=m.queue_seq AND q.automatic=0
                 WHERE q.account_id=? AND q.status='downloaded'
                 AND (? OR COALESCE(i.kind,'video')='video')
                 AND (m.queue_seq IS NOT NULL OR (? AND q.automatic=1))
@@ -562,8 +636,14 @@ class FavoritesSync:
             amount = Decimal(str(self.config['video_budget_cny']))
             if row['kind'] == 'image':
                 try:
-                    amount = Decimal(self.image_quote(len(json.loads(row['image_urls'])),
-                                                      work_id=row['work_id'], manual=manual_amount is not None))
+                    quote_options = {}
+                    image_count = row['image_count']
+                    if image_count is None:
+                        image_count = len(json.loads(row['image_urls']))
+                    else:
+                        quote_options['extended_image_count'] = image_count
+                    amount = Decimal(self.image_quote(image_count,
+                                                      work_id=row['work_id'], manual=manual_amount is not None, **quote_options))
                 except (TypeError, ValueError, InvalidOperation, WorkflowError):
                     continue
                 if manual_amount is not None and amount > Decimal(manual_amount):

@@ -211,6 +211,9 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     @app.patch('/api/budget')
     async def change_budget(req:Request):
         return await run_in_threadpool(service.change_budget, await read_object(req))
+    @app.patch('/api/budget/favorites-limits')
+    async def change_favorites_limits(req:Request):
+        return await run_in_threadpool(service.change_favorites_limits, await read_object(req))
     @app.get('/api/douyin/status')
     def douyin_status(): return service.douyin.status()
     @app.get('/api/douyin/favorites/sync')
@@ -235,7 +238,8 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             service.douyin._ready()
             return sync.select(payload.get('account_id'), payload.get('work_ids'), cookie,
                                rights_confirmed=payload.get('rights_confirmed'), allow_paid=payload.get('allow_paid'),
-                               video_budget_cny=payload.get('video_budget_cny'), image_quotes=payload.get('image_quotes'))
+                               video_budget_cny=payload.get('video_budget_cny'), image_quotes=payload.get('image_quotes'),
+                               extended_image_count=payload.get('extended_image_count'))
         raise WorkflowError('favorites_action_not_found')
     @app.get('/api/douyin/jobs')
     def douyin_jobs(): return {'items':service.douyin.jobs()}

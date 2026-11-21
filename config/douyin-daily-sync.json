@@ -6,7 +6,7 @@
     "daily_at": "每日开始时间 HH:MM",
     "baseline_limit": "账号首次展示和记录的最近收藏视频条数",
     "scan_limit": "每日扫描最多读取的视频条数，用来寻找上次快照",
-    "download_limit": "每日同步最多派发的下载项，含定时重试和旧版下载队列",
+    "download_limit": "每日同步最多派发的下载项默认值，含定时重试和旧版下载队列。预算页保存后使用其设置",
     "auto_download": "授权下载符合条件的新增收藏，手动选择另行确认",
     "conversion_enabled": "授权对自动下载的新增视频发起付费转换",
     "conversion_limit": "每日最多派发的自动转换任务数",

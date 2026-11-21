@@ -30,17 +30,18 @@ def pipeline_config(album):
 def _confirmed_work_budget(album, task, work_id, reserved):
     limit = album.manual_work_budget(work_id)
     if limit is None:
-        return None
+        return None, None
     with album.store._tx() as db:
-        row = db.execute("""SELECT m.video_budget_cny,r.amount FROM favorites_queue q
+        row = db.execute("""SELECT m.video_budget_cny,e.image_count,r.amount FROM favorites_queue q
                            JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                           LEFT JOIN favorites_manual_album_extensions e ON e.queue_seq=m.queue_seq
                            JOIN favorites_conversion r ON r.task_id=q.task_id AND r.account_id=q.account_id
                            JOIN douyin_jobs j ON j.id=q.job_id AND j.source_id=?
                            WHERE q.task_id=? AND q.work_id=? AND q.automatic=0""",
                          (task['source_id'], task['id'], work_id)).fetchone()
     if row and Decimal(row['video_budget_cny']) == Decimal(row['amount']) == reserved:
-        return min(limit, reserved)
-    return None
+        return min(limit, reserved), row['image_count']
+    return None, None
 
 
 def _cost_summary(store, task_id, pc):
@@ -75,8 +76,9 @@ def run_album(album, task_id, reserved, *, resume=False, services=None):
     manifest = album.manifest(task['source_id'])
     work_id = manifest['work_id']
     reserved = Decimal(reserved)
-    work_budget = _confirmed_work_budget(album, task, work_id, reserved)
-    amount = album.quote(len(manifest['images']), work_id=work_id, manual=work_budget is not None)
+    work_budget, extended_image_count = _confirmed_work_budget(album, task, work_id, reserved)
+    amount = album.quote(len(manifest['images']), work_id=work_id, manual=work_budget is not None,
+                         extended_image_count=extended_image_count)
     if amount > reserved:
         raise WorkflowError('album_quote_changed')
     if work_budget is not None:

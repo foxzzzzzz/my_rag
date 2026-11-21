@@ -1,7 +1,8 @@
 {
   "_说明": {
     "album_text_input_token_bound": "单次图文摘要请求的输入 token 保守上限，覆盖正文、标题和提示词",
-    "max_images": "单个图文作品允许的图片数量上限",
+    "max_images": "单个图文作品的常规图片上限默认值。预算页保存后使用其设置",
+    "manual_work_image_limits": "按抖音作品 ID 配置的单篇手动导入张数上限，须同时配置预算并确认张数和报价，定时处理使用常规上限",
     "manual_work_budgets_cny": "按抖音作品 ID 配置的手动回补预算上限（元），每次仍须确认当前报价",
     "max_image_bytes": "单张图片下载字节上限",
     "max_album_bytes": "单个图文作品下载总字节上限",
@@ -11,7 +12,11 @@
   },
   "album_text_input_token_bound": 320000,
   "max_images": 40,
+  "manual_work_image_limits": {
+    "7683044048454544229": 45
+  },
   "manual_work_budgets_cny": {
+    "7683044048454544229": "10.08",
     "7707297968927829478": "8.54"
   },
   "max_image_bytes": 20971520,

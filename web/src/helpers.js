@@ -2,6 +2,7 @@ export function validReview(score, decision, target, reviewer) { const n=Number(
 export const classificationTopicRequired = '有标签的资料至少需要一个主题。请选择主题，或清空标签。';
 export const albumQuoteErrors = {
   album_image_limit: '图片数量超限',
+  album_single_import_required: '需确认单篇导入',
   album_quote_over_run_budget: '单任务预算不足',
 };
 export function errorText(status, code) {
@@ -15,10 +16,12 @@ export function errorText(status, code) {
   if (code==='video_recovery_conflict'||code==='video_recovery_unavailable') return '此任务的可用操作已变化，请刷新任务并查看详情。';
   if (code==='budget_revision_conflict') return '累计上限已在别处修改，请刷新预算后再确认。';
   if (code==='invalid_budget_limit') return '请输入大于零、最多两位小数的预算金额。';
+  if (code==='favorites_limits_conflict') return '收藏处理限制已在别处修改，请刷新预算后再确认。';
+  if (code==='invalid_favorites_limits') return '请输入有效的整数。图片上限至少 1 张，定时下载上限可以为 0 条。';
   if (code==='version_conflict') return '资料版本已更新，请在最新版本上重新操作。';
   if (code==='title_conflict') return '资料标题已在别处更新，请重新加载详情后再修改。';
   if (code==='invalid_title') return '资料标题过长或含换行等无效字符。';
-  if (code==='favorites_price_changed') return '单条费用预留已更新，请刷新收藏列表并重新确认。';
+  if (code==='favorites_price_changed') return '作品张数或费用上限已更新，请刷新收藏列表并重新确认。';
   if (code==='favorites_manual_disabled') return '当前无法启动手动付费转换。';
   if (code==='paid_consent_required') return '请先同意本次模型费用。';
   if (code==='favorites_budget_exceeded') return '此视频所需的费用预留超过已确认的上限。';

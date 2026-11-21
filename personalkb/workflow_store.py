@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS source_display_titles (source_id TEXT PRIMARY KEY, ti
 CREATE TABLE IF NOT EXISTS source_title_overrides (source_id TEXT PRIMARY KEY, title TEXT, revision INTEGER NOT NULL, synced_revision INTEGER NOT NULL DEFAULT 0, note_sha256 TEXT);
 CREATE TABLE IF NOT EXISTS video_reprocess (task_id TEXT PRIMARY KEY, base_version_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_results (task_id TEXT PRIMARY KEY, version_id TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS favorites_manual_album_extensions (queue_seq INTEGER PRIMARY KEY, image_count INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS favorites_limit_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1), max_images INTEGER NOT NULL CHECK(max_images>0),
+    download_limit INTEGER NOT NULL CHECK(download_limit>=0), revision INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS favorites_limit_changes (
+    revision INTEGER PRIMARY KEY, previous_max_images INTEGER NOT NULL, max_images INTEGER NOT NULL,
+    previous_download_limit INTEGER NOT NULL, download_limit INTEGER NOT NULL,
+    changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
 CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE tasks SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=NEW.id; END;''')
         with self._tx() as c:
             if 'content_pruned_at' not in [r[1] for r in c.execute('PRAGMA table_info(versions)')]:

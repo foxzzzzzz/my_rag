@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_CEILING
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .douyin_http import download_stream
+from .favorites_limits import image_limit
 from .workflow import ROOT, _hash, _root
 from .workflow_store import WorkflowError
 
@@ -81,6 +82,12 @@ class DouyinAlbum:
             ):
                 raise ValueError()
             self.manual_work_budgets = {work_id: Decimal(amount) for work_id, amount in work_budgets.items()}
+            self.manual_work_image_limits = self.config.get('manual_work_image_limits', {})
+            if not isinstance(self.manual_work_image_limits, dict) or any(
+                work_id not in self.manual_work_budgets or type(limit) is not int or limit <= 0
+                for work_id, limit in self.manual_work_image_limits.items()
+            ):
+                raise ValueError()
         except (OSError, KeyError, TypeError, ValueError, ArithmeticError):
             raise WorkflowError('invalid_album_config') from None
 
@@ -90,11 +97,35 @@ class DouyinAlbum:
             return min(amount, Decimal(str(self.service.pc['budget']['research_limit'])))
         return None
 
-    def quote(self, image_count, *, work_id=None, manual=False):
+    def _check_image_limit(self, work_id, image_count, extended_image_count):
+        limit = image_limit(self.store, self.config['max_images'])
+        if extended_image_count is not None:
+            if image_count != extended_image_count:
+                raise WorkflowError('favorites_price_changed')
+            limit = self.manual_work_image_limits.get(work_id)
+            if limit is None:
+                raise WorkflowError('album_image_limit')
+        if image_count > limit:
+            raise WorkflowError('album_image_limit')
+
+    def limit_details(self, image_count, *, work_id):
+        max_images = image_limit(self.store, self.config['max_images'])
+        manual_limit = self.manual_work_image_limits.get(work_id)
+        estimate = quote(image_count, {**self.service.pc, **self.config})
+        try:
+            manual_quote = self.quote(image_count, work_id=work_id, manual=True, extended_image_count=image_count)
+        except WorkflowError:
+            manual_quote = None
+        return dict(max_images=max_images, manual_max_images=manual_limit,
+                    manual_quote_cny=str(manual_quote) if manual_quote is not None else None,
+                    estimate_cny=str(estimate))
+
+    def quote(self, image_count, *, work_id=None, manual=False, extended_image_count=None):
         if type(image_count) is not int or image_count < 1:
             raise WorkflowError('invalid_album_image_count')
-        if image_count > self.config['max_images']:
-            raise WorkflowError('album_image_limit')
+        self._check_image_limit(work_id, image_count, extended_image_count if manual else None)
+        if manual and extended_image_count is None and work_id in self.manual_work_image_limits:
+            raise WorkflowError('album_single_import_required')
         amount = quote(image_count, {**self.service.pc, **self.config})
         if 'budget' in self.service.pc:
             limit = self.manual_work_budget(work_id) if manual else None
@@ -150,13 +181,14 @@ class DouyinAlbum:
             raise WorkflowError('source_integrity')
         return self._verified_image(self._root(), image), image['mime']
 
-    def download(self, work_id, title, image_urls, description='', author=''):
+    def download(self, work_id, title, image_urls, description='', author='', *, extended_image_count=None):
         if not isinstance(work_id, str) or not re.fullmatch(r'[0-9]+', work_id):
             raise WorkflowError('invalid_share')
         if not isinstance(title, str) or not title.strip() or not isinstance(description, str) or not isinstance(author, str):
             raise WorkflowError('invalid_album_metadata')
-        if not isinstance(image_urls, list) or not image_urls or len(image_urls) > self.config['max_images']:
+        if not isinstance(image_urls, list) or not image_urls:
             raise WorkflowError('album_image_limit')
+        self._check_image_limit(work_id, len(image_urls), extended_image_count)
         if any(not isinstance(url, str) or not url for url in image_urls):
             raise WorkflowError('invalid_album_metadata')
         source_name = f'douyin-{work_id}.album.json'

@@ -27,6 +27,7 @@ const reasons = {missing_douyin_cookie:'缺少 Cookie', login_required:'需要�
   douyin_resolver_failed:'下载解析失败，请核对登录状态'};
 const imageDownloadErrors = {douyin_http_failed:'图片地址不可用，请读取收藏刷新后重试', douyin_timeout:'图片下载超时',
   album_image_limit:'图片数量超出上限', album_size_limit:'图片总大小超出上限', douyin_size_limit:'图片大小超出上限',
+  favorites_price_changed:'图片数量或费用已变化，请查看限制并重新确认',
   album_invalid_image:'图片格式无效', douyin_unsafe_url:'图片地址不在允许的图床范围内'};
 
 export function batchAmount(values) {
@@ -39,18 +40,20 @@ export function batchAmount(values) {
   return `${total / 100n}.${(total % 100n).toString().padStart(2, '0')}`;
 }
 
-function FavoriteType({item}) {
+function FavoriteType({item, onLimits}) {
   const image = item.kind==='image';
   const quoteAvailable = image && batchAmount([item.image_quote_cny])!==null;
   return <div className="favorites-type">
     <MediaTypeBadge kind={image?'douyin_album':'video'} variant="text"/>
     {image&&<small className="favorites-type-detail">
-      {item.image_count==null?'张数未知':`${item.image_count} 张`} · {quoteAvailable?`上限 ¥${item.image_quote_cny}`:'报价不可用'}
+      {item.image_count==null?'张数未知':`${item.image_count} 张`}
+      {quoteAvailable?` · 上限 ¥${item.image_quote_cny}`:!item.image_limits?' · 报价不可用':null}
     </small>}
+    {item.image_limits&&<button type="button" className="favorites-expand" onClick={()=>onLimits(item)}>查看限制</button>}
   </div>;
 }
 
-function FavoriteRow({item, checked, selectable, canSelect, onChange, onRetry}) {
+function FavoriteRow({item, checked, selectable, canSelect, onChange, onRetry, onLimits}) {
   const title = item.title || item.work_id;
   const titleId = useId();
   const titleRef = useRef(null);
@@ -85,10 +88,10 @@ function FavoriteRow({item, checked, selectable, canSelect, onChange, onRetry}) 
       {(truncated || expanded) && <button type="button" className="favorites-expand" aria-expanded={expanded}
         aria-controls={titleId} onClick={() => setExpanded(value => !value)}>{expanded ? '收起' : '展开'}</button>}
     </div>
-    <FavoriteType item={item}/>
+    <FavoriteType item={item} onLimits={onLimits}/>
     <span className="favorites-status" data-tone={tone}>{statusText}
       {item.image_download_error&&status==='download_failed'&&<small>{imageDownloadErrors[item.image_download_error]||item.image_download_error}</small>}
-      {item.kind==='image'&&status==='download_failed'&&<button type="button" disabled={!canSelect}
+      {item.kind==='image'&&status==='download_failed'&&item.image_download_error!=='favorites_price_changed'&&<button type="button" disabled={!canSelect}
         onClick={()=>onRetry(item.work_id)}>重新下载</button>}
     </span>
   </li>;
@@ -107,7 +110,13 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
   const [mobileBarHeight,setMobileBarHeight]=useState(0);
   const dialogRef=useRef(null);
   const mobileBarRef=useRef(null);
+  const limitsRef=useRef(null);
+  const [preview,setPreview]=useState(null);
+  const [limitRights,setLimitRights]=useState(false);
+  const [limitPaid,setLimitPaid]=useState(false);
+  const [limitMessage,setLimitMessage]=useState('');
   const dialogTitle=useId();
+  const limitsTitle=useId();
   async function refresh(){const result=await api('/douyin/favorites/sync');setData(result);}
   useEffect(()=>{
     if(!open)return;
@@ -174,6 +183,29 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
       setPaidAgreement(null);
     }
   }
+  function openLimits(item){
+    setPreview({item, account:data?.active_account?.id, budget:price});
+    setLimitRights(false); setLimitPaid(false); setLimitMessage('');
+    limitsRef.current.showModal();
+  }
+  const latestPreviewItem=preview&&items.find(item=>item.work_id===preview.item.work_id);
+  const previewCurrent=preview&&data?.active_account?.id===preview.account&&price===preview.budget&&
+    latestPreviewItem?.image_count===preview.item.image_count&&latestPreviewItem.image_limits?.can_import&&
+    latestPreviewItem.image_limits.manual_quote_cny===preview.item.image_limits.manual_quote_cny;
+  const canSubmitLimit=canSelect&&previewCurrent&&limitRights&&limitPaid;
+  async function submitLimit(){
+    if(!canSubmitLimit)return;
+    const {item,account,budget}=preview;
+    const reconfirm=item.status==='download_failed'&&item.image_download_error==='favorites_price_changed';
+    const submitMessage=({queued})=>queued?(reconfirm?'已重新确认费用，作品已排队下载和转换。':'作品已提交下载和转换。'):'作品已导入或已在队列中。';
+    let resultMessage='';
+    if(await action('/douyin/favorites/import',{account_id:account,work_ids:[item.work_id],rights_confirmed:true,
+      allow_paid:true,video_budget_cny:budget,image_quotes:{[item.work_id]:item.image_limits.manual_quote_cny},extended_image_count:item.image_count},
+      result=>{resultMessage=submitMessage(result);return resultMessage;},setLimitMessage)) {
+      limitsRef.current?.close();
+      setMessage(resultMessage);
+    }
+  }
   const selectionSummary=selectedCount?`已选 ${selectedCount} 条 · 视频 ${selectedCount-imageCount} · 图文 ${imageCount}`:'请先勾选要导入的作品。';
   const feeSummary=total===null?'费用上限暂不可用':`本次费用上限 ¥${total}`;
   const confirmation=<div className="favorites-submit">
@@ -229,7 +261,7 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
           <ul className="favorites-list" role="list">
             {visibleItems.map(item=><FavoriteRow key={item.work_id} item={item} checked={selectedIds.includes(item.work_id)}
               selectable={eligibleIds.has(item.work_id)} canSelect={canSelect} onChange={selectItem}
-              onRetry={work_id=>action('/douyin/favorites/retry-image',{account_id:data.active_account?.id,work_id},'已重新排队下载。')}/>)}
+              onLimits={openLimits} onRetry={work_id=>action('/douyin/favorites/retry-image',{account_id:data.active_account?.id,work_id},'已重新排队下载。')}/>)}
           </ul>
         </> : <p className="favorites-empty muted">当前没有{filterLabels[filter]}的作品。</p>}
       </fieldset>
@@ -252,6 +284,27 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
         {confirmation}
       </dialog>
       </div>}
+      <dialog ref={limitsRef} className="favorites-mobile-dialog" aria-labelledby={limitsTitle} onCancel={event=>{if(busy)event.preventDefault();}}>
+        <div className="favorites-dialog-heading"><h2 id={limitsTitle}>收藏处理限制</h2><button type="button" disabled={busy} onClick={()=>limitsRef.current.close()}>关闭</button></div>
+        {preview&&<><p>{preview.item.title||preview.item.work_id}</p>
+          <p>图片 {preview.item.image_count} 张 · 常规上限 {preview.item.image_limits.max_images} 张{preview.item.image_limits.manual_max_images!=null&&` · 手动上限 ${preview.item.image_limits.manual_max_images} 张`}</p>
+          {preview.item.image_quote_error&&<p>{albumQuoteErrors[preview.item.image_quote_error]||preview.item.image_quote_error}</p>}
+          {preview.item.image_limits.can_import ? <>
+            <p><strong>本次费用上限 ¥{preview.item.image_limits.manual_quote_cny}</strong></p>
+            <p className="muted">手动导入使用项目预算，独立于定时下载和转换额度。转换结果待审核。</p>
+            <div className="favorites-consents"><label><input type="checkbox" checked={limitRights} onChange={e=>setLimitRights(e.target.checked)}/> 我确认有权下载和处理此作品</label>
+            <label><input type="checkbox" checked={limitPaid} onChange={e=>setLimitPaid(e.target.checked)}/> 我同意按上述费用上限进行转换</label></div>
+            {!previewCurrent&&!busy&&<p role="status">作品状态或报价已更新，请关闭并重新查看限制。</p>}
+            <button type="button" className="primary" disabled={!canSubmitLimit} onClick={submitLimit}>{busy?'正在提交…':preview.item.image_download_error==='favorites_price_changed'?'重新确认并导入':'确认导入此作品'}</button>
+          </> : preview.item.image_limits.manual_quote_cny!=null ? <>
+            <p>单篇费用上限 ¥{preview.item.image_limits.manual_quote_cny}</p>
+            <p>{preview.item.status?'此作品已有导入记录。':'当前无法启动单篇手动导入，请在收藏同步后重新查看。'}</p>
+          </> : <>
+            <p>此作品暂未开放单篇手动导入。</p>
+            {preview.item.image_limits.estimate_cny!=null&&<p>整篇单次处理的理论费用上限 ¥{preview.item.image_limits.estimate_cny}。分批处理费用需另行报价。</p>}
+          </>}
+          <p role="status">{limitMessage}</p></>}
+      </dialog>
       {message&&<p role="status">{message}</p>}
     </div>}
   </details>;
