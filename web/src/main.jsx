@@ -48,6 +48,7 @@ function App() {
   const authEpoch=useRef(0), lastActivity=useRef(0);
   const refreshOrder=useRef({issued:0,applied:0});
   const libraryScrollRef=useRef(null);
+  const [importDock,setImportDock]=useState(null);
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
   draftRef.current = drafts; editRef.current = edits; detailRef.current = detail;
   const source = detail?.source, current = detail?.current, result = current?.result || {};
@@ -302,8 +303,9 @@ function App() {
   const libraryActive=!!session&&page==='library';
   const tasksActive=!!session&&page==='tasks';
   const catalogActive=!!session&&page==='catalog';
+  const importActive=!!session&&page==='import';
   const sidebarTopics=catalog.filter(item=>item.kind==='topic');
-  return <div className={libraryActive||tasksActive||catalogActive?'shell shell--list':'shell'}>
+  return <div className={libraryActive||tasksActive||catalogActive||importActive?'shell shell--list':'shell'}>
     <aside className="app-nav"><div className="app-brand"><span className="brand-mark" aria-hidden="true">知</span>个人知识库</div><nav aria-label="主导航">
       {ui.navigation.map(item=><button key={item.id} aria-current={(page===item.id||page==='detail'&&item.id==='library')?'page':undefined} onClick={()=>navigate(item.id)}><svg className="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d={({library:"M4 5h6a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4z M20 5h-4a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h4z",ask:"M4 5h16v11H9l-5 4z",import:"M4 14v5h16v-5 M12 3v11 M8 10l4 4 4-4",tasks:"M5 5h2 M10 5h9 M5 12h2 M10 12h9 M5 19h2 M10 19h9",budget:"M4 6h16v13H4z M4 10h16 M14 14h3",catalog:"M3 4h9l9 9-8 8-10-10z M7 8h.01"})[item.id]}/></svg>{item.label}</button>)}
     </nav>
@@ -318,7 +320,7 @@ function App() {
       <span className="connection-status" data-connected={connection==='connected'&&!loginRequired} role="status">{loginRequired?'请登录':connectionText(connection)}</span>
       {authEnabled&&session&&<button className="logout-button" onClick={logout}>退出登录</button>}
     </div></aside>
-    <main className="workspace" ref={mainRef}>
+    <main className={importActive?'workspace workspace--import':'workspace'} ref={mainRef}>
       {error&&<p className="app-feedback error" role="alert">{error}</p>}{message&&<p className="app-feedback" role="status">{message}</p>}
       {lastSession.current&&<div hidden={page!=='ask'||!session}><RagPanel onLoginRequired={requireLogin} api={api} sources={sources} catalog={catalog} session={session||lastSession.current} connected={!!session} active={page==='ask'&&!!session} reviewEpoch={reviewEpoch} reviewPending={reviewPending}/></div>}
       {!session&&loginRequired?<section className="login-panel"><h1 {...titleProps}>登录个人知识库</h1><form onSubmit={login}><label>密码<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button className="primary" disabled={busy}>登录</button></form></section>:!session?<section className="connection-panel"><h1 {...titleProps}>连接服务</h1><p>{connectionText(connection)}</p>{connection==='disconnected'&&<button onClick={bootstrap}>重试连接</button>}</section>:<>
@@ -338,7 +340,7 @@ function App() {
           </article>)}
         </section></>}
         {catalogActive&&<CatalogManager catalog={catalog} loaded={dataLoaded} api={api} changed={refresh} disabled={busy}/>}
-        {page==='import'&&<><div className="page-heading"><h1 {...titleProps}>导入资料</h1></div><section className="import-panel">
+        {importActive&&<><div className="import-scroll"><div className="page-heading"><h1 {...titleProps}>导入资料</h1></div><section className="import-panel">
           <p className="muted">上传HTML或视频后，到任务页明确启动处理。导入不会自动调用模型。</p>
           <div className="drop" onDragOver={event=>event.preventDefault()} onDrop={event=>{event.preventDefault();setFiles([...event.dataTransfer.files]);}}>
             <label>选择文件<input type="file" multiple accept=".html,.htm,.mp4" onChange={event=>setFiles([...event.target.files])}/></label><p>也可将文件拖到这里</p></div>
@@ -346,9 +348,9 @@ function App() {
           <div className="actions"><button className="primary" disabled={busy||!rights||!files.length} onClick={()=>run(upload)}>上传文件</button><button onClick={()=>navigate('tasks')}>查看任务</button></div>
           <div role="status">{uploads.map((value,i)=><p key={i}>{value}</p>)}</div>
           <details><summary>抖音分享链接</summary><DouyinPanel api={api} opened={open} pollInterval={session.config.poll_interval_ms} disabled={busy}/></details>
-          <FavoritesPanel api={api} pollInterval={session.config.poll_interval_ms} disabled={busy}/>
+          <FavoritesPanel api={api} pollInterval={session.config.poll_interval_ms} disabled={busy} dock={importDock}/>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
-        </section></>}
+        </section></div><div className="import-dock" ref={setImportDock}/></>}
         {page==='budget'&&<BudgetPanel api={api} disabled={busy} titleProps={titleProps} displayTimezone={session.config.display_timezone} onSaved={refresh}/>}
         <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')}
           open={open} onAction={(id,action,body)=>run(async()=>{

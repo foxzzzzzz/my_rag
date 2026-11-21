@@ -1,4 +1,5 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
+import {createPortal} from 'react-dom';
 import {albumQuoteErrors} from './helpers.js';
 import {MediaTypeBadge} from './media-type-badge';
 import './favorites.css';
@@ -97,7 +98,7 @@ function FavoriteRow({item, checked, selectable, canSelect, onChange, onRetry, o
   </li>;
 }
 
-export function FavoritesPanel({api, pollInterval, disabled}) {
+export function FavoritesPanel({api, pollInterval, disabled, dock}) {
   const [open,setOpen]=useState(false);
   const [data,setData]=useState(null);
   const [filter,setFilter]=useState('all');
@@ -107,9 +108,9 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
   const [busy,setBusy]=useState(false);
   const [message,setMessage]=useState('');
   const [batchMessage,setBatchMessage]=useState('');
-  const [mobileBarHeight,setMobileBarHeight]=useState(0);
+  const [batchError,setBatchError]=useState('');
   const dialogRef=useRef(null);
-  const mobileBarRef=useRef(null);
+  const batchFeedbackRef=useRef(null);
   const limitsRef=useRef(null);
   const [preview,setPreview]=useState(null);
   const [limitRights,setLimitRights]=useState(false);
@@ -162,25 +163,31 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
   useEffect(()=>{setPaidAgreement(null);},[selectionKey]);
   const blocked=disabled||busy;
   const canSelect=!blocked&&data?.state==='ready';
-  const showMobileBar=!!selectedCount||!!batchMessage;
-  useEffect(()=>{
-    const bar=open&&showMobileBar?mobileBarRef.current:null;
-    if(!bar)return;
-    const observer=new ResizeObserver(()=>setMobileBarHeight(bar.offsetHeight));
-    observer.observe(bar);
-    return ()=>observer.disconnect();
-  },[open,showMobileBar]);
+  const canSubmitBatch=canSelect&&!!selectedCount&&rights&&paid&&data?.manual_conversion_available&&total!==null;
   useEffect(()=>{
     if(!selectedCount&&dialogRef.current?.open)dialogRef.current.close();
   },[selectedCount]);
-  async function submitBatch(){
+  function openBatch(){
+    setBatchError('');
+    setRights(false);
+    setPaidAgreement(null);
+    dialogRef.current.showModal();
+  }
+  async function submitBatch(event){
+    event.preventDefault();
+    if(!canSubmitBatch)return;
+    setBatchMessage('');
     if(await action('/douyin/favorites/import',{account_id:data.active_account?.id,work_ids:selectedIds,rights_confirmed:true,
       allow_paid:true,video_budget_cny:price,image_quotes:imageQuotes},
-      ({queued})=>queued?`已将 ${queued} 条作品排队下载和转换。`:'所选作品已导入或已在队列中。',setBatchMessage)){
+      ({queued})=>{
+        setBatchMessage(queued?`已将 ${queued} 条作品排队下载和转换。`:'所选作品已导入或已在队列中。');
+        return '';
+      },setBatchError)){
       dialogRef.current?.close();
       setSelected([]);
       setRights(false);
       setPaidAgreement(null);
+      requestAnimationFrame(()=>batchFeedbackRef.current?.focus());
     }
   }
   function openLimits(item){
@@ -206,25 +213,7 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
       setMessage(resultMessage);
     }
   }
-  const selectionSummary=selectedCount?`已选 ${selectedCount} 条 · 视频 ${selectedCount-imageCount} · 图文 ${imageCount}`:'请先勾选要导入的作品。';
-  const feeSummary=total===null?'费用上限暂不可用':`本次费用上限 ¥${total}`;
-  const confirmation=<div className="favorites-submit">
-    <p aria-live="polite">{selectionSummary}</p>
-    {!!selectedCount&&<>
-      <p className="favorites-fee"><strong>{feeSummary}</strong></p>
-      {total!==null&&<p className="muted">执行时逐条预留费用，仍受系统累计预算约束。</p>}
-      {!data?.manual_conversion_available&&<p className="muted">当前无法启动手动付费转换。</p>}
-      <div className="favorites-consents">
-        <label><input type="checkbox" checked={rights} disabled={!canSelect}
-          onChange={e=>setRights(e.target.checked)}/> 我确认有权下载和处理所选作品</label>
-        <label><input type="checkbox" checked={paid} disabled={!canSelect||total===null}
-          onChange={e=>setPaidAgreement(e.target.checked?selectionKey:null)}/> 我同意所选作品转换产生费用，按上述上限执行</label>
-      </div>
-      <button type="button" className="primary" disabled={!canSelect||!rights||!paid||!data?.manual_conversion_available||total===null}
-        onClick={submitBatch}>{busy?'正在提交…':'下载并转换所选作品'}</button>
-    </>}
-    <div role="status">{batchMessage}</div>
-  </div>;
+  const selectedKinds=`视频 ${selectedCount-imageCount} · 图文 ${imageCount}`;
   return <details onToggle={event=>setOpen(event.currentTarget.open)}>
     <summary>抖音收藏</summary>
     {open&&<div className="management">
@@ -241,8 +230,8 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
       {data?.enabled&&<p>每日新增收藏下载上限 {data.download_limit} 条。手动选择的作品整批入队，依次下载和转换，转换结果待审核，不占每日定时额度。</p>}
       {data?.queue_counts&&<p>等待下载 {data.queue_counts.queued||0} 条，下载失败 {data.queue_counts.download_failed||0} 条，等待转换 {data.queue_counts.conversion_queued||0} 条。</p>}
       {data?.last_scan&&<p>最近读取 {data.last_scan.day}，读到 {data.last_scan.read_count} 条，新增排队 {data.last_scan.queued_count} 条。</p>}
-      {!!items.length&&<div className="favorites-layout" style={showMobileBar?{'--favorites-mobile-bar-height':`${mobileBarHeight}px`}:undefined}>
-      <fieldset className="favorites-fieldset">
+      {batchMessage&&<p className="favorites-batch-feedback" ref={batchFeedbackRef} role="status" tabIndex={-1}>{batchMessage}</p>}
+      {!!items.length&&<fieldset className="favorites-fieldset">
         <legend>收藏作品</legend>
         <div className="favorites-toolbar">
           <div className="favorites-filters" role="group" aria-label="按导入状态筛选">
@@ -253,7 +242,6 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
             {(filter==='all'||filter==='available')&&<button type="button" disabled={!canSelect||!eligible.length||selectedIds.length===eligible.length}
               onClick={()=>setSelected([...eligibleIds])}>全选可导入作品</button>}
             <button type="button" disabled={blocked||!selectedIds.length} onClick={()=>setSelected([])}>清空选择</button>
-            <span className="muted" role="status">已选 {selectedIds.length} 条</span>
           </div>
         </div>
         {visibleItems.length ? <>
@@ -264,27 +252,47 @@ export function FavoritesPanel({api, pollInterval, disabled}) {
               onLimits={openLimits} onRetry={work_id=>action('/douyin/favorites/retry-image',{account_id:data.active_account?.id,work_id},'已重新排队下载。')}/>)}
           </ul>
         </> : <p className="favorites-empty muted">当前没有{filterLabels[filter]}的作品。</p>}
-      </fieldset>
-      <section className="favorites-confirmation" aria-label="导入确认">
-        <h2>导入确认</h2>
-        {confirmation}
-      </section>
-      {showMobileBar&&<div ref={mobileBarRef} className="favorites-mobile-bar">
-        {selectedCount?<><div aria-live="polite"><strong>已选 {selectedCount} 条</strong><small>{feeSummary}</small></div>
-          <button type="button" className="primary" aria-haspopup="dialog"
-            onClick={()=>dialogRef.current.showModal()}>确认导入</button></>
-          :<><span role="status">{batchMessage}</span>
-            <button type="button" onClick={()=>setBatchMessage('')}>关闭提示</button></>}
-      </div>}
-      <dialog ref={dialogRef} className="favorites-mobile-dialog" aria-labelledby={dialogTitle}>
+      </fieldset>}
+      {dock&&!!selectedCount&&createPortal(
+        <section className="favorites-batch-bar" aria-label="已选作品">
+          <div className="favorites-batch-copy" role="status">
+            <span><strong>已选 {selectedCount} 条</strong> <small>{selectedKinds}</small></span>
+            <span className="favorites-batch-total">{total===null?'费用上限暂不可用':<>费用上限 <strong>¥{total}</strong></>}</span>
+          </div>
+          <button type="button" className="primary" aria-haspopup="dialog" disabled={blocked} onClick={openBatch}>确认导入</button>
+        </section>,dock)}
+      <dialog ref={dialogRef} className="favorites-dialog favorites-batch-dialog" aria-labelledby={dialogTitle}
+        onCancel={event=>{if(busy)event.preventDefault();}}>
         <div className="favorites-dialog-heading">
           <h2 id={dialogTitle}>导入确认</h2>
-          <button type="button" onClick={()=>dialogRef.current.close()}>关闭</button>
+          <button type="button" disabled={busy} onClick={()=>dialogRef.current.close()}>关闭</button>
         </div>
-        {confirmation}
+        <form className="favorites-submit" onSubmit={submitBatch}>
+          <p className="muted">已选 {selectedCount} 条 · {selectedKinds}</p>
+          <ul className="favorites-batch-items" role="list" aria-label="本次导入作品" tabIndex={0}>
+            {selectedItems.map(item=>{
+              const itemPrice=item.kind==='image'?item.image_quote_cny:price;
+              return <li key={item.work_id}><span>{item.title||item.work_id}</span>
+                <small>{itemPrice==null?'报价不可用':`¥${itemPrice}`}</small></li>;
+            })}
+          </ul>
+          <p className="favorites-fee"><span>本次费用上限</span><strong>{total===null?'暂不可用':`¥${total}`}</strong></p>
+          {total!==null&&<p className="muted">每条作品分别预留费用，使用项目累计预算。转换结果待审核。</p>}
+          {!data?.manual_conversion_available&&<p className="muted">当前无法启动手动付费转换。</p>}
+          <div className="favorites-consents">
+            <label><input type="checkbox" checked={rights} disabled={!canSelect}
+              onChange={e=>setRights(e.target.checked)}/> 我确认有权下载和处理所选作品</label>
+            <label><input type="checkbox" checked={paid} disabled={!canSelect||total===null}
+              onChange={e=>setPaidAgreement(e.target.checked?selectionKey:null)}/> 我同意所选作品转换产生费用，按上述上限执行</label>
+          </div>
+          <p role="alert" className="error">{batchError}</p>
+          <div className="favorites-batch-actions">
+            <button type="button" disabled={busy} onClick={()=>dialogRef.current.close()}>返回列表</button>
+            <button type="submit" className="primary" disabled={!canSubmitBatch}>{busy?'正在提交…':'下载并转换所选作品'}</button>
+          </div>
+        </form>
       </dialog>
-      </div>}
-      <dialog ref={limitsRef} className="favorites-mobile-dialog" aria-labelledby={limitsTitle} onCancel={event=>{if(busy)event.preventDefault();}}>
+      <dialog ref={limitsRef} className="favorites-dialog" aria-labelledby={limitsTitle} onCancel={event=>{if(busy)event.preventDefault();}}>
         <div className="favorites-dialog-heading"><h2 id={limitsTitle}>收藏处理限制</h2><button type="button" disabled={busy} onClick={()=>limitsRef.current.close()}>关闭</button></div>
         {preview&&<><p>{preview.item.title||preview.item.work_id}</p>
           <p>图片 {preview.item.image_count} 张 · 常规上限 {preview.item.image_limits.max_images} 张{preview.item.image_limits.manual_max_images!=null&&` · 手动上限 ${preview.item.image_limits.manual_max_images} 张`}</p>

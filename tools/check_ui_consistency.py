@@ -753,6 +753,100 @@ def verify_favorites_filters(browser, address, output, width, height):
     page.close()
 
 
+def verify_favorites_confirmation(browser, address, output, width, height):
+    fixture = Fixture()
+    fixture.poll_interval_ms = 500
+    page, errors = open_page(browser, address, fixture, width, height)
+    video_title = '约束解码与 JSON Schema 结构化输出'
+    album_title = '浏览器自动化的版本答案：ego lite'
+    items = [
+        dict(work_id='101', title=video_title, kind='video', status=None, selectable=True),
+        dict(work_id='102', title=album_title, kind='image', status=None,
+             selectable=True, image_count=4, image_quote_cny='2.19'),
+        *[dict(work_id=str(i), title=f'测试收藏作品 {i}', kind='video', status=None, selectable=True)
+          for i in range(103, 119)],
+    ]
+    submissions = []
+
+    def favorites(route):
+        route.fulfill(json=dict(enabled=True, state='ready', download_limit=3, baseline_limit=100,
+                               active_account=dict(id='test-account', label='隔离账号'),
+                               manual_conversion_available=True, manual_video_budget_cny='4.05', items=items))
+
+    def enqueue(route):
+        payload = route.request.post_data_json
+        submissions.append(payload)
+        for item in items:
+            if item['work_id'] in payload['work_ids']:
+                item.update(status='queued', selectable=False)
+        route.fulfill(json={'queued': 2})
+
+    page.route(f'{address}/api/douyin/favorites/sync', favorites)
+    page.route(f'{address}/api/douyin/favorites/import', enqueue)
+    nav(page, '导入')
+    summary = page.get_by_text('抖音收藏', exact=True)
+    summary.click()
+    list_box = page.locator('.favorites-fieldset')
+    dock = page.get_by_role('region', name='已选作品')
+    first = page.get_by_role('checkbox', name=video_title)
+    expect(first).to_be_visible()
+    expect(dock).to_have_count(0)
+    assert list_box.evaluate("node => Math.abs(node.getBoundingClientRect().width - node.parentElement.clientWidth) <= 1")
+    first.check()
+    expect(dock.get_by_text('¥4.05')).to_be_visible()
+    screenshot(page, output, 'favorites-dock')
+    last = page.get_by_role('checkbox', name='测试收藏作品 118')
+    last.focus()
+    last.scroll_into_view_if_needed()
+    assert last.evaluate("""node => node.getBoundingClientRect().bottom <=
+        document.querySelector('.favorites-batch-bar').getBoundingClientRect().top""")
+    page.get_by_role('checkbox', name=album_title).check()
+    expect(dock.get_by_text('¥6.24')).to_be_visible()
+    trigger = dock.get_by_role('button', name='确认导入')
+    trigger.click()
+    dialog = page.get_by_role('dialog', name='导入确认')
+    expect(dialog.get_by_text(video_title, exact=True)).to_be_visible()
+    expect(dialog.get_by_text(album_title, exact=True)).to_be_visible()
+    expect(dialog.get_by_text('¥6.24')).to_be_visible()
+    assert dialog.get_by_role('list', name='本次导入作品').get_by_role('listitem').count() == 2
+    rights = dialog.get_by_role('checkbox', name=re.compile('我确认有权'))
+    paid = dialog.get_by_role('checkbox', name=re.compile('我同意所选作品'))
+    submit = dialog.get_by_role('button', name='下载并转换所选作品')
+    expect(submit).to_be_disabled()
+    rights.check()
+    expect(submit).to_be_disabled()
+    paid.check()
+    expect(submit).to_be_enabled()
+    screenshot(page, output, 'favorites-confirmation')
+    assert not submissions
+    page.keyboard.press('Escape')
+    expect(dialog).not_to_be_visible()
+    expect(trigger).to_be_focused()
+    expect(dock.get_by_text('¥6.24')).to_be_visible()
+    trigger.click()
+    expect(rights).not_to_be_checked()
+    expect(paid).not_to_be_checked()
+    rights.check()
+    paid.check()
+    items[1]['image_quote_cny'] = '2.38'
+    expect(dialog.get_by_text('¥6.43')).to_be_visible()
+    expect(paid).not_to_be_checked()
+    expect(submit).to_be_disabled()
+    paid.check()
+    submit.click()
+    expect(dialog).not_to_be_visible()
+    expect(page.get_by_text('已将 2 条作品排队下载和转换。', exact=True)).to_be_visible()
+    expect(dock).to_have_count(0)
+    assert submissions == [dict(account_id='test-account', work_ids=['101', '102'], rights_confirmed=True,
+                                allow_paid=True, video_budget_cny='4.05', image_quotes={'102': '2.38'})]
+    page.get_by_role('checkbox', name='测试收藏作品 103').check()
+    page.get_by_role('button', name='清空选择').click()
+    expect(dock).to_have_count(0)
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}×{height} favorites full width, dock, consent and queue passed')
+    page.close()
+
+
 def verify_connection(browser, address, output):
     fixture = Fixture()
     fixture.logged_in = False
@@ -847,6 +941,8 @@ def main():
             verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)
             verify_favorites_filters(browser, address, args.screenshots, width, height)
+        for width, height in ((1874, 676), (390, 844)):
+            verify_favorites_confirmation(browser, address, args.screenshots, width, height)
         print("Connection, retry and login assertions passed")
         print("List scroll restoration and sticky header focus assertions passed")
         if args.baseline:
