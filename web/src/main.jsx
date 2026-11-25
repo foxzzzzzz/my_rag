@@ -26,6 +26,54 @@ const inputDraft = () => emptyReviewDraft(ui.default_reviewer);
 const emptyLibraryFilters = {q:'',kind:'',review:'',tags:[]};
 const detailPath = (id, versionId) => '/sources/'+id+(versionId?'?version_id='+encodeURIComponent(versionId):'');
 
+function FramePreview({frames, initialPosition, sourceId, onClose}) {
+  const dialog=useRef(null);
+  const [position,setPosition]=useState(initialPosition);
+  const [failed,setFailed]=useState(false);
+  useEffect(()=>{dialog.current.showModal();},[]);
+  const frame=frames[position];
+  const url=frame.url||('/api/sources/'+sourceId+'/frames/'+(frame.index??position));
+  return <dialog ref={dialog} className="frame-preview" aria-labelledby="frame-preview-title"
+    onCancel={event=>{event.preventDefault();onClose();}}>
+    <header className="frame-preview-header">
+      <h2 id="frame-preview-title">关键帧 {position+1} / {frames.length} · {frame.seconds??0} 秒</h2>
+      <button type="button" onClick={onClose}>关闭</button>
+    </header>
+    {failed?<p role="alert">图片加载失败，请稍后重试。</p>:<img key={url} src={url} alt={'关键帧 '+(position+1)} onError={()=>setFailed(true)}/>}
+    <div className="actions">
+      <button type="button" disabled={position===0} onClick={()=>{setFailed(false);setPosition(position-1);}}>上一张</button>
+      <button type="button" disabled={position===frames.length-1} onClick={()=>{setFailed(false);setPosition(position+1);}}>下一张</button>
+      {failed&&<button type="button" onClick={()=>setFailed(false)}>重新加载</button>}
+    </div>
+  </dialog>;
+}
+
+function FrameList({frames,sourceId,originalUrl,videoRef,active}) {
+  const [preview,setPreview]=useState(null);
+  const opener=useRef(null);
+  useEffect(()=>{if(!active)setPreview(null);},[active]);
+  function closePreview(){
+    setPreview(null);
+    requestAnimationFrame(()=>{if(opener.current?.isConnected)opener.current.focus({preventScroll:true});});
+  }
+  return <>
+    <div className="frame-list" role="region" aria-label="关键帧列表" tabIndex={0}>{frames.map((frame,index)=>{
+      const seconds=frame.seconds??0;
+      const url=frame.url||('/api/sources/'+sourceId+'/frames/'+(frame.index??index));
+      return <div className="frame-item" key={frame.index??index}>
+        <button type="button" aria-label={'查看关键帧 '+(index+1)+'，'+seconds+' 秒'}
+          onClick={event=>{opener.current=event.currentTarget;setPreview(index);}}>
+          <img width={ui.frame_preview_width} loading="lazy" alt={'关键帧 '+(index+1)} src={url}/><span>{seconds} 秒</span>
+        </button>
+        {originalUrl&&<button type="button" className="text-button" aria-label={'跳到视频 '+seconds+' 秒'}
+          onClick={()=>{if(videoRef.current)videoRef.current.currentTime=seconds;}}>跳到视频此处</button>}
+      </div>;
+    })}</div>
+    {active&&preview!==null&&frames[preview]&&<FramePreview frames={frames} initialPosition={preview}
+      sourceId={sourceId} onClose={closePreview}/>}
+  </>;
+}
+
 function App() {
   const [session, setSession] = useState(null), [connection, setConnection] = useState('connecting');
   const [loginRequired,setLoginRequired]=useState(false), [password,setPassword]=useState(''), [authEnabled,setAuthEnabled]=useState(false);
@@ -449,14 +497,9 @@ function App() {
                 {detail.original_url?<video ref={videoRef} controls preload={selectedTab==='visual'?'metadata':'none'} src={detail.original_url}
                   poster={selectedTab==='visual'?detail.frames?.[0]?.url:undefined}/>:<p className="muted">{detail.media?.status==='removed'?'原片已超过保留期并清理。':'原片已不可用。'}</p>}
                 <h2>关键帧</h2>
-                {detail.frames?.length?<div className="frame-list" role="region" aria-label="关键帧列表" tabIndex={0}>{detail.frames.map((frame,index)=>{
-                  const seconds=frame.seconds??0;
-                  const thumbnail=<img width={ui.frame_preview_width} loading="lazy" alt={'关键帧 '+(index+1)}
-                    src={frame.url||('/api/sources/'+source.id+'/frames/'+(frame.index??index))}/>;
-                  return detail.original_url
-                    ? <button key={frame.index??index} type="button" onClick={()=>{if(videoRef.current)videoRef.current.currentTime=seconds;}}>{thumbnail}<span>{seconds} 秒</span></button>
-                    : <figure key={frame.index??index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
-                })}</div>:<p className="muted">暂无可查看的关键帧。</p>}
+                {detail.frames?.length?<FrameList key={source.id+':'+current.id} frames={detail.frames}
+                  sourceId={source.id} originalUrl={detail.original_url} videoRef={videoRef}
+                  active={page==='detail'&&selectedTab==='visual'}/>:<p className="muted">暂无可查看的关键帧。</p>}
               </section>}
               {source.kind==='douyin_album'&&selectedTab==='visual'&&<section className="album-evidence" aria-label="图文画面证据">
                 <h2>图文原图</h2>

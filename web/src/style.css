@@ -160,10 +160,13 @@ article { border-bottom:1px solid var(--border); padding:12px 0 }
 .video-evidence video { display:block; width:100%; max-height:var(--detail-video-max-height); background:var(--text) }
 .source-downloads,.actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:12px 0; }
 .frame-list { display:flex; gap:10px; overflow-x:auto; padding:4px 4px 8px; overscroll-behavior-inline:contain }
-.frame-list :is(button,figure) { flex:none }
 .frame-list button { display:flex; flex-direction:column; align-items:start; gap:4px; }
-.frame-list figure { margin:0 }
 .frame-list img { display:block; max-block-size:var(--detail-frame-max-height); object-fit:contain; background:var(--app-bg) }
+.frame-item { flex:none; display:flex; flex-direction:column; align-items:start; gap:4px }
+.frame-preview { width:min(var(--frame-preview-width),calc(100vw - var(--frame-preview-viewport-gap))); max-width:calc(100vw - var(--frame-preview-viewport-gap)); max-height:calc(100dvh - var(--frame-preview-viewport-gap)); overflow:auto }
+.frame-preview-header { display:flex; align-items:center; justify-content:space-between; gap:12px }
+.frame-preview-header h2 { margin:0 }
+.frame-preview img { display:block; max-width:100%; max-height:calc(100dvh - var(--frame-preview-controls-space)); width:auto; height:auto; margin:12px auto; object-fit:contain }
 .drop { border:1px dashed var(--border); padding:18px; margin:12px 0; overflow-wrap:anywhere; }
 .edit-field { display:flex; flex-direction:column; align-items:stretch; margin:12px 0; }
 .management label,.management input[type=file] { margin:4px 6px 4px 0; }
