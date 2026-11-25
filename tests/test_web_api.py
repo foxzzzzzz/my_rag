@@ -12,6 +12,24 @@ class Fake:
     def tasks(self): return {"items":[]}
 
 class WebApiTests(unittest.TestCase):
+    def test_processing_settings_api_cas_and_invalid_input(self):
+        from personalkb.video_pipeline import load_pipeline_config
+
+        self.service.pc = load_pipeline_config()
+        self.service.webcfg['favorites_sync_config'] = str(self.tmp_path / 'missing-favorites.json')
+        response = self.client.get('/api/processing-settings')
+        assert response.status_code == 200
+        current = response.json()
+        assert 'daily_at' not in current['settings']
+        payload = {'expected_revision': current['revision'], 'values': {'asr_upload_bytes': 80 * 1024 * 1024}}
+        saved = self.client.patch('/api/processing-settings', headers=self.h, json=payload)
+        assert saved.status_code == 200
+        assert saved.json()['settings']['asr_upload_bytes']['value'] == 80 * 1024 * 1024
+        assert self.client.patch('/api/processing-settings', headers=self.h, json=payload).status_code == 409
+        payload['expected_revision'] += 1
+        payload['values'] = {'asr_upload_bytes': -1}
+        assert self.client.patch('/api/processing-settings', headers=self.h, json=payload).status_code == 400
+
     def setUp(self):
         root=Path(__file__).resolve().parents[1]/'tmp'; root.mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=root); self.tmp_path=Path(self.temp.name)
@@ -52,6 +70,19 @@ class WebApiTests(unittest.TestCase):
         assert 'attachment' in original.headers['content-disposition']
         assert 'sandbox' in original.headers['content-security-policy']
         assert client.get('/api/sources').json()['items'][0]['original_name']=='hello.html'
+
+    def test_saved_upload_caps_apply_independently(self):
+        mib = 1024 * 1024
+        url = '/api/imports?filename=upload.html&rights_confirmed=true'
+        payload = b'<html><body>' + b'x' * mib + b'</body></html>'
+        assert self.client.put(url, content=payload, headers=self.h).status_code == 413
+        response = self.client.patch('/api/processing-settings', headers=self.h, json={
+            'expected_revision': 0, 'values': {'html_upload_bytes': 2 * mib, 'video_upload_bytes': mib}})
+        assert response.status_code == 200
+        session = self.client.get('/api/session').json()['config']
+        assert (session['max_upload_bytes'], session['max_html_bytes']) == (mib, 2 * mib)
+        assert self.client.put(url, content=payload, headers=self.h).status_code == 200
+        assert self.client.put(url.replace('.html', '.mp4'), content=payload, headers=self.h).status_code == 413
 
     def test_oversize_creates_no_source(self):
         client,h=self.client,self.h

@@ -55,6 +55,39 @@ def _task_views(tasks, versions):
 
 
 class WebService:
+    @property
+    def processing_settings(self):
+        from .douyin import load_douyin_config
+        from .douyin_daily_sync import load_config as load_favorites_config
+        from .processing_settings import ProcessingSettings, SCHEDULE_KEYS, bounds_for
+        from .workflow import ROOT
+        defaults = {
+            'video_upload_bytes': self.wc['max_upload_bytes'],
+            'html_upload_bytes': min(self.wc['max_html_bytes'], self.wc['max_upload_bytes']),
+            'max_attempts': self.wc['max_attempts'],
+        }
+        asr_limit = self.pc.get('storage', {}).get('max_upload_bytes')
+        if asr_limit is not None:
+            defaults['asr_upload_bytes'] = asr_limit
+        try:
+            douyin = load_douyin_config(ROOT / self.webcfg.get('douyin_config', 'config/douyin.json'))
+            defaults['douyin_video_download_bytes'] = douyin['max_download_bytes']
+        except WorkflowError:
+            pass  # Optional integrations must not block other settings.
+        try:
+            album = self.douyin_album.config
+            defaults.update(douyin_image_bytes=album['max_image_bytes'], douyin_album_bytes=album['max_album_bytes'])
+        except WorkflowError:
+            pass
+        try:
+            daily = load_favorites_config(ROOT / self.webcfg.get('favorites_sync_config', 'config/douyin-daily-sync.json'))
+            defaults.update({key: daily[key] for key in SCHEDULE_KEYS})
+        except WorkflowError:
+            daily = {}
+        return ProcessingSettings(self.store, defaults, bounds_for(self.webcfg), daily.get('timezone'),
+                                  favorites_enabled=daily.get('enabled', False),
+                                  conversion_available=self.webcfg.get('live_video_enabled', False))
+
     def __init__(self, workflow_config, pipeline_config, web_config, *, video_runner=None, suggestion_provider_factory=None, rag_provider_factory=None):
         self.wc, self.pc, self.webcfg = workflow_config, pipeline_config, web_config
         self.store = make_store(workflow_config)
@@ -161,9 +194,12 @@ class WebService:
         import os
         config_path=ROOT/self.webcfg.get('douyin_config','config/douyin.json')
         env_path=ROOT/self.webcfg.get('env_file','.env')
-        stamp=(config_path.stat().st_mtime_ns,env_path.stat().st_mtime_ns if env_path.exists() else None)
+        from .processing_settings import bounds_for, effective_size, overrides
+        revision, settings = overrides(self.store)
+        stamp=(config_path.stat().st_mtime_ns,env_path.stat().st_mtime_ns if env_path.exists() else None, revision)
         if not hasattr(self,'_douyin') or self._douyin_stamp!=stamp:
             cfg=load_douyin_config(config_path)
+            cfg['max_download_bytes'] = effective_size(settings, 'douyin_video_download_bytes', cfg['max_download_bytes'], bounds_for(self.webcfg))
             keys=dotenv(env_path) if cfg['enabled'] and env_path.exists() else {}
             if cfg['enabled']: keys.update(os.environ)
             self._douyin=DouyinImporter(self.wc,cfg,{cfg['cookie_env']:keys.get(cfg['cookie_env'],'')})
@@ -175,15 +211,33 @@ class WebService:
 
         return DouyinAlbum(self)
 
+    def _download_album(self):
+        # Quotes and recovery inspect the album inside an existing transaction.
+        # Only the actual download needs fresh byte limits from the settings DB.
+        from .processing_settings import bounds_for, effective_size, overrides
+        album = self.douyin_album
+        _, settings = overrides(self.store)
+        bounds = bounds_for(self.webcfg)
+        album.config['max_image_bytes'] = effective_size(settings, 'douyin_image_bytes', album.config['max_image_bytes'], bounds)
+        album.config['max_album_bytes'] = effective_size(settings, 'douyin_album_bytes', album.config['max_album_bytes'], bounds)
+        return album
+
     @property
     def favorites_sync(self):
         from .douyin_daily_sync import FavoritesSync, load_config
         from .workflow import ROOT
 
         path = ROOT / self.webcfg.get('favorites_sync_config', 'config/douyin-daily-sync.json')
-        stamp = path.stat().st_mtime_ns if path.is_file() else None
+        from .processing_settings import SCHEDULE_KEYS, overrides
+        revision, settings = overrides(self.store)
+        stamp = (path.stat().st_mtime_ns if path.is_file() else None, revision)
         if not hasattr(self, '_favorites_sync') or self._favorites_stamp != stamp:
-            config = load_config(path) if stamp is not None else {'enabled': False}
+            config = load_config(path) if path.is_file() else {'enabled': False}
+            if config['enabled']:
+                for key in SCHEDULE_KEYS:
+                    config[key] = settings.get(key, config[key])
+                if not self.webcfg.get('live_video_enabled', False):
+                    config['conversion_enabled'] = False
             self._favorites_sync = (FavoritesSync(self.store, config, image_quote=self._album_quote,
                                                   image_limits=self._album_limits)
                                     if config['enabled'] else None)
@@ -236,7 +290,7 @@ class WebService:
             return None
 
         return sync.tick(cookie, read, self.douyin, self.dispatcher,
-                         album=self.douyin_album if sync.config['mixed_enabled'] else None,
+                         album=self._download_album() if sync.config['mixed_enabled'] else None,
                          refresh_image=refresh_image,
                          stop_requested=self.stop_requested)
     def _task(self, t):
@@ -245,6 +299,7 @@ class WebService:
         d = {k:t[k] for k in ('id','source_id','status','stage','error_code','attempts','created_at','updated_at')}
         d['max_attempts'] = self.store.max_attempts
         d['progress'] = dict(completed_stages=None,total_stages=None,completed_frames=None,total_frames=None)
+        audio_upload_failed = False
         with self.store._tx() as c:
             dispatch=c.execute('SELECT state,error_code,processing_mode,mode FROM web_dispatch WHERE task_id=?',(t['id'],)).fetchone()
             d['dispatch'] = dict(dispatch) if dispatch else None
@@ -281,6 +336,7 @@ class WebService:
             if t['status'] in ('failed', 'needs_attention', 'cancelled'):
                 source = self.store._row(c, 'sources', t['source_id'])
                 if source['kind'] in ('video', 'mp4'):
+                    audio_upload_failed = t['error_code'] == 'file_too_large'
                     failure = self.dispatcher.video_failure(c, t, rows)
                     if (d['archived'] or source['deleted'] or not self.webcfg['live_video_enabled']
                             or (dispatch and dispatch['state'] in ('pending', 'working'))):
@@ -305,6 +361,16 @@ class WebService:
                 transcribe_stages=0 if 'audio' in material and material['audio'] is None else 2+upload_stages
                 d['progress']['total_stages']=d['progress']['total_frames']+1+transcribe_stages
         except (OSError,ValueError,KeyError,TypeError): pass
+        if audio_upload_failed:
+            from .processing_limit_details import audio_limit_details
+            from .processing_settings import effective_asr_limit
+            limit = effective_asr_limit(self.store, self.webcfg, self.pc)
+            detail = audio_limit_details(self.wc, t, limit)
+            if detail:
+                d['processing_limit'] = detail
+                if (t['status'] == 'needs_attention' and detail['actual'] is not None
+                        and detail['actual'] > limit and not d.get('resume_blocked_reason')):
+                    d['resume_blocked_reason'] = 'asr_upload_limit_exceeded'
         return d
     def tasks(self):
         from collections import defaultdict

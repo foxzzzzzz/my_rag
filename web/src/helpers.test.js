@@ -3,6 +3,11 @@ test('审核需要有效分数及审核人，批准达到门槛',()=>{assert.equ
 test('冲突需要刷新',()=>assert.match(errorText(409),/刷新/));
 import {uploadError,progressText,statusText} from './helpers.js';
 test('上传扩展名与大小限制',()=>{let c={max_upload_bytes:100,max_html_bytes:20};assert.match(uploadError({name:'x.exe',size:1},c),/支持/);assert.match(uploadError({name:'x.html',size:21},c),/限制/);assert.match(uploadError({name:'x.mp4',size:101},c),/限制/);assert.equal(uploadError({name:'x.HTML',size:20},c),'')});
+test('上传错误显示实际大小和对应格式的有效上限',()=>{
+  const config={max_upload_bytes:1024*1024,max_html_bytes:2*1024*1024};
+  assert.equal(uploadError({name:'x.html',size:config.max_html_bytes},config),'');
+  assert.match(uploadError({name:'x.mp4',size:config.max_html_bytes},config),/2 MiB.*1 MiB/);
+});
 test('未知进度不显示百分比',()=>{assert.equal(progressText({completed_frames:2,total_frames:null}),'帧 2');assert.equal(progressText({completed_stages:1,total_stages:3}),'阶段 1 / 3');assert.equal(statusText('completed'),'已完成')});
 test('实际任务状态和阶段显示中文',()=>{assert.equal(statusText('succeeded'),'已完成');assert.equal(statusText('preparing_video'),'准备视频');assert.equal(statusText('extracting_html'),'提取网页');assert.equal(statusText('asr_submit'),'提交转录');assert.equal(statusText('asr_result'),'获取转录结果');assert.equal(statusText('vision-3'),'视觉分析 · 帧 3');assert.equal(statusText('text'),'生成文本');assert.equal(statusText('verifying_source'),'校验来源');assert.equal(statusText('loading_provider_result'),'读取处理结果')});
 import {formatDate} from './helpers.js';

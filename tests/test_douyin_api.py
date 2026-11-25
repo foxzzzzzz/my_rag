@@ -46,3 +46,31 @@ class DouyinApiTests(unittest.TestCase):
         self.service.process_next()
         self.assertEqual(self.service.store.get_task(source['task_id'])['status'],'succeeded')
         with self.service.store._tx() as c: self.assertIsNone(c.execute('SELECT * FROM video_maintenance').fetchone())
+
+    def test_saved_processing_settings_keep_mixed_favorites_quotes_available(self):
+        from personalkb.video_pipeline import load_pipeline_config
+
+        daily_path = self.path / 'favorites.json'
+        daily = json.loads(Path('config/douyin-daily-sync.json').read_text(encoding='utf8'))
+        daily.update(enabled=True, mixed_enabled=True)
+        daily_path.write_text(json.dumps(daily), encoding='utf8')
+        self.service.webcfg.update(favorites_sync_config=str(daily_path), live_video_enabled=True)
+        self.service.pc = load_pipeline_config()
+        worker = WebService(self.wc, self.service.pc, self.service.webcfg)
+        sync = worker.favorites_sync
+        worker.douyin.status()
+        cookie = 'fake-cookie-only'
+        with worker.store._tx() as db:
+            db.execute("INSERT INTO favorites_accounts (id,label) VALUES ('account','测试账号')")
+            db.execute("UPDATE favorites_state SET active='account',state='ready',credential=? WHERE id=1", (sync._credential(cookie),))
+            db.execute("""INSERT INTO favorites_items (account_id,work_id,title,position,baseline,kind,image_urls)
+                VALUES ('account','123','测试图文',0,1,'image',?)""", (json.dumps(['https://example.invalid/image']),))
+        mib = 1024 * 1024
+        settings = self.service.processing_settings
+        settings.change({'expected_revision': 0, 'values': {'daily_at': '06:20', 'schedule_enabled': True,
+                         'douyin_image_bytes': 2 * mib, 'douyin_album_bytes': 4 * mib}})
+        worker_sync = worker.favorites_sync
+        assert worker_sync.config['schedule_enabled'] is True
+        assert worker_sync.config['daily_at'] == '06:20'
+        assert worker._download_album().config['max_image_bytes'] == 2 * mib
+        assert worker_sync.status(cookie)['items'][0]['image_quote_cny'] is not None

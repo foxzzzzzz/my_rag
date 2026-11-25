@@ -1,5 +1,16 @@
 /* Management pages share the library's restrained surfaces and dividers. */
 .import-panel, .trash-panel { color: var(--text); }
+.processing-settings-panel { max-width: 48rem; }
+.processing-settings-sizes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 12px;
+}
+.processing-settings-sizes label { display: grid; gap: 4px; }
+.processing-settings-sizes input { width: 100%; }
+.processing-settings-schedule { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.processing-settings-schedule label { display: grid; gap: 4px; }
+.processing-settings-schedule .processing-setting-toggle { display: flex; align-items: center; }
 .workspace.workspace--import { padding:0 }
 .import-scroll {
   flex:1;

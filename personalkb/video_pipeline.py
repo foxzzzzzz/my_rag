@@ -386,6 +386,12 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     from .video_media import prepare_media
     from .workflow import _hash, _root
     pc = dict(pipeline_config)
+    # The effective upload ceiling is a transport control. Keep the deployment
+    # storage config in the strategy fingerprint so old task bindings stay valid.
+    storage_config = pc['storage']
+    if 'asr_upload_limit' in pc:
+        storage_config = {**storage_config, 'max_upload_bytes': pc['asr_upload_limit']}
+
     def require_credentials(*kinds):
         for kind in kinds if services is None else ():
             spec = pc['models']['models'][kind]
@@ -399,8 +405,8 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     if storage is None and not visual_only:
         # Validate deployment configuration before taking a lease or starting work.
         try:
-            create_storage(pc['storage'], secrets)
-            if pc['storage']['backend'] == 'managed_oss':
+            create_storage(storage_config, secrets)
+            if storage_config['backend'] == 'managed_oss':
                 import importlib.util
                 if importlib.util.find_spec('oss2') is None: raise StorageError('missing_sdk')
         except StorageError as exc:
@@ -532,7 +538,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
                         journal.upload_progress(task_id, token, stage, voice_digest, completed)
 
                     preparing_upload = True
-                    adapter = storage or _scope_storage(journal, task_id, token, pc['storage'], secrets)
+                    adapter = storage or _scope_storage(journal, task_id, token, storage_config, secrets)
                     model = pc['models']['models']['asr']['model']
                     if isinstance(adapter, TemporaryStorage):
                         asset = adapter.prepare(audio, model, on_stage=upload_progress)

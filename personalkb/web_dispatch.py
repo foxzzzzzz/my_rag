@@ -8,6 +8,8 @@ import uuid
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
 from .douyin_album_processing import ALBUM_TEXT_RETRY_MODE, album_text_retry_plan
+from .processing_limit_details import audio_limit_details
+from .processing_settings import effective_asr_limit
 from .video_services import SUMMARY_FORMAT_ERRORS
 from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
@@ -381,6 +383,11 @@ class WebDispatcher:
                     raise WorkflowError('video_recovery_conflict')
                 if has_unknown_submission(task, stages, legacy_upload=legacy_upload_interruption(c, task, stages)):
                     raise WorkflowError('unknown_submission')
+                if source['kind'] in ('video', 'mp4') and task['error_code'] == 'file_too_large':
+                    limit = effective_asr_limit(self.store, self.config, self.service.pc, connection=c)
+                    details = audio_limit_details(self.service.wc, task, limit)
+                    if details and details['actual'] is not None and details['actual'] > details['limit']:
+                        raise WorkflowError('asr_upload_limit_exceeded')
             c.execute("INSERT INTO web_dispatch(task_id,mode,state,requested,claimed,owner,error_code) VALUES(?,?,'pending',?,NULL,NULL,NULL) ON CONFLICT(task_id) DO UPDATE SET mode=excluded.mode,state='pending',requested=excluded.requested,claimed=NULL,owner=NULL,error_code=NULL", (task_id, mode, time.time()))
             c.execute('UPDATE web_dispatch SET processing_mode=? WHERE task_id=?',(processing_mode,task_id))
             return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
@@ -420,7 +427,14 @@ class WebDispatcher:
             row = None
             for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
                 reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
-                if pending['mode'] in (*MODEL_RECOVERY_DISPATCH_MODES, *VIDEO_RECOVERY_MODES, FAVORITES_REAUTHORIZE_MODE) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                # This explicit resume already has a task-level authorization.
+                # Automatic scan readiness applies to scheduled work.
+                audio_resume = reservation and pending['mode'] == 'resume' and c.execute(
+                    "SELECT 1 FROM tasks WHERE id=? AND status='needs_attention' AND error_code='file_too_large'",
+                    (pending['task_id'],),
+                ).fetchone()
+                if (audio_resume or pending['mode'] in (*MODEL_RECOVERY_DISPATCH_MODES, *VIDEO_RECOVERY_MODES, FAVORITES_REAUTHORIZE_MODE)
+                        or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie)):
                     row = pending
                     break
             if not row: return None
@@ -596,7 +610,11 @@ class WebDispatcher:
                     options['visual_only'] = True
                 if job['mode'] == 'rebuild-media':
                     options['rebuild_media'] = True
-                runner(self.service.wc, self.service.pc, keys, task_id=tid, resume=resume, **options)
+                pipeline_config = self.service.pc
+                limit = effective_asr_limit(self.store, self.config, pipeline_config)
+                if limit is not None:
+                    pipeline_config = {**pipeline_config, 'asr_upload_limit': limit}
+                runner(self.service.wc, pipeline_config, keys, task_id=tid, resume=resume, **options)
             else:
                 raise WorkflowError('unsupported_format')
         except Exception as exc:

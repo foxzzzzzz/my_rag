@@ -2,7 +2,7 @@ import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {canReauthorize, ReauthorizationDialog} from './budget-panel';
 import {compareTime, TimeSortButton} from './time-sort';
 import {MediaTypeBadge} from './media-type-badge';
-import {errorText, formatDate, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
+import {errorText, formatDate, formatMediaSize, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
 
 const emptyFilters={query:'',status:'',kind:''};
 const statusOptions={
@@ -12,6 +12,8 @@ const statusOptions={
 const actionNames={start:'开始',resume:'恢复',retry:'重试',cancel:'取消'};
 const htmlModes={preview:'离线正文预览',model:'模型摘要与笔记'};
 const failureReasons={
+  asr_upload_limit_exceeded:'音频大小超过当前上传上限',
+  file_too_large:'音频文件超过上传大小限制',
   invalid_frame:'画面帧无效，视频抽帧失败。',
   media_workdir_unverified:'视频抽帧未完成，媒体缓存不完整。',
   media_cache_changed:'媒体缓存发生变化，请检查缓存后再处理。',
@@ -95,7 +97,7 @@ function RetryConsentHint({taskId,label='重试',prompt='重试前，请在「�
   </span>;
 }
 
-function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onReauthorize,expanded,toggle}) {
+function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onProcessingSettings,onReauthorize,expanded,toggle}) {
   const [recoveryAgreement,setRecoveryAgreement]=useState(null);
   const {mode,action:defaultAction,queuedForProcessing}=controls;
   const video=['video','mp4'].includes(item?.kind);
@@ -120,7 +122,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onR
   const problem=task.failure_code||(currentError&&currentError!=='unknown_submission'?currentError:diagnostic?.code||currentError||recoveryLimit);
   const reason=problem&&(uploadRecoveryText(task,problem)||failureReasons[problem]||errorText(400,problem));
   const previousModelError=diagnostic?.code&&diagnostic.code!==problem?diagnostic.code:null;
-  const summary=reason&&reason.startsWith('操作失败：')&&diagnostic?.code!==problem?'查看详情了解原因':reason;
+  const audioFits=task.processing_limit?.actual!=null&&task.processing_limit.actual<=task.processing_limit.limit;
+  const summary=audioFits?'音频符合当前上传上限':reason&&reason.startsWith('操作失败：')&&diagnostic?.code!==problem?'查看详情了解原因':reason;
   const budgetBlocked=problem==='budget_invalid_or_exceeded'||problem==='favorites_budget_exceeded';
   const budgetBlock=task.budget_block;
   const detailId='task-detail-'+task.id;
@@ -188,10 +191,16 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onR
       {(stage||task.failure_stage)&&<><dt>{task.failure_stage?'失败阶段':'阶段'}</dt><dd>{task.failure_stage?stageText(task.failure_stage):stage}</dd></>}
       <dt>进度</dt><dd>{queuedForProcessing||task.dispatch?.state==='pending'?'已加入处理队列':progress}</dd>
       {item?.kind==='html'&&<><dt>处理方式</dt><dd>{htmlModes[mode]}</dd></>}
-      {problem&&<><dt>当前原因</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {problem&&<><dt>{audioFits?'上次失败原因':'当前原因'}</dt><dd>{reason} <code>{problem}</code></dd></>}
+      {task.processing_limit&&<><dt>转写音频上限</dt><dd>
+        {task.processing_limit.actual != null && <>音频 {formatMediaSize(task.processing_limit.actual)} · </>}
+        当前上限 {formatMediaSize(task.processing_limit.limit)}
+        {task.processing_limit.actual != null && (task.processing_limit.actual > task.processing_limit.limit ? ' · 超过当前上限' : ' · 当前上限允许此音频')}{' '}
+        <button type="button" onClick={()=>onProcessingSettings(task.processing_limit.key)}>查看音频上限</button>
+      </dd></>}
       {videoNextStep&&<><dt>下一步</dt><dd>{videoNextStep}</dd></>}
       {previousModelError&&<><dt>上次模型失败原因</dt><dd>{failureReasons[previousModelError]||errorText(400,previousModelError)}</dd></>}
-      {recoveryLimit&&recoveryLimit!==problem&&!(albumTextRetry&&recoveryLimit==='unknown_submission')&&
+      {recoveryLimit&&recoveryLimit!==problem&&!(task.processing_limit&&recoveryLimit==='asr_upload_limit_exceeded')&&!(albumTextRetry&&recoveryLimit==='unknown_submission')&&
         <><dt>恢复限制</dt><dd>{uploadRecoveryText(task,recoveryLimit)||errorText(400,recoveryLimit)} <code>{recoveryLimit}</code></dd></>}
       {!albumTextRetry&&task.retry_blocked_reason&&task.retry_blocked_reason!==problem&&<><dt>重试限制</dt><dd>{failureReasons[task.retry_blocked_reason]||errorText(400,task.retry_blocked_reason)} <code>{task.retry_blocked_reason}</code></dd></>}
       {task.attempts!=null&&<><dt>尝试次数</dt><dd>{task.attempts} 次{task.max_attempts!=null&&` · 常规上限 ${task.max_attempts} 次`}</dd></>}
@@ -226,7 +235,7 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onR
   </article>;
 }
 
-export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,onBudget,api,onSaved}) {
+export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,onBudget,onProcessingSettings,api,onSaved}) {
   const [authorization,setAuthorization]=useState(null);
   const [authorizationMessage,setAuthorizationMessage]=useState('');
   const [archived,setArchived]=useState(false);
@@ -324,7 +333,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,
       </div>}
       {loaded&&!filtered.length&&<p>{filtering?'没有符合筛选条件的任务。':archived?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}
       {filtered.map(({task,item,controls})=><TaskRow key={task.id} task={task} item={item} controls={controls}
-        config={config} busy={busy} paid={paid} open={open} onAction={onAction} onBudget={onBudget} onReauthorize={openAuthorization}
+        config={config} busy={busy} paid={paid} open={open} onAction={onAction} onBudget={onBudget} onProcessingSettings={onProcessingSettings} onReauthorize={openAuthorization}
         expanded={expandedId===task.id} toggle={()=>setExpandedId(id=>id===task.id?null:task.id)}/>)}
     </div>
   </section>;

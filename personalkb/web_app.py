@@ -50,6 +50,8 @@ def load_web_config(path=None):
         c.setdefault('live_html_enabled',False)
         c.setdefault('html_pipeline_config','config/html-pipeline.json')
         if type(c['live_html_enabled']) is not bool or not isinstance(c['html_pipeline_config'],str) or not c['html_pipeline_config'].strip(): raise ValueError()
+        from .processing_settings import bounds_for
+        bounds_for(c)
         return c
     except (OSError,ValueError,KeyError,TypeError): raise WorkflowError('invalid_config') from None
 
@@ -178,8 +180,15 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     def activity():
         return {'ok':True}
 
+    def current_upload_sizes():
+        from .processing_settings import upload_sizes
+        if hasattr(service, 'store'):
+            return upload_sizes(service.store, wc, c)
+        return wc['max_upload_bytes'], min(wc['max_html_bytes'], wc['max_upload_bytes'])
+
     @app.get('/api/session')
     def session(req:Request):
+        video_size, html_size = current_upload_sizes()
         new_session=False
         with session_lock:
             sid=req.cookies.get('pkb_session')
@@ -195,7 +204,7 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         r=JSONResponse({'csrf_token':token,'config':{'quality_target':wc['quality_target'],'poll_interval_ms':c['poll_interval_ms'],
             'session_activity_interval_ms':c.get('session_activity_interval_ms', DEFAULT_SESSION_ACTIVITY_INTERVAL_MS),
             'rag_status_poll_interval_ms':c.get('rag_status_poll_interval_ms', DEFAULT_RAG_STATUS_POLL_INTERVAL_MS),
-            'max_upload_bytes':wc['max_upload_bytes'],'max_html_bytes':wc['max_html_bytes'],'live_video_enabled':c['live_video_enabled'],'live_html_enabled':c.get('live_html_enabled',False),'display_timezone':c['display_timezone'],'auth_enabled':auth_enabled}})
+            'max_upload_bytes':video_size,'max_html_bytes':html_size,'live_video_enabled':c['live_video_enabled'],'live_html_enabled':c.get('live_html_enabled',False),'display_timezone':c['display_timezone'],'auth_enabled':auth_enabled}})
         if new_session: set_session_cookie(r,sid)
         return r
     @app.get('/api/sources')
@@ -208,6 +217,12 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
     def tasks(): return service.tasks()
     @app.get('/api/budget')
     def budget(): return service.budget()
+    @app.get('/api/processing-settings')
+    def processing_settings(): return service.processing_settings.read()
+    @app.patch('/api/processing-settings')
+    async def change_processing_settings(req:Request):
+        payload = await read_object(req)
+        return await run_in_threadpool(lambda: service.processing_settings.change(payload))
     @app.patch('/api/budget')
     async def change_budget(req:Request):
         return await run_in_threadpool(service.change_budget, await read_object(req))
@@ -259,7 +274,8 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         if not filename or filename in ('.','..') or Path(filename).name!=filename or PureWindowsPath(filename).name!=filename or any(ord(x)<32 or ord(x)==127 for x in filename): raise WorkflowError('invalid_filename')
         ext=Path(filename).suffix.lower()
         if ext not in ('.html','.htm','.mp4'): raise WorkflowError('unsupported_format')
-        limit=min(wc['max_upload_bytes'],wc['max_html_bytes']) if ext in ('.html','.htm') else wc['max_upload_bytes']
+        video_size, html_size = await run_in_threadpool(current_upload_sizes)
+        limit=html_size if ext in ('.html','.htm') else video_size
         try: length=int(req.headers.get('content-length','0'))
         except ValueError: raise WorkflowError('invalid_size')
         if length<0 or length>limit: return JSONResponse({'error':'too_large'},413)
@@ -274,7 +290,8 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
                     if shutil.disk_usage(data).free - size < wc['min_free_bytes']: raise WorkflowError('disk_low')
                     if size>limit: return JSONResponse({'error':'too_large'},413)
                     f.write(chunk)
-            result=await run_in_threadpool(workflow.import_file,wc,path,rights_confirmed=True)
+            upload_config = {**wc, 'max_upload_bytes': limit, 'max_html_bytes': html_size}
+            result=await run_in_threadpool(workflow.import_file,upload_config,path,rights_confirmed=True)
             source=result['source']; task=result['task']
             if not result['duplicate']:
                 with service.store._tx() as db: db.execute('UPDATE sources SET original_name=? WHERE id=?',(filename,source['id']))

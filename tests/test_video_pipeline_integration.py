@@ -477,6 +477,75 @@ class PipelineIntegration(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM favorites_video_reauthorizations').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT amount FROM favorites_conversion').fetchone()[0], '4.12')
 
+    def test_saved_audio_limit_allows_old_task_to_resume_with_its_original_binding(self):
+        from unittest.mock import patch
+
+        from personalkb.asr_storage import check_file
+        from personalkb.web_app import load_web_config
+        from personalkb.web_service import WebService
+
+        actual_bytes = 67_624_152
+        new_limit = 80 * 1024 * 1024
+        old_limit = self.pc['storage']['max_upload_bytes']
+        prepared = []
+
+        def cached_media(source, work, wc, pc, *, heartbeat):
+            if not prepared:
+                material = media(source, work, wc, pc, heartbeat=heartbeat)
+                path = Path(material['audio_path'])
+                with path.open('r+b') as audio:
+                    audio.truncate(actual_bytes)
+                manifest = work / 'media-manifest.json'
+                entries = json.loads(manifest.read_text(encoding='utf8'))
+                entries['audio'] = {'file': path.name}
+                manifest.write_text(json.dumps(entries), encoding='utf8')
+                prepared.append(material)
+            return prepared[0]
+
+        class CheckedStorage:
+            def __init__(self, config):
+                self.config = config
+
+            def prepare(self, path, model):
+                _, digest, size = check_file(path, self.config)
+                return PreparedAudio('temporary', model, 'asset1', digest, size, time.time() + 60, 'https://unused')
+
+        def runner(wc, pc, keys, **options):
+            return run_video(wc, pc, keys, services=self.s, media=cached_media, **options)
+
+        config = {**load_web_config(), 'live_video_enabled': True}
+        web = WebService(self.wc, self.pc, config, video_runner=runner)
+        worker = WebService(self.wc, self.pc, config, video_runner=runner)
+        with web.store._tx() as db:
+            db.execute('CREATE TABLE favorites_conversion (task_id TEXT PRIMARY KEY, amount TEXT NOT NULL)')
+            db.execute("INSERT INTO favorites_conversion VALUES (?,'4.12')", (self.task,))
+
+        with patch('personalkb.video_pipeline.create_storage', side_effect=lambda config, *_args, **_kwargs: CheckedStorage(config)):
+            with self.assertRaisesRegex(WorkflowError, 'file_too_large'):
+                runner(self.wc, self.pc, {}, task_id=self.task)
+            with web.store._tx() as db:
+                db.execute('UPDATE tasks SET attempts=4 WHERE id=?', (self.task,))
+                fingerprint = db.execute('SELECT fingerprint FROM video_runs WHERE task_id=?', (self.task,)).fetchone()[0]
+            failed = web.tasks()['items'][0]
+            self.assertEqual(failed['processing_limit'], {'key': 'asr_upload_bytes', 'actual': actual_bytes, 'limit': old_limit})
+            self.assertEqual(failed['resume_blocked_reason'], 'asr_upload_limit_exceeded')
+            with self.assertRaisesRegex(WorkflowError, 'asr_upload_limit_exceeded'):
+                web.dispatcher.enqueue(self.task, 'resume', True)
+            settings = web.processing_settings.read()
+            web.processing_settings.change({'expected_revision': settings['revision'], 'values': {'asr_upload_bytes': new_limit}})
+            self.assertEqual((self.status(), self.s.submit_count), ('needs_attention', 0))
+            ready = web.tasks()['items'][0]
+            self.assertEqual(ready['processing_limit']['limit'], new_limit)
+            self.assertIsNone(ready['resume_blocked_reason'])
+            self.assertEqual(web.dispatcher.enqueue(self.task, 'resume', True)['task_id'], self.task)
+            self.assertEqual(worker.dispatcher.process_next()['dispatch_state'], 'done')
+
+        self.assertEqual((self.status(), self.s.submit_count, len(prepared)), ('succeeded', 1, 1))
+        self.assertEqual(self.pc['storage']['max_upload_bytes'], old_limit)
+        with web.store._tx() as db:
+            self.assertEqual(db.execute('SELECT fingerprint FROM video_runs WHERE task_id=?', (self.task,)).fetchone()[0], fingerprint)
+            self.assertEqual(db.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (self.task,)).fetchone()[0], '4.12')
+
     def test_tasks_survive_broken_optional_favorites_config_and_refresh(self):
         from datetime import datetime
         from zoneinfo import ZoneInfo

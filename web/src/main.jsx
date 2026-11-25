@@ -10,6 +10,7 @@ import {LibraryView} from './library-view';
 import {MediaTypeBadge} from './media-type-badge';
 import {TaskList} from './task-list';
 import {BudgetPanel} from './budget-panel';
+import {ProcessingSettings} from './processing-settings';
 import {isUnclassifiedSource, UNCLASSIFIED_TOPIC} from './management-helpers';
 import {DocumentView, VideoNoteView} from './document-view';
 import {connectionText, validReview, errorText, textValue, uploadError, statusText, formatDate, htmlBodyPreview} from './helpers';
@@ -28,6 +29,7 @@ const detailPath = (id, versionId) => '/sources/'+id+(versionId?'?version_id='+e
 function App() {
   const [session, setSession] = useState(null), [connection, setConnection] = useState('connecting');
   const [loginRequired,setLoginRequired]=useState(false), [password,setPassword]=useState(''), [authEnabled,setAuthEnabled]=useState(false);
+  const [settingsOrigin, setSettingsOrigin] = useState('import'), [settingsFocus, setSettingsFocus] = useState(null);
   const [page, setPage] = useState('library'), [sources, setSources] = useState([]), [tasks, setTasks] = useState([]), [catalog, setCatalog] = useState([]);
   const [trash, setTrash] = useState({items:[], retention_days:null});
   const [detail, setDetail] = useState(null), [topic, setTopic] = useState('');
@@ -103,7 +105,9 @@ function App() {
     if (!response.ok) {
       const data = await guardedJson(response,epoch,()=>authEpoch.current,requireLogin);
       if(response.status === 401) {setSession(null); setConnection('disconnected'); setStale(true);}
-      throw Error(data.error==='login_required'?'LOGIN_REQUIRED':errorText(response.status, data.error));
+      const error = Error(data.error==='login_required'?'LOGIN_REQUIRED':errorText(response.status, data.error));
+      error.code = data.error;
+      throw error;
     }
     return guardedJson(response,epoch,()=>authEpoch.current,requireLogin);
   }
@@ -175,6 +179,19 @@ function App() {
     finally {if(sequence===openSequence.current)setBusy(!!writing.current);}
   }
   function navigate(next) {openSequence.current++;setBusy(!!writing.current);setPage(next);setError('');setMessage('');}
+  function openProcessingSettings(origin, key=null) {
+    setSettingsOrigin(origin);
+    setSettingsFocus(key);
+    navigate('processing-settings');
+  }
+  async function refreshProcessingSettings() {
+    const epoch = authEpoch.current;
+    const next = await api('/session');
+    if (!epochCurrent(epoch,authEpoch)) return;
+    lastSession.current = next;
+    setSession(next);
+    await refresh();
+  }
   function resetLibraryFilters() {
     setTopic('');
     setLibraryFilters({...emptyLibraryFilters});
@@ -247,11 +264,12 @@ function App() {
   }
   async function upload() {
     const epoch=authEpoch.current, messages=[];
+    const {config:uploadConfig} = await api('/session');
     for(const file of files) {
       if(!epochCurrent(epoch,authEpoch))return;
       setUploads([...messages,file.name+'：上传中']);
       try {
-        const problem=uploadError(file,session.config);if(problem)throw Error(problem);
+        const problem=uploadError(file,uploadConfig);if(problem)throw Error(problem);
         const value=await api('/imports?filename='+encodeURIComponent(file.name)+'&rights_confirmed=true',{
           method:'PUT',body:file,headers:{'Content-Type':'application/octet-stream'}});
         if(!epochCurrent(epoch,authEpoch))return;
@@ -342,7 +360,7 @@ function App() {
           </article>)}
         </section></>}
         {catalogActive&&<CatalogManager catalog={catalog} loaded={dataLoaded} api={api} changed={refresh} disabled={busy}/>}
-        {importActive&&<><div className="import-scroll"><div className="page-heading"><h1 {...titleProps}>导入资料</h1></div><section className="import-panel">
+        {importActive&&<><div className="import-scroll"><div className="page-heading"><h1 {...titleProps}>导入资料</h1><button type="button" onClick={()=>openProcessingSettings('import')}>导入与转换设置</button></div><section className="import-panel">
           <p className="muted">上传HTML或视频后，到任务页明确启动处理。导入不会自动调用模型。</p>
           <div className="drop" onDragOver={event=>event.preventDefault()} onDrop={event=>{event.preventDefault();setFiles([...event.dataTransfer.files]);}}>
             <label>选择文件<input type="file" multiple accept=".html,.htm,.mp4" onChange={event=>setFiles([...event.target.files])}/></label><p>也可将文件拖到这里</p></div>
@@ -353,8 +371,9 @@ function App() {
           <FavoritesPanel api={api} pollInterval={session.config.poll_interval_ms} disabled={busy} dock={importDock}/>
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></div><div className="import-dock" ref={setImportDock}/></>}
+        {page==='processing-settings'&&<ProcessingSettings api={api} titleProps={titleProps} focusKey={settingsFocus} onBack={()=>navigate(settingsOrigin)} onSaved={refreshProcessingSettings}/>}
         {page==='budget'&&<BudgetPanel api={api} disabled={busy} titleProps={titleProps} displayTimezone={session.config.display_timezone} onSaved={refresh}/>}
-        <TaskList api={api} onSaved={refresh} active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')}
+        <TaskList api={api} onSaved={refresh} active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')} onProcessingSettings={key=>openProcessingSettings('tasks',key)}
           open={open} onAction={(id,action,body)=>run(async()=>{
             await api('/tasks/'+id+'/'+action,{method:'POST',body:JSON.stringify(body)});
             await refresh();
