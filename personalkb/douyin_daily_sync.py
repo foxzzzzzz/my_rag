@@ -23,7 +23,7 @@ def load_config(path):
         for key in ('enabled', 'schedule_enabled', 'auto_download', 'conversion_enabled', 'mixed_enabled'):
             if type(config[key]) is not bool:
                 raise ValueError()
-        for key in ('baseline_limit', 'scan_limit', 'download_limit', 'conversion_limit', 'max_pages'):
+        for key in ('baseline_limit', 'scan_limit', 'download_limit', 'max_pages'):
             if type(config[key]) is not int or config[key] < 1:
                 raise ValueError()
         if config['scan_limit'] < config['baseline_limit']:
@@ -130,22 +130,19 @@ class FavoritesSync:
         needs_scan = self.config['schedule_enabled'] and s['last_day'] != day
         if not self.config['conversion_enabled'] or needs_scan:
             return False
-        amount = Decimal(reservation['amount'])
         kind = db.execute("""SELECT i.kind FROM favorites_queue q JOIN favorites_items i
                           ON i.account_id=q.account_id AND i.work_id=q.work_id WHERE q.task_id=?""",
                           (reservation['task_id'],)).fetchone()
-        if kind and kind[0] == 'image':
-            if not self.config.get('mixed_enabled'):
-                return False
-        elif amount > Decimal(str(self.config['video_budget_cny'])):
-            return False
-        used = [Decimal(row[0]) for row in db.execute(
-            'SELECT amount FROM favorites_conversion_slots WHERE day=? AND task_id<>?', (day, reservation['task_id'])
-        )]
-        if len(used) >= self.config['conversion_limit'] or sum(used, amount) > Decimal(str(self.config['daily_budget_cny'])):
+        if kind and kind[0] == 'image' and not self.config.get('mixed_enabled'):
             return False
         if reservation['day'] == day:
             return True
+        amount = Decimal(reservation['amount'])
+        used = [Decimal(row[0]) for row in db.execute(
+            'SELECT amount FROM favorites_conversion_slots WHERE day=? AND task_id<>?', (day, reservation['task_id'])
+        )]
+        if len(used) >= self._daily_limit(db) or sum(used, amount) > Decimal(str(self._budget(db, 'daily_budget_cny'))):
+            return False
         db.execute('INSERT OR IGNORE INTO favorites_conversion_slots VALUES (?,?,?)',
                    (reservation['task_id'], day, str(amount)))
         db.execute('UPDATE favorites_conversion SET day=? WHERE task_id=?', (day, reservation['task_id']))
@@ -202,7 +199,7 @@ class FavoritesSync:
                 )):
                     limits = self.image_limits(len(urls), work_id=row['work_id'])
                     limits['can_import'] = bool(ready and row['baseline'] and (not status or reconfirm) and
-                                                manual_conversion_available and self.config['manual_video_budget_cny'] is not None and
+                                                manual_conversion_available and self._manual_budget(db) is not None and
                                                 limits['manual_quote_cny'] is not None)
                     items[-1]['image_limits'] = limits
             counts = dict(db.execute('SELECT status, COUNT(*) FROM favorites_queue WHERE account_id=? GROUP BY status',
@@ -212,11 +209,11 @@ class FavoritesSync:
             return dict(enabled=self.config['enabled'], state=state, error_code=s['error_code'],
                         active_account=dict(id=account['id'], label=account['label']) if account else None,
                         pending_account=dict(id=s['pending'], label=s['pending_label']) if s['pending'] else None,
-                        items=items, download_limit=self._download_limit(db), baseline_limit=self.config['baseline_limit'],
+                        items=items, download_limit=self._daily_limit(db), baseline_limit=self.config['baseline_limit'],
                         queue_counts=counts,
                         last_scan=dict(scan) if scan else None,
-                        manual_conversion_available=manual_conversion_available and self.config['manual_video_budget_cny'] is not None,
-                        manual_video_budget_cny=self.config['manual_video_budget_cny'],
+                        manual_conversion_available=manual_conversion_available and self._manual_budget(db) is not None,
+                        manual_video_budget_cny=self._manual_budget(db),
                         conversion_enabled=self.config['conversion_enabled'])
 
     def _enabled(self):
@@ -247,11 +244,6 @@ class FavoritesSync:
             raise WorkflowError('rights_required')
         if allow_paid is not True:
             raise WorkflowError('paid_consent_required')
-        amount = self.config['manual_video_budget_cny']
-        if amount is None:
-            raise WorkflowError('favorites_manual_disabled')
-        if video_budget_cny != amount:
-            raise WorkflowError('favorites_price_changed')
         if not isinstance(work_ids, list) or not work_ids or len(work_ids) > self.config['baseline_limit'] or any(
             not isinstance(item, str) or not re.fullmatch(r'[0-9]+', item) for item in work_ids
         ):
@@ -261,6 +253,11 @@ class FavoritesSync:
         ):
             raise WorkflowError('invalid_request')
         with self.store._tx() as db:
+            amount = self._manual_budget(db)
+            if amount is None:
+                raise WorkflowError('favorites_manual_disabled')
+            if video_budget_cny != amount:
+                raise WorkflowError('favorites_price_changed')
             s = self._state(db)
             if not cookie or account_id != s['active'] or s['state'] != 'ready' or s['scan_requested'] or self._credential(cookie) != s['credential']:
                 raise WorkflowError('favorites_account_conflict')
@@ -324,12 +321,23 @@ class FavoritesSync:
         db.execute("UPDATE favorites_queue SET status='downloading' WHERE seq=?", (row['seq'],))
         return True
 
-    def _download_limit(self, db):
+    def _manual_budget(self, db):
+        if self.config['manual_video_budget_cny'] is None:
+            return None
+        settings = favorites_limits.saved_limits(db)
+        value = settings['video_budget_cny'] if settings and settings['video_budget_cny'] is not None else self.config['manual_video_budget_cny']
+        return value if value is not None and Decimal(str(value)) > 0 else None
+
+    def _budget(self, db, key):
+        settings = favorites_limits.saved_limits(db)
+        return settings[key] if settings and settings[key] is not None else self.config[key]
+
+    def _daily_limit(self, db):
         settings = favorites_limits.saved_limits(db)
         return settings['download_limit'] if settings else self.config['download_limit']
 
     def limits(self, default_max_images, *, payload=None):
-        defaults = dict(max_images=default_max_images, download_limit=self.config['download_limit'])
+        defaults = dict(max_images=default_max_images, download_limit=self.config['download_limit'], video_budget_cny=self.config['video_budget_cny'], daily_budget_cny=self.config['daily_budget_cny'])
         with self.store._tx() as db:
             day = datetime.now(ZoneInfo(self.config['timezone'])).date().isoformat()
             if payload is None:
@@ -520,7 +528,7 @@ class FavoritesSync:
             if not all(downloader.status().values()):
                 return None
             count = favorites_limits.downloads_used(db, day)
-            has_slot = count < self._download_limit(db)
+            has_slot = count < self._daily_limit(db)
             pending = db.execute("""SELECT q.job_id,q.work_id,q.download_day,m.queue_seq AS paid,i.kind
                     FROM favorites_queue q JOIN douyin_jobs j ON j.id=q.job_id
                     LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
@@ -612,12 +620,58 @@ class FavoritesSync:
             db.execute('UPDATE favorites_queue SET status=? WHERE job_id=?', ('download_failed' if error else 'downloaded', job_id))
         return {'favorites': 'download_failed' if error else 'downloaded', 'error_code': error}
 
+    def conversion_waits(self):
+        """Explain eligible automatic conversions blocked by today's reservations."""
+        with self.store._tx() as db:
+            state = self._state(db)
+            day = datetime.now(ZoneInfo(self.config['timezone'])).date().isoformat()
+            if (state['state'] != 'ready' or state['scan_requested'] or not state['active'] or
+                    not self.config['conversion_enabled'] or
+                    (self.config['schedule_enabled'] and state['last_day'] != day)):
+                return {}
+            used = [Decimal(r[0]) for r in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
+            remaining = max(Decimal(0), Decimal(str(self._budget(db, 'daily_budget_cny'))) - sum(used, Decimal(0)))
+            at_limit = len(used) >= self._daily_limit(db)
+            default_amount = Decimal(str(self._budget(db, 'video_budget_cny')))
+            rows = db.execute("""SELECT t.id,q.work_id,i.kind,i.image_urls,r.amount AS reserved_amount
+                FROM favorites_queue q
+                JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
+                JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
+                LEFT JOIN web_task_archive a ON a.task_id=t.id
+                LEFT JOIN favorites_items i ON i.account_id=q.account_id AND i.work_id=q.work_id
+                LEFT JOIN favorites_manual_consent m ON m.queue_seq=q.seq
+                LEFT JOIN favorites_conversion r ON r.task_id=t.id
+                WHERE q.account_id=? AND q.automatic=1 AND m.queue_seq IS NULL
+                AND s.deleted=0 AND s.current_version_id IS NULL AND t.status='queued'
+                AND a.task_id IS NULL
+                AND ((q.status='downloaded' AND d.task_id IS NULL) OR
+                     (q.status='conversion_queued' AND q.task_id=t.id AND d.mode='run'
+                      AND d.state='pending' AND r.day<>?))""", (state['active'], day)).fetchall()
+            waits = {}
+            for row in rows:
+                amount = Decimal(row['reserved_amount']) if row['reserved_amount'] else default_amount
+                if row['kind'] == 'image':
+                    if not self.config.get('mixed_enabled'):
+                        continue
+                    if not row['reserved_amount']:
+                        try:
+                            amount = Decimal(self.image_quote(len(json.loads(row['image_urls'])), work_id=row['work_id'], manual=False))
+                        except (TypeError, ValueError, InvalidOperation, WorkflowError):
+                            continue
+                if at_limit:
+                    waits[row['id']] = {'code': 'favorites_daily_count_limit'}
+                    if amount > remaining:
+                        waits[row['id']].update(required_cny=format(amount, '.2f'), available_cny=format(remaining, '.2f'))
+                elif amount > remaining:
+                    waits[row['id']] = {'code': 'favorites_daily_budget_limit', 'required_cny': format(amount, '.2f'), 'available_cny': format(remaining, '.2f')}
+            return waits
+
     def _enqueue_conversion(self, db, account, day, dispatcher, scheduled_ready):
         if not dispatcher.config['live_video_enabled']:
             return False
         used = [Decimal(row[0]) for row in db.execute('SELECT amount FROM favorites_conversion_slots WHERE day=?', (day,))]
-        remaining = Decimal(str(self.config['daily_budget_cny'])) - sum(used, Decimal(0))
-        can_schedule = scheduled_ready and self.config['conversion_enabled'] and len(used) < self.config['conversion_limit']
+        remaining = Decimal(str(self._budget(db, 'daily_budget_cny'))) - sum(used, Decimal(0))
+        can_schedule = scheduled_ready and self.config['conversion_enabled'] and len(used) < self._daily_limit(db)
         rows = db.execute("""SELECT q.seq,t.id,q.work_id,m.video_budget_cny,e.image_count,i.kind,i.image_urls FROM favorites_queue q
                 JOIN douyin_jobs j ON j.id=q.job_id JOIN sources s ON s.id=j.source_id
                 JOIN tasks t ON t.source_id=s.id LEFT JOIN web_dispatch d ON d.task_id=t.id
@@ -633,7 +687,7 @@ class FavoritesSync:
                           (account, self.config.get('mixed_enabled', False), can_schedule)).fetchall()
         for row in rows:
             manual_amount = row['video_budget_cny']
-            amount = Decimal(str(self.config['video_budget_cny']))
+            amount = Decimal(str(self._budget(db, 'video_budget_cny')))
             if row['kind'] == 'image':
                 try:
                     quote_options = {}
@@ -648,7 +702,7 @@ class FavoritesSync:
                     continue
                 if manual_amount is not None and amount > Decimal(manual_amount):
                     continue
-            if manual_amount is None and amount > remaining:
+            if manual_amount is None and (amount <= 0 or amount > remaining):
                 continue
             db.execute('INSERT INTO favorites_conversion VALUES (?,?,?,?)', (row['id'], account, day, manual_amount or str(amount)))
             if manual_amount is None:

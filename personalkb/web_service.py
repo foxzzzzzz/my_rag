@@ -286,6 +286,11 @@ class WebService:
                             or (dispatch and dispatch['state'] in ('pending', 'working'))):
                         failure.pop('video_recovery', None)
                     d.update(failure)
+                    if t['error_code'] == 'favorites_budget_exceeded':
+                        quote = self.dispatcher.favorites_reauthorization(c, t)
+                        if quote:
+                            d['favorites_reauthorization'] = quote
+                        d.setdefault('retry_blocked_reason', 'favorites_budget_exceeded')
             upload_stages = sum(row['name'] in ASR_UPLOAD_STAGES for row in rows)
             if rows:
                 if any(r['name']=='html-text' for r in rows): d['progress']['total_stages']=1
@@ -329,8 +334,17 @@ class WebService:
         items = []
         budget = self.pc.get('budget')
         available = None
+        try:
+            sync = self.favorites_sync if self.webcfg['live_video_enabled'] else None
+        except WorkflowError as exc:
+            if exc.code != 'invalid_favorites_config':
+                raise
+            sync = None
+        waits = sync.conversion_waits() if sync else {}
         for task in tasks:
             item = self._task(task)
+            if task['status'] == 'queued' and task['id'] in waits:
+                item['conversion_wait'] = waits[task['id']]
             error = (item.get('dispatch') or {}).get('error_code') or item['error_code']
             recovery = item.get('model_recovery') or {}
             amount = recovery.get('authorized_amount') or recovery.get('amount')
@@ -352,13 +366,14 @@ class WebService:
     def budget(self):
         from .budget_view import overview
         result = overview(self.store, self.pc['budget'], self.webcfg)
-        return {**result, **self._favorites_budget_limits()}
+        return {**result, **self._favorites_budget_limits(),
+                'favorites_reauthorizations': self._favorites_reauthorizations()}
 
     def change_budget(self, payload):
         from .budget_view import change_limit
         limits = self._favorites_budget_limits()
         result = change_limit(self.store, self.pc['budget'], self.webcfg, payload)
-        return {**result, **limits}
+        return {**result, **limits, 'favorites_reauthorizations': self._favorites_reauthorizations()}
 
     def _favorites_budget_limits(self):
         sync = self.favorites_sync
@@ -377,6 +392,20 @@ class WebService:
         if not sync:
             raise WorkflowError('favorites_disabled')
         return sync.limits(self.douyin_album.config['max_images'], payload=payload)
+
+    def _favorites_reauthorizations(self):
+        entries = []
+        with self.store._tx() as c:
+            tasks = c.execute("""SELECT t.*,s.original_name FROM tasks t JOIN sources s ON s.id=t.source_id
+                WHERE t.status='failed' AND t.error_code='favorites_budget_exceeded'
+                ORDER BY t.updated_at DESC""").fetchall()
+            for task in tasks:
+                quote = self.dispatcher.favorites_reauthorization(c, task)
+                if quote:
+                    metadata = title_metadata(c, task['source_id'])
+                    title = metadata['display_title'] or metadata['original_title'] or task['original_name']
+                    entries.append({'task_id': task['id'], 'title': title, **quote})
+        return entries
 
     def trash(self):
         from datetime import datetime, timezone

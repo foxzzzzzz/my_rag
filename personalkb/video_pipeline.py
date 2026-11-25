@@ -21,6 +21,7 @@ from .video_services import ProviderError
 from .summary_structure import summary_fields
 
 DEFAULT_CHAT_TIMEOUT_RETRIES = 1
+VIDEO_STRATEGY_KEYS = ('models', 'strategy', 'storage', 'prices', 'default_profile')
 MEDIA_FAILURES = frozenset({'media_cache_changed', 'media_workdir_busy', 'media_workdir_unverified',
                            'resource_limit', 'media_timeout', 'media_command_failed', 'media_missing_duration',
                            'media_missing_video', 'media_video_timeline_invalid', 'audio_not_full_length',
@@ -47,8 +48,7 @@ def _legacy_text_prompts(strategy):
     return prompts
 
 
-def _bind_strategy(journal, task_id, token, config, keys):
-    """Keep the prompt of a previously bound task when the full strategy still matches."""
+def _strategy_candidates(config, keys):
     strategy = dict(config['strategy'])
     old_prompts = _legacy_text_prompts(strategy)
     strategy.pop('legacy_text_prompt', None)
@@ -57,8 +57,8 @@ def _bind_strategy(journal, task_id, token, config, keys):
     suffix = config.get('video_notes_prompt_suffix') if 'storage' in keys else None
     if suffix:
         strategy['text_system_prompt'] += '\n' + suffix
-    config['strategy'] = strategy
     inputs = {key: config[key] for key in keys}
+    inputs['strategy'] = strategy
     if 'storage' in inputs:
         # These transport limits do not change the submitted audio or results.
         timeout_options = {'policy_timeout_seconds', 'policy_timeout_seconds说明',
@@ -73,9 +73,21 @@ def _bind_strategy(journal, task_id, token, config, keys):
     if old_vision_limit is not None:
         compatible.extend({**candidate, 'vision_max_tokens': old_vision_limit}
                           for candidate in [strategy, *compatible])
-    alternatives = {_digest({**inputs, 'strategy': candidate}): candidate for candidate in compatible}
-    bound = journal.bind(task_id, token, fingerprint, *alternatives)
-    config['strategy'] = alternatives.get(bound, strategy)
+    strategies = {fingerprint: strategy}
+    strategies.update({_digest({**inputs, 'strategy': candidate}): candidate for candidate in compatible})
+    return fingerprint, strategies
+
+
+def video_strategy_for_fingerprint(config, fingerprint):
+    _, strategies = _strategy_candidates(config, VIDEO_STRATEGY_KEYS)
+    return strategies.get(fingerprint)
+
+
+def _bind_strategy(journal, task_id, token, config, keys):
+    """Keep the prompt of a previously bound task when the full strategy still matches."""
+    fingerprint, strategies = _strategy_candidates(config, keys)
+    bound = journal.bind(task_id, token, fingerprint, *(candidate for candidate in strategies if candidate != fingerprint))
+    config['strategy'] = strategies[bound]
     return bound
 
 
@@ -333,6 +345,16 @@ def _preflight(journal, tid, pc, amounts, retries=None, restored=(), *, extra=De
         raise WorkflowError('budget_invalid_or_exceeded')
 
 
+def video_reservation_amounts(config, frame_indexes, audio_seconds, *, has_audio):
+    reserve = config['strategy']['reserve_cny']
+    amounts = {'text': Decimal(str(reserve['text']))}
+    if has_audio:
+        per_second = Decimal(str(config['prices']['asr_per_second']))
+        amounts['asr_submit'] = max(Decimal(str(reserve['asr'])), Decimal(str(audio_seconds)) * per_second)
+    amounts.update({f'vision-{index}': Decimal(str(reserve['vision'])) for index in frame_indexes})
+    return amounts
+
+
 def _favorites_budget_preflight(store, task_id, amounts, *, extra=Decimal(0)):
     """Enforce the durable per-video ceiling reserved by automatic dispatch."""
     with closing(sqlite3.connect(store.db_path)) as db:
@@ -399,7 +421,7 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
     valid_rebuilt_media = False
     try:
         vision_limit = pc['strategy']['vision_max_tokens']
-        fingerprint = _bind_strategy(journal, task_id, token, pc, ('models', 'strategy', 'storage', 'prices', 'default_profile'))
+        fingerprint = _bind_strategy(journal, task_id, token, pc, VIDEO_STRATEGY_KEYS)
         legacy_upload = resume and journal.restore_legacy_upload(task_id, token)
         retries = {}
         restored = set()
@@ -481,12 +503,9 @@ def _guarded_run_video(workflow_config, pipeline_config, secrets, *, task_id=Non
             if visual_only or any(row['name'] == 'asr_visual_only' and row['status'] == 'completed' for row in stages):
                 asr = {'text':'', 'segments':[], 'transcript_status':'visual_only'}
                 restored.add('asr_submit')
-            amounts = {'text':Decimal(str(pc['strategy']['reserve_cny']['text']))}
-            if audio is not None:
-                asr_price = Decimal(str(pc['prices']['asr_per_second']))
-                asr_amount = max(Decimal(str(pc['strategy']['reserve_cny']['asr'])), Decimal(str(audio_seconds)) * asr_price)
-                amounts['asr_submit'] = asr_amount
-            amounts.update({'vision-' + str(f['index']):Decimal(str(pc['strategy']['reserve_cny']['vision'])) for f in frames})
+            amounts = video_reservation_amounts(pc, (frame['index'] for frame in frames), audio_seconds,
+                                                has_audio=audio is not None)
+            asr_amount = amounts.get('asr_submit')
             _favorites_budget_preflight(store, task_id, amounts)
             _preflight(journal, task_id, pc, amounts, retries, restored)
             if rebuild_media:

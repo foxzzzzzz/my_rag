@@ -379,6 +379,146 @@ class PipelineIntegration(unittest.TestCase):
             self.assertEqual(row['model_diagnostic'], {'code':'empty_or_truncated_model_output',
                 'stage':'vision-0', 'provider_request_id':'chatcmpl-fixture'})
 
+    def test_favorites_video_reauthorization_api_reuses_task_and_media(self):
+        from uuid import uuid4
+
+        from fastapi.testclient import TestClient
+        from personalkb.web_app import create_app, load_web_config
+        from personalkb.web_service import WebService
+
+        prepared = []
+        media_seconds = 2113.250875
+
+        def long_media(source, work, wc, pc, *, heartbeat):
+            manifest = work/'media-manifest.json'
+            if not manifest.is_file():
+                prepared.append(work)
+                (work/'audio.wav').write_bytes(b'audio')
+                frames = []
+                for index in range(32):
+                    path = work/f'frame-{index}.jpg'
+                    blob = str(index).encode()
+                    path.write_bytes(blob)
+                    frames.append({'index': index, 'seconds': index, 'file': path.name,
+                                   'sha256': hashlib.sha256(blob).hexdigest()})
+                manifest.write_text(json.dumps({'audio': {'file': 'audio.wav'}, 'audio_seconds': media_seconds,
+                                                'frames': frames}), encoding='utf-8')
+            saved = json.loads(manifest.read_text(encoding='utf-8'))
+            return {'audio_path': str(work/'audio.wav'), 'audio_seconds': saved['audio_seconds'],
+                    'duration_seconds': saved['audio_seconds'],
+                    'frames': [{**frame, 'path': str(work/frame['file'])} for frame in saved['frames']]}
+
+        with make_store(self.wc)._tx() as db:
+            db.execute('CREATE TABLE favorites_conversion (task_id TEXT PRIMARY KEY, amount TEXT NOT NULL)')
+            db.execute("INSERT INTO favorites_conversion VALUES (?,'4.05')", (self.task,))
+            db.execute('CREATE TABLE favorites_queue (task_id TEXT, status TEXT)')
+            db.execute("INSERT INTO favorites_queue VALUES (?,'conversion_failed')", (self.task,))
+        with self.assertRaisesRegex(WorkflowError, 'favorites_budget_exceeded'):
+            legacy_config = {**self.pc, 'strategy': {**self.pc['strategy'],
+                              'vision_max_tokens': self.pc['legacy_vision_max_tokens']}}
+            run_video(self.wc, legacy_config, {}, task_id=self.task, services=self.s, storage=self.storage, media=long_media)
+        config = load_web_config()
+        config.update(dispatch_enabled=False, live_video_enabled=True)
+        config['trusted_hosts'].append('testserver')
+        service = WebService(self.wc, self.pc, config, video_runner=lambda wc, pc, keys, **options:
+                             run_video(wc, pc, keys, services=self.s, storage=self.storage, media=long_media, **options))
+        with service.store._tx() as db:
+            db.execute('UPDATE tasks SET attempts=2 WHERE id=?', (self.task,))
+        url = f'/api/tasks/{self.task}/reauthorize-favorites'
+        with TestClient(create_app(self.wc, self.pc, config, service)) as client:
+            headers = {'x-csrf-token': client.get('/api/session').json()['csrf_token']}
+            quote = client.get('/api/tasks').json()['items'][0]['favorites_reauthorization']
+            self.assertEqual((quote['authorized_cny'], quote['required_cny']), ('4.05', '4.12'))
+            self.assertEqual(client.get('/api/budget').json()['favorites_reauthorizations'][0]['task_id'], self.task)
+            payload = {'allow_paid': True, 'request_id': str(uuid4()), 'amount_cny': '4.12',
+                       'expected_ceiling_cny': '4.05', 'expected_required_cny': '4.12'}
+            service.pc = {**self.pc, 'prices': {**self.pc['prices'], 'asr_per_second': '0.00009'}}
+            try:
+                blocked = client.get('/api/tasks').json()['items'][0]['favorites_reauthorization']
+                self.assertEqual(blocked['blocked_reason'], 'favorites_reauthorization_strategy_changed')
+                self.assertIsNone(blocked['required_cny'])
+                self.assertEqual(client.post(url, headers=headers, json=payload).json()['error'],
+                                 'favorites_reauthorization_strategy_changed')
+                task = service.store.get_task(self.task)
+                self.assertEqual((task['status'], task['attempts']), ('failed', 2))
+                self.assertEqual(self.s.submit_count, 0)
+            finally:
+                service.pc = self.pc
+            original_frame = prepared[0] / 'frame-0.jpg'
+            moved_frame = original_frame.with_suffix('.bak')
+            original_frame.rename(moved_frame)
+            try:
+                blocked = client.get('/api/budget').json()['favorites_reauthorizations'][0]
+                self.assertEqual(blocked['blocked_reason'], 'favorites_reauthorization_media_unavailable')
+            finally:
+                moved_frame.rename(original_frame)
+            for changes, expected in (
+                ({'allow_paid': False}, 'paid_consent_required'),
+                ({'expected_required_cny': '4.11'}, 'favorites_reauthorization_conflict'),
+                ({'amount_cny': '4.11'}, 'favorites_budget_exceeded'),
+                ({'amount_cny': '5.01'}, 'budget_invalid_or_exceeded'),
+            ):
+                response = client.post(url, headers=headers, json={**payload, **changes})
+                self.assertEqual(response.json()['error'], expected)
+            response = client.post(f'/api/tasks/{self.task}/retry', headers=headers, json={'allow_paid': True})
+            self.assertEqual(response.json()['error'], 'favorites_budget_exceeded')
+            self.assertEqual(service.store.get_task(self.task)['attempts'], 2)
+            self.assertEqual(self.s.submit_count, 0)
+            accepted = client.post(url, headers=headers, json=payload).json()
+            duplicate = client.post(url, headers=headers, json=payload).json()
+            self.assertEqual(accepted, {'task_id': self.task, 'dispatch_state': 'pending', 'duplicate': False})
+            self.assertEqual(duplicate, {**accepted, 'duplicate': True})
+            self.assertEqual(client.get('/api/budget').json()['favorites_reauthorizations'], [])
+            self.assertEqual(service.dispatcher.process_next()['dispatch_state'], 'done')
+            self.assertEqual(client.post(url, headers=headers, json=payload).json()['dispatch_state'], 'done')
+        self.assertEqual(self.status(), 'succeeded')
+        self.assertEqual((len(prepared), self.s.submit_count, self.s.vision_count), (1, 1, 32))
+        with service.store._tx() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM favorites_video_reauthorizations').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT amount FROM favorites_conversion').fetchone()[0], '4.12')
+
+    def test_tasks_survive_broken_optional_favorites_config_and_refresh(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from fastapi.testclient import TestClient
+        from personalkb.douyin_import import DouyinImporter
+        from personalkb.web_app import create_app, load_web_config
+        from personalkb.web_service import WebService
+
+        settings_path = self.root / 'favorites.json'
+        settings_path.write_text('{broken', encoding='utf-8')
+        config = load_web_config()
+        config.update(dispatch_enabled=False, live_video_enabled=True, favorites_sync_config=str(settings_path))
+        config['trusted_hosts'].append('testserver')
+        service = WebService(self.wc, self.pc, config)
+        with TestClient(create_app(self.wc, self.pc, config, service)) as client:
+            client.get('/api/session')
+            response = client.get('/api/tasks')
+            self.assertEqual(response.status_code, 200)
+            row, = response.json()['items']
+            self.assertEqual(row['id'], self.task)
+            self.assertNotIn('conversion_wait', row)
+
+            settings = json.loads(Path('config/douyin-daily-sync.json').read_text(encoding='utf-8'))
+            settings.update(enabled=True, auto_download=True, conversion_enabled=True)
+            settings_path.write_text(json.dumps(settings), encoding='utf-8')
+            sync = service.favorites_sync
+            sync.limits(40, payload={'max_images': 40, 'download_limit': 0, 'expected_revision': 0})
+            DouyinImporter(self.wc, {}, {})
+            day = datetime.now(ZoneInfo(settings['timezone'])).date().isoformat()
+            with service.store._tx() as db:
+                db.execute("UPDATE favorites_state SET state='ready',active='fixture',last_day=?", (day,))
+                task = service.store._row(db, 'tasks', self.task)
+                db.execute("""INSERT INTO douyin_jobs(id,canonical_url,work_id,status,source_id,created_at,updated_at)
+                    VALUES ('job','https://example.invalid','1','succeeded',?,0,0)""", (task['source_id'],))
+                db.execute("""INSERT INTO favorites_queue(account_id,work_id,automatic,job_id,status)
+                    VALUES ('fixture','1',1,'job','downloaded')""")
+            response = client.get('/api/tasks')
+            self.assertEqual(response.status_code, 200)
+            row, = response.json()['items']
+            self.assertEqual(row['conversion_wait'], {'code': 'favorites_daily_count_limit'})
+
     def test_default_timeout_retry_once_for_vision_and_text(self):
         from unittest.mock import Mock
         for name in ('vision', 'summarize'):

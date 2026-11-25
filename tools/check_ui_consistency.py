@@ -699,6 +699,108 @@ def verify_budget(browser, address, output, width, height):
     page.close()
 
 
+def verify_favorites_budget(browser, address, output, width, height):
+    class FavoritesBudgetFixture(Fixture):
+        def respond(self, route):
+            request = route.request
+            path = urlsplit(request.url).path.removeprefix('/api')
+            if path == '/budget/favorites-limits' and request.method == 'PATCH':
+                body = request.post_data_json
+                self.writes.append(('PATCH', path, body))
+                limits = self.budget['favorites_limits']
+                assert body == {'max_images': 40, 'download_limit': 6, 'expected_revision': 1,
+                                'video_budget_cny': '4.20', 'daily_budget_cny': '13.31'}
+                limits.update(body)
+                limits.update(revision=2, conversion_remaining_cny='2.57', changes=[{
+                    'previous_max_images': 40, 'max_images': 40, 'previous_download_limit': 5,
+                    'download_limit': 6, 'previous_video_budget_cny': '4.05', 'video_budget_cny': '4.20',
+                    'previous_daily_budget_cny': '12.15', 'daily_budget_cny': '13.31', 'changed_at': '2026-11-25T02:00:00Z',
+                }])
+                route.fulfill(json=limits)
+            elif path == '/tasks/task0/reauthorize-favorites' and request.method == 'POST':
+                body = request.post_data_json
+                self.writes.append(('POST', path, body))
+                assert re.fullmatch(r'[0-9a-f-]{36}', body['request_id'])
+                assert body == {'allow_paid': True, 'amount_cny': '4.12', 'request_id': body['request_id'],
+                                'expected_ceiling_cny': '4.05', 'expected_required_cny': '4.12'}
+                self.budget['favorites_reauthorizations'] = [
+                    item for item in self.budget['favorites_reauthorizations'] if item['task_id'] != 'task0'
+                ]
+                self.tasks[0].pop('favorites_reauthorization')
+                self.tasks[0].update(status='queued', error_code=None, dispatch={'state': 'pending'})
+                route.fulfill(json={'task_id': 'task0', 'dispatch_state': 'pending', 'duplicate': False})
+            else:
+                super().respond(route)
+
+    fixture = FavoritesBudgetFixture()
+    fixture.live_video_enabled = True
+    quote = {'authorized_cny': '4.05', 'required_cny': '4.12', 'available_cny': '5'}
+    fixture.tasks[0].update(status='failed', error_code='favorites_budget_exceeded',
+                            retry_blocked_reason='favorites_budget_exceeded', favorites_reauthorization=quote)
+    wait = {'required_cny': '2.57', 'available_cny': '1.41'}
+    fixture.tasks[4].update(status='queued', conversion_wait={'code': 'favorites_daily_budget_limit', **wait})
+    fixture.tasks[5].update(status='queued', conversion_wait={'code': 'favorites_daily_count_limit'})
+    fixture.budget.update(limit_cny='150.25', available_cny='50.809282', favorites_limits={
+        'day': '2026-11-25', 'max_images': 40, 'download_limit': 5, 'downloads_used': 4, 'conversions_used': 3,
+        'video_budget_cny': '4.05', 'daily_budget_cny': '12.15', 'conversion_reserved_cny': '10.74',
+        'conversion_remaining_cny': '1.41', 'revision': 1, 'changes': [],
+    }, favorites_reauthorizations=[
+        {'task_id': 'task0', 'title': fixture.sources[0]['title'], **quote},
+        {'task_id': 'old-strategy', 'title': '旧策略视频', 'authorized_cny': '4.05', 'required_cny': None,
+         'blocked_reason': 'favorites_reauthorization_strategy_changed'},
+    ])
+
+    page, errors = open_page(browser, address, fixture, width, height)
+    nav(page, '任务')
+    expect(page.get_by_text('等待每日转换预算', exact=False)).to_be_visible()
+    expect(page.get_by_text('等待每日转换名额', exact=True)).to_be_visible()
+    failed = page.locator('.task-item').filter(has_text=fixture.sources[0]['title'])
+    expect(failed.get_by_text('原授权 ¥4.05 · 所需预留 ¥4.12')).to_be_visible()
+    expect(failed.get_by_role('button', name='重试', exact=True)).to_have_count(0)
+    screenshot(page, output, 'favorites-budget-waits')
+    failed.get_by_role('button', name='查看预算').click()
+    panel = page.locator('.budget-page')
+    expect(panel.get_by_text('转换已用 3 / 5 条', exact=False)).to_be_visible()
+    panel.get_by_role('spinbutton', name='每日定时处理上限（条/天）').fill('6')
+    panel.get_by_role('textbox', name='单视频预留上限（元）').fill('4.20')
+    panel.get_by_role('textbox', name='每日转换预算（元）').fill('13.31')
+    panel.get_by_role('button', name='保存限制').click()
+    expect(panel.get_by_text('收藏处理限制已保存。')).to_be_visible()
+    expect(panel.get_by_text('转换已用 3 / 6 条', exact=False)).to_be_visible()
+    expect(panel.get_by_text('每日转换 ¥12.15 → ¥13.31', exact=False)).to_be_visible()
+    screenshot(page, output, 'favorites-budget-settings')
+
+    blocked = panel.get_by_role('listitem').filter(has_text='旧策略视频')
+    expect(blocked).to_contain_text('无法用当前视频处理策略继续原任务')
+    expect(blocked.get_by_role('button', name='重新授权', exact=True)).to_be_disabled()
+    button = panel.get_by_role('listitem').filter(has_text=fixture.sources[0]['title']).get_by_role('button', name='重新授权', exact=True)
+    button.click()
+    dialog = page.get_by_role('dialog', name='确认重新授权')
+    submit = dialog.get_by_role('button', name='确认授权', exact=True)
+    amount = dialog.get_by_role('textbox', name='本次授权上限（元）')
+    expect(amount).to_have_value('4.12')
+    expect(submit).to_be_disabled()
+    dialog.get_by_role('button', name='取消').click()
+    expect(button).to_be_focused()
+    assert not any(path.endswith('/reauthorize-favorites') for _, path, _ in fixture.writes)
+    button.click()
+    dialog.get_by_role('checkbox', name='我同意本次转换可能产生的模型费用').check()
+    amount.fill('4.11')
+    expect(submit).to_be_disabled()
+    amount.fill('5.01')
+    expect(submit).to_be_disabled()
+    amount.fill('4.12')
+    expect(submit).to_be_enabled()
+    screenshot(page, output, 'favorites-budget-reauthorize')
+    submit.click()
+    expect(panel.get_by_text('已重新授权，任务已排队。')).to_be_visible()
+    expect(button).to_have_count(0)
+    assert sum(path.endswith('/reauthorize-favorites') for _, path, _ in fixture.writes) == 1
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px shared favorites limits, wait reasons and reauthorization passed')
+    page.close()
+
+
 def verify_favorites_filters(browser, address, output, width, height):
     fixture = Fixture()
     page, errors = open_page(browser, address, fixture, width, height)
@@ -938,6 +1040,7 @@ def main():
         for width, height in ((1440, 900), (390, 844)):
             verify_video_recovery(browser, address, args.screenshots, width, height)
             verify_budget(browser, address, args.screenshots, width, height)
+            verify_favorites_budget(browser, address, args.screenshots, width, height)
             verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)
             verify_favorites_filters(browser, address, args.screenshots, width, height)

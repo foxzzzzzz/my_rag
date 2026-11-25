@@ -340,7 +340,6 @@ def test_lower_download_limit_preserves_dispatched_jobs_and_manual_import(system
     assert sync.limits(40, payload=update)['downloads_used'] == 1
     monkeypatch.setattr(downloader, 'process_next', finish)
     assert tick(items)['status'] == 'succeeded'
-    assert tick(items)['favorites'] == 'conversion_queued'
     assert tick(items) is None
     assert sync.select('a', [EXTENDED_WORK], COOKIE, rights_confirmed=True, allow_paid=True,
                        video_budget_cny='4.05', image_quotes={EXTENDED_WORK: '10.08'}, extended_image_count=45) == {'queued': 1}
@@ -350,6 +349,7 @@ def test_lower_download_limit_preserves_dispatched_jobs_and_manual_import(system
         assert db.execute('SELECT COUNT(*) FROM favorites_download_slots').fetchone()[0] == 1
         assert db.execute('SELECT job_id FROM favorites_queue WHERE work_id=?', ('102',)).fetchone()[0] is None
     sync.limits(40, payload={**update, 'download_limit': 1, 'expected_revision': 1})
+    assert tick(items)['favorites'] == 'conversion_queued'
     assert tick(items) is None
     tomorrow = now + timedelta(days=1)
     assert tick(items, day=tomorrow)['favorites'] == 'scanned'
@@ -699,3 +699,92 @@ def test_manual_quote_model_recovery_approved_index_and_cross_account_dedupe(sys
         assert sync.status(COOKIE)['items'][0]['status'] == 'deleted'
         assert sync.select('b', ['100'], COOKIE, rights_confirmed=True, allow_paid=True,
                            video_budget_cny='4.05', image_quotes={'100': quote}) == {'queued': 0}
+
+def test_shared_limit_budget_and_manual_override(system):
+    service, _, sync, tick, now, _ = system
+    establish(sync, tick, [work(100)], now - timedelta(days=1))
+    initial = sync.limits(40)
+    assert initial['download_limit'] == sync.config['download_limit']
+    changed = sync.limits(40, payload={'max_images': 40, 'download_limit': 5, 'video_budget_cny': '2.57', 'daily_budget_cny': '10.00', 'expected_revision': 0})
+    assert changed['video_budget_cny'] == '2.57'
+    with service.store._tx() as db:
+        assert sync._manual_budget(db) == '2.57'
+        day = now.date().isoformat()
+        for index in range(5):
+            db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (str(index), day, '1.00'))
+    snap = sync.limits(40)
+    assert (snap['conversions_used'], snap['conversion_reserved_cny'], snap['conversion_remaining_cny']) == (5, '5.00', '5.00')
+    with pytest.raises(WorkflowError, match='favorites_limits_conflict'):
+        sync.limits(40, payload={'max_images': 40, 'download_limit': 5, 'expected_revision': 0})
+
+
+def test_committed_reservation_survives_lower_limits(system):
+    service, _, sync, tick, now, _ = system
+    establish(sync, tick, [work(100)], now)
+    day = datetime.now(ZoneInfo(sync.config['timezone'])).date().isoformat()
+    with service.store._tx() as db:
+        db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', ('reserved', day, '2.57'))
+    sync.limits(40, payload={'max_images': 40, 'download_limit': 0, 'video_budget_cny': '1.00', 'daily_budget_cny': '0.00', 'expected_revision': 0})
+    with service.store._tx() as db:
+        assert sync.can_claim_conversion(db, {'task_id': 'reserved', 'account_id': 'a', 'day': day, 'amount': '2.57'}, COOKIE)
+        yesterday = (datetime.now(ZoneInfo(sync.config['timezone'])).date() - timedelta(days=1)).isoformat()
+        assert not sync.can_claim_conversion(db, {'task_id': 'old', 'account_id': 'a', 'day': yesterday, 'amount': '2.57'}, COOKIE)
+
+
+def test_legacy_limit_database_migration(tmp_path):
+    from personalkb.workflow_store import WorkflowStore
+    path = tmp_path / 'legacy.sqlite'
+    with sqlite3.connect(path) as db:
+        db.executescript('''CREATE TABLE favorites_limit_settings (id INTEGER PRIMARY KEY, max_images INTEGER NOT NULL, download_limit INTEGER NOT NULL, revision INTEGER NOT NULL);
+            INSERT INTO favorites_limit_settings VALUES (1,40,5,2);
+            CREATE TABLE favorites_limit_changes (revision INTEGER PRIMARY KEY, previous_max_images INTEGER NOT NULL, max_images INTEGER NOT NULL, previous_download_limit INTEGER NOT NULL, download_limit INTEGER NOT NULL, changed_at TEXT NOT NULL DEFAULT '');''')
+    store = WorkflowStore(path)
+    with store._tx() as db:
+        from personalkb.favorites_limits import saved_limits
+        row = saved_limits(db)
+        assert (row['download_limit'], row['revision'], row['video_budget_cny']) == (5, 2, None)
+
+def test_conversion_wait_explains_count_and_budget(system):
+    service, _, sync, tick, now, _ = system
+    establish(sync, tick, [work(100)], now - timedelta(days=1))
+    items = [work(101), work(100)]
+    tick(items)
+    tick(items)
+    sync.limits(40, payload={'max_images': 40, 'download_limit': 5, 'video_budget_cny': '2.57', 'daily_budget_cny': '5.41', 'expected_revision': 0})
+    day = datetime.now(ZoneInfo(sync.config['timezone'])).date().isoformat()
+    with service.store._tx() as db:
+        for index in range(5):
+            db.execute('INSERT INTO favorites_conversion_slots VALUES (?,?,?)', (f'prior{index}', day, '0.80'))
+    tick(items)
+    waits = sync.conversion_waits()
+    assert len(waits) == 1
+    assert next(iter(waits.values())) == {'code': 'favorites_daily_count_limit', 'required_cny': '2.57', 'available_cny': '1.41'}
+    with service.store._tx() as db:
+        db.execute("DELETE FROM favorites_conversion_slots WHERE task_id='prior0'")
+    wait = next(iter(sync.conversion_waits().values()))
+    assert wait == {'code': 'favorites_daily_budget_limit', 'required_cny': '2.57', 'available_cny': '2.21'}
+    task_id = next(iter(waits))
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    with service.store._tx() as db:
+        db.execute("UPDATE favorites_queue SET task_id=?,status='conversion_queued' WHERE work_id='101'", (task_id,))
+        db.execute("INSERT INTO favorites_conversion VALUES (?,'a',?,'2.57')", (task_id, yesterday))
+        db.execute("INSERT INTO web_dispatch(task_id,mode,state,requested) VALUES (?,'run','pending',0)", (task_id,))
+    assert sync.conversion_waits() == {task_id: wait}
+
+def test_legacy_positional_limit_write_preserves_budget(system):
+    service, _, sync, _, _, _ = system
+    sync.limits(40, payload={'max_images': 40, 'download_limit': 5, 'video_budget_cny': '2.57', 'daily_budget_cny': '10.00', 'expected_revision': 0})
+    with service.store._tx() as db:
+        db.execute('''INSERT INTO favorites_limit_settings VALUES (1,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET max_images=excluded.max_images,
+            download_limit=excluded.download_limit, revision=excluded.revision''', (35, 4, 2))
+        db.execute('''INSERT INTO favorites_limit_changes
+            (revision,previous_max_images,max_images,previous_download_limit,download_limit)
+            VALUES (2,40,35,5,4)''')
+    current = sync.limits(40)
+    assert (current['max_images'], current['download_limit'], current['revision']) == (35, 4, 2)
+    assert (current['video_budget_cny'], current['daily_budget_cny']) == ('2.57', '10.00')
+    changed = sync.limits(40, payload={'max_images': 36, 'download_limit': 4, 'expected_revision': 2})
+    assert changed['revision'] == 3
+    assert changed['video_budget_cny'] == '2.57'
+    assert changed['changes'][0]['previous_video_budget_cny'] == '2.57'

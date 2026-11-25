@@ -408,6 +408,8 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
         if action in ('archive', 'unarchive'): return service.dispatcher.set_archived(task_id, action == 'archive')
         if action=='cancel': return service.dispatcher.cancel(task_id)
         if action=='recover-model': return service.dispatcher.recover_model(task_id, payload)
+        if action=='reauthorize-favorites':
+            return await run_in_threadpool(service.dispatcher.reauthorize_favorites, task_id, payload)
         if action in ('visual-only', 'rebuild-media'):
             return service.dispatcher.recover_video(task_id, action, allow_paid=payload.get('allow_paid', False))
         if action=='retry': return service.dispatcher.retry(task_id,allow_paid=payload.get('allow_paid',False),processing_mode=payload.get('processing_mode'))

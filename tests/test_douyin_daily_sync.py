@@ -115,6 +115,32 @@ def test_daily_quota_and_no_tail_false_positive(sync_env, monkeypatch):
     assert sync.status('cookie')['state'] == 'paused'
 
 
+def test_saved_daily_limit_dispatches_five_downloads_and_five_conversions(sync_env, monkeypatch):
+    sync, downloader, dispatcher = sync_env
+    baseline(sync_env, range(11, 0, -1))
+    new_page = page('account-a', range(18, 0, -1), exhausted=True)
+    scan(sync_env, new_page)
+    sync.config['conversion_enabled'] = True
+    sync.limits(40, payload={'max_images': 40, 'download_limit': 5, 'expected_revision': 0,
+                             'daily_budget_cny': '20.25'})
+    monkeypatch.setattr(downloader, 'status', lambda: {'enabled': True})
+
+    def download(*, job_id):
+        with sync.store._tx() as db:
+            work = db.execute('SELECT work_id FROM douyin_jobs WHERE id=?', (job_id,)).fetchone()[0]
+        source = sync.store.import_source('video', work.zfill(64), f'douyin-{work}.mp4', work)['source']
+        with sync.store._tx() as db:
+            db.execute("UPDATE douyin_jobs SET status='succeeded',source_id=? WHERE id=?", (source['id'], job_id))
+        return {'id': job_id, 'error_code': None}
+
+    monkeypatch.setattr(downloader, 'process_next', download)
+    for _ in range(20):
+        sync.tick('cookie', lambda *_: new_page, downloader, dispatcher, now=datetime(2026, 11, 13, 6))
+    assert len(rows(sync_env, 'favorites_download_slots')) == 5
+    assert len(rows(sync_env, 'favorites_conversion_slots')) == 5
+    assert [row['status'] for row in rows(sync_env, 'favorites_queue')].count('queued') == 2
+
+
 def test_paid_backfill_and_daily_sync_have_separate_slots(sync_env, monkeypatch):
     sync, downloader, dispatcher = sync_env
     baseline(sync_env, range(11, 0, -1))
@@ -253,3 +279,27 @@ def test_conversion_waits_for_verified_cookie_and_current_day(sync_env, monkeypa
     assert dispatcher._claim() is None
     scan(sync_env, page('account-a', [1], exhausted=True))
     assert dispatcher._claim()['task_id'] == task
+
+
+def test_same_day_album_claim_respects_mixed_gate(sync_env, monkeypatch):
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    sync = sync_env[0]
+    sync.config.update(conversion_enabled=True, schedule_enabled=False, mixed_enabled=False)
+    monkeypatch.setattr(sync, '_state', lambda db: dict(state='ready', scan_requested=False, active='a', credential=sync._credential('cookie')))
+    db = MagicMock()
+    db.execute.return_value.fetchone.side_effect = [None, ('image',), None, ('image',)]
+    reservation = dict(task_id='t', account_id='a', day=datetime.now(ZoneInfo(sync.config['timezone'])).date().isoformat(), amount='4')
+    assert not sync.can_claim_conversion(db, reservation, 'cookie')
+    sync.config['mixed_enabled'] = True
+    assert sync.can_claim_conversion(db, reservation, 'cookie')
+
+
+def test_saved_quote_cannot_enable_disabled_manual(sync_env, monkeypatch):
+    from personalkb import favorites_limits
+    sync = sync_env[0]
+    monkeypatch.setattr(favorites_limits, 'saved_limits', lambda db: {'video_budget_cny': '8.00'})
+    sync.config['manual_video_budget_cny'] = None
+    assert sync._manual_budget(None) is None
+    sync.config['manual_video_budget_cny'] = '4.00'
+    assert sync._manual_budget(None) == '8.00'

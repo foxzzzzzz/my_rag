@@ -66,6 +66,16 @@ CREATE TRIGGER IF NOT EXISTS tasks_updated AFTER UPDATE ON tasks BEGIN UPDATE ta
         with self._tx() as c:
             if 'content_pruned_at' not in [r[1] for r in c.execute('PRAGMA table_info(versions)')]:
                 c.execute('ALTER TABLE versions ADD COLUMN content_pruned_at TEXT')
+            settings_columns = {r[1] for r in c.execute('PRAGMA table_info(favorites_limit_settings)')}
+            c.execute('CREATE TABLE IF NOT EXISTS favorites_budget_settings (id INTEGER PRIMARY KEY, video_budget_cny TEXT, daily_budget_cny TEXT)')
+            if 'video_budget_cny' in settings_columns and 'daily_budget_cny' in settings_columns:
+                c.execute('INSERT OR IGNORE INTO favorites_budget_settings SELECT id, video_budget_cny, daily_budget_cny FROM favorites_limit_settings')
+                c.execute('ALTER TABLE favorites_limit_settings DROP COLUMN video_budget_cny')
+                c.execute('ALTER TABLE favorites_limit_settings DROP COLUMN daily_budget_cny')
+            existing = {r[1] for r in c.execute('PRAGMA table_info(favorites_limit_changes)')}
+            for column in ('previous_video_budget_cny', 'video_budget_cny', 'previous_daily_budget_cny', 'daily_budget_cny'):
+                if column not in existing:
+                    c.execute(f'ALTER TABLE favorites_limit_changes ADD COLUMN {column} TEXT')
             review_columns = {r[1] for r in c.execute('PRAGMA table_info(reviews)')}
             if 'title_request' not in review_columns:
                 c.execute('ALTER TABLE reviews ADD COLUMN title_request TEXT')

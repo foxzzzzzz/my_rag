@@ -1,10 +1,11 @@
 """Persisted, explicit browser processing requests; no implicit paid scans."""
 import os
 import json
+import re
 import threading
 import time
 import uuid
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
 from .douyin_album_processing import ALBUM_TEXT_RETRY_MODE, album_text_retry_plan
 from .video_services import SUMMARY_FORMAT_ERRORS
@@ -12,10 +13,11 @@ from .workflow_store import ASR_UPLOAD_STAGES, WorkflowError
 from .video_journal import initialize_chat_attempts, is_chat_stage, legacy_upload_interruption
 from .video_recovery import (PARTIAL_MEDIA_ERRORS, TERMINAL_ASR_ERRORS, can_rebuild_media, can_use_visual_only,
                              media_workspace, terminal_asr_stage)
-from .workflow import _root
+from .workflow import ROOT, _root
 
 VIDEO_RECOVERY_MODES = ('visual-only', 'rebuild-media')
 MODEL_RECOVERY_DISPATCH_MODES = ('recover-model', 'recover-album-text')
+FAVORITES_REAUTHORIZE_MODE = 'reauthorize-favorites'
 HARD_VIDEO_FAILURES = frozenset({'invalid_frame', 'empty_frames', 'media_cache_changed', 'media_workdir_unverified',
                                 'media_missing_duration', 'media_missing_video', 'media_video_timeline_invalid',
                                 'invalid_media_duration', 'audio_not_full_length', 'source_integrity'})
@@ -56,11 +58,127 @@ class WebDispatcher:
         with self.store._tx() as c:
             c.execute('CREATE TABLE IF NOT EXISTS web_dispatch (task_id TEXT PRIMARY KEY, mode TEXT NOT NULL, state TEXT NOT NULL, requested REAL NOT NULL, claimed REAL, owner TEXT)')
             c.execute('CREATE TABLE IF NOT EXISTS web_task_archive (task_id TEXT PRIMARY KEY)')
+            c.execute("""CREATE TABLE IF NOT EXISTS favorites_video_reauthorizations (
+                request_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, previous_cny TEXT NOT NULL,
+                required_cny TEXT NOT NULL, amount_cny TEXT NOT NULL, created REAL NOT NULL)""")
             if 'error_code' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
                 c.execute('ALTER TABLE web_dispatch ADD COLUMN error_code TEXT')
             if 'processing_mode' not in {r[1] for r in c.execute('PRAGMA table_info(web_dispatch)')}:
                 c.execute("ALTER TABLE web_dispatch ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'preview'")
             initialize_chat_attempts(c)
+
+    def favorites_reauthorization(self, c, task):
+        if (task['status'] != 'failed' or task['error_code'] != 'favorites_budget_exceeded'
+                or task_is_archived(c, task['id'])):
+            return None
+        source = self.store._row(c, 'sources', task['source_id'])
+        if source['deleted'] or source['kind'] not in ('video', 'mp4'):
+            return None
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE name='favorites_conversion' AND type='table'").fetchone():
+            return None
+        row = c.execute('SELECT amount FROM favorites_conversion WHERE task_id=?', (task['id'],)).fetchone()
+        if not row:
+            return None
+        quote = {'authorized_cny': row['amount'], 'required_cny': None}
+        if (not self.config['live_video_enabled'] or task['stage'] != 'preparing_video'
+                or task['attempts'] >= self.store.max_attempts or task['external_started']
+                or task_stages(c, task['id'])
+                or c.execute('SELECT 1 FROM video_chat_attempts WHERE task_id=?', (task['id'],)).fetchone()
+                or c.execute("SELECT 1 FROM web_dispatch WHERE task_id=? AND state IN ('pending','working')",
+                             (task['id'],)).fetchone()
+                or c.execute("""SELECT 1 FROM tasks WHERE source_id=? AND id<>? AND
+                    status IN ('queued','running','needs_attention')""", (task['source_id'], task['id'])).fetchone()):
+            return {**quote, 'blocked_reason': 'favorites_reauthorization_unavailable'}
+        manifest = media_workspace(_root(self.service.wc), task['id']) / 'media-manifest.json'
+        media = self.store.data_root / source['blob_relpath']
+        from .video_pipeline import video_reservation_amounts, video_strategy_for_fingerprint
+        has_runs = c.execute("SELECT 1 FROM sqlite_master WHERE name='video_runs' AND type='table'").fetchone()
+        bound = c.execute('SELECT fingerprint FROM video_runs WHERE task_id=?', (task['id'],)).fetchone() if has_runs else None
+        strategy = video_strategy_for_fingerprint(self.service.pc, bound['fingerprint']) if bound else None
+        if strategy is None:
+            return {**quote, 'blocked_reason': 'favorites_reauthorization_strategy_changed'}
+        video_config = {**self.service.pc, 'strategy': strategy}
+        try:
+            if any(path.is_symlink() for path in (manifest, *manifest.parents)) or not media.is_file():
+                raise ValueError()
+            data = json.loads(manifest.read_text(encoding='utf-8'))
+            frames = [frame['index'] for frame in data['frames']]
+            seconds = Decimal(str(data['audio_seconds']))
+            has_audio = data['audio'] is not None
+            assets = [*data['frames'], data['audio']] if has_audio else data['frames']
+            if (not frames or any(type(index) is not int for index in frames)
+                    or frames != list(range(len(frames))) or not seconds.is_finite()
+                    or (seconds <= 0 if has_audio else seconds != 0)):
+                raise ValueError()
+            for asset in assets:
+                name = asset['file']
+                path = manifest.parent / name
+                if path.parent != manifest.parent or path.is_symlink() or not path.is_file():
+                    raise ValueError()
+            required = sum(video_reservation_amounts(video_config, frames, seconds, has_audio=has_audio).values())
+            required = required.quantize(Decimal('.01'), rounding=ROUND_CEILING)
+        except (OSError, KeyError, TypeError, ValueError, InvalidOperation):
+            return {**quote, 'blocked_reason': 'favorites_reauthorization_media_unavailable'}
+        quote['required_cny'] = format(required, '.2f')
+        available = self._favorites_available_budget()
+        quote['available_cny'] = format(available, 'f')
+        if required > available:
+            quote['blocked_reason'] = 'budget_invalid_or_exceeded'
+        return quote
+
+    def _favorites_available_budget(self):
+        from .model_budget import budget_snapshot
+        budget = self.service.pc['budget']
+        overview = budget_snapshot(ROOT / budget['ledger'], budget['research_limit'])
+        return min(Decimal(str(budget['run_limit'])), Decimal(overview['available_cny']))
+
+    def reauthorize_favorites(self, task_id, payload):
+        if payload.get('allow_paid') is not True:
+            raise WorkflowError('paid_consent_required')
+        value = payload.get('amount_cny')
+        request_id = payload.get('request_id')
+        if (not isinstance(value, str) or not re.fullmatch(r'[0-9]+(?:\.[0-9]{1,2})?', value)
+                or not isinstance(request_id, str)):
+            raise WorkflowError('invalid_request')
+        try:
+            request_id = uuid.UUID(request_id).hex
+            amount = Decimal(value).quantize(Decimal('.01'))
+        except (ValueError, InvalidOperation):
+            raise WorkflowError('invalid_request') from None
+        previous_amount = payload.get('expected_ceiling_cny')
+        required_amount = payload.get('expected_required_cny')
+        with self.store._tx() as c:
+            task = self.store._row(c, 'tasks', task_id)
+            prior = c.execute('SELECT * FROM favorites_video_reauthorizations WHERE request_id=?',
+                              (request_id,)).fetchone()
+            if prior:
+                if (prior['task_id'], prior['previous_cny'], prior['required_cny'], Decimal(prior['amount_cny'])) != (
+                        task_id, previous_amount, required_amount, amount):
+                    raise WorkflowError('favorites_reauthorization_conflict')
+                dispatch = c.execute('SELECT state FROM web_dispatch WHERE task_id=?', (task_id,)).fetchone()
+                return {'task_id': task_id, 'dispatch_state': dispatch['state'] if dispatch else None, 'duplicate': True}
+            quote = self.favorites_reauthorization(c, task)
+            if not quote or quote['authorized_cny'] != previous_amount:
+                raise WorkflowError('favorites_reauthorization_conflict')
+            if quote.get('blocked_reason'):
+                raise WorkflowError(quote['blocked_reason'])
+            if quote['required_cny'] != required_amount:
+                raise WorkflowError('favorites_reauthorization_conflict')
+            if amount < Decimal(required_amount):
+                raise WorkflowError('favorites_budget_exceeded')
+            if amount > self._favorites_available_budget():
+                raise WorkflowError('budget_invalid_or_exceeded')
+            now = time.time()
+            c.execute('INSERT INTO favorites_video_reauthorizations VALUES (?,?,?,?,?,?)',
+                      (request_id, task_id, previous_amount, required_amount, str(amount), now))
+            c.execute('UPDATE favorites_conversion SET amount=? WHERE task_id=?', (str(amount), task_id))
+            c.execute("UPDATE favorites_queue SET status='conversion_queued' WHERE task_id=?", (task_id,))
+            c.execute("UPDATE tasks SET status='queued',error_code=NULL WHERE id=?", (task_id,))
+            c.execute("""INSERT INTO web_dispatch(task_id,mode,state,requested,processing_mode)
+                VALUES (?,?,'pending',?,'preview') ON CONFLICT(task_id) DO UPDATE SET
+                    mode=excluded.mode,state=excluded.state,requested=excluded.requested,
+                    claimed=NULL,owner=NULL,error_code=NULL""", (task_id, FAVORITES_REAUTHORIZE_MODE, now))
+            return {'task_id': task_id, 'dispatch_state': 'pending', 'duplicate': False}
 
     def video_failure(self, c, task, stages):
         reason = task['error_code']
@@ -233,6 +351,8 @@ class WebDispatcher:
             source = self.store._row(c, 'sources', task['source_id'])
             if source['deleted']: raise WorkflowError('source_deleted')
             if task_is_archived(c, task_id): raise WorkflowError('task_archived')
+            if task['error_code'] == 'favorites_budget_exceeded':
+                raise WorkflowError('favorites_budget_exceeded')
             if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
@@ -300,7 +420,7 @@ class WebDispatcher:
             row = None
             for pending in c.execute("SELECT * FROM web_dispatch WHERE state='pending' ORDER BY requested").fetchall():
                 reservation = c.execute('SELECT * FROM favorites_conversion WHERE task_id=?', (pending['task_id'],)).fetchone() if has_favorites else None
-                if pending['mode'] in (*MODEL_RECOVERY_DISPATCH_MODES, *VIDEO_RECOVERY_MODES) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
+                if pending['mode'] in (*MODEL_RECOVERY_DISPATCH_MODES, *VIDEO_RECOVERY_MODES, FAVORITES_REAUTHORIZE_MODE) or not reservation or sync and sync.can_claim_conversion(c, reservation, cookie):
                     row = pending
                     break
             if not row: return None
@@ -377,6 +497,8 @@ class WebDispatcher:
             if source['kind'] in ('video', 'mp4'):
                 if not self.config['live_video_enabled']: raise WorkflowError('video_disabled')
                 if not allow_paid: raise WorkflowError('paid_consent_required')
+                if task['error_code'] == 'favorites_budget_exceeded':
+                    raise WorkflowError('favorites_budget_exceeded')
             elif source['kind'] == 'douyin_album' and not c.execute(
                 'SELECT 1 FROM favorites_conversion WHERE task_id=?', (task_id,)
             ).fetchone():

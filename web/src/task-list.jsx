@@ -131,6 +131,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const videoNextStep=albumTextRetry?null:videoRecovery?(visualOnly
     ? '可以用已提取的画面和来源原文生成待审核内容，语音栏会说明转录未完成。若原片应有人声，请先检查音轨。'
     : '确认后会保留原片及旧缓存，并重新提取可用画面。')
+    :task.favorites_reauthorization&&!task.favorites_reauthorization.blocked_reason?'请前往预算页确认这条视频的新授权金额。'
+    :task.retry_blocked_reason==='favorites_budget_exceeded'?null
     :task.retry_blocked_reason==='attempts_exhausted'?'已达到常规尝试上限，请根据当前原因检查原片或处理环境。'
     :task.retry_blocked_reason==='unknown_submission'?'先核对原模型请求的状态和费用预留。'
     :task.retry_blocked_reason?'检查原片是否能完整播放。如需更换原片，请重新导入可用版本。':null;
@@ -148,6 +150,10 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
       {status==='attention'&&summary?<span className={`task-line${videoNextStep?' task-line--diagnosis':''}`} title={summary}>{summary}</span>
         :status==='running'?<span>{[stage,progress].filter(Boolean).join(' · ')}</span>
         :stage&&status==='completed'?<span className="muted">{stage}</span>:null}
+      {task.conversion_wait&&<span className="muted">{task.conversion_wait.code==='favorites_daily_count_limit'?'等待每日转换名额':task.conversion_wait.code==='favorites_daily_budget_limit'?'等待每日转换预算':'等待转换'}{task.conversion_wait.required_cny!=null&&` · 需要 ¥${task.conversion_wait.required_cny}，可用 ¥${task.conversion_wait.available_cny}`}</span>}
+      {task.favorites_reauthorization&&<span className="muted">原授权 ¥{task.favorites_reauthorization.authorized_cny}
+        {task.favorites_reauthorization.required_cny!=null&&<> · 所需预留 ¥{task.favorites_reauthorization.required_cny}</>}
+      </span>}
       {status==='attention'&&task.attempts>=task.max_attempts&&task.retry_blocked_reason&&
         <span className="muted">已尝试 {task.attempts} 次 · 常规上限 {task.max_attempts} 次</span>}
       {status==='attention'&&budgetBlocked&&budgetBlock&&<span className="muted">本次需预留 ¥{budgetBlock.required_cny}，项目当前可用 ¥{budgetBlock.available_cny}</span>}
@@ -158,7 +164,8 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
     </div>
     <div className="task-actions">
       {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>{albumTextRetry?'仅重试文本汇总':'处理模型请求'}</button>}
-      {status==='attention'&&budgetBlocked&&<button type="button" onClick={onBudget}>查看预算</button>}
+      {(task.conversion_wait||task.favorites_reauthorization)&&<button type="button" onClick={onBudget}>查看预算</button>}
+      {status==='attention'&&budgetBlocked&&!task.favorites_reauthorization&&<button type="button" onClick={onBudget}>查看预算</button>}
       {videoRecovery&&item&&!item.deleted&&!task.archived&&(enabled&&!paid
         ?<RetryConsentHint taskId={task.id} label={recoveryAction} prompt="继续处理前，请在「处理设置」勾选同意模型费用。"/>
         :<button type="button" disabled={busy||!enabled} onClick={()=>onAction(task.id,videoRecovery.mode,{allow_paid:true})}>{recoveryAction}</button>)}

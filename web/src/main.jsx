@@ -437,13 +437,19 @@ function App() {
                     : <figure key={frame.index??index}>{thumbnail}<figcaption>{seconds} 秒</figcaption></figure>;
                 })}</div>:<p className="muted">暂无可查看的关键帧。</p>}
               </section>}
-              {source.kind==='douyin_album'&&selectedTab==='visual'&&<section className="album-evidence" aria-label="图文原图">
+              {source.kind==='douyin_album'&&selectedTab==='visual'&&<section className="album-evidence" aria-label="图文画面证据">
                 <h2>图文原图</h2>
-                {(result.images||[]).map((item,index)=><figure key={index}>
-                  <img loading="lazy" alt={'图 '+(index+1)} src={'/api/sources/'+source.id+'/album/'+(index+1)}/>
-                  <figcaption>图 {index+1}</figcaption>
-                  {item.text&&<DocumentView value={item.text}/>}
-                </figure>)}
+                {(result.images||[]).length ? <>
+                  {result.images.map((_,index)=><figure key={index}>
+                    <img loading="lazy" alt={'图 '+(index+1)} src={'/api/sources/'+source.id+'/album/'+(index+1)}/>
+                    <figcaption>图 {index+1}</figcaption>
+                  </figure>)}
+                  <h2>图片解析</h2>
+                  {result.images.map((item,index)=><section key={index} aria-label={'图 '+(index+1)+' 解析'}>
+                    <h3>图 {index+1} 解析</h3>
+                    {item.text ? <DocumentView value={item.text}/> : <p className="muted">暂无解析内容。</p>}
+                  </section>)}
+                </> : <p className="muted">暂无可查看的图片。</p>}
               </section>}
               {selectedTab==='visual'&&isVideo(source.kind)&&<h2 className="visual-text-heading">画面识别文字</h2>}
               {!(source.kind==='douyin_album'&&selectedTab==='visual')&&<div className={['summary','notes'].includes(selectedTab)?'source-prose':undefined}>
