@@ -801,6 +801,107 @@ def verify_favorites_budget(browser, address, output, width, height):
     page.close()
 
 
+def verify_task_favorites_reauthorization(browser, address, output, width, height):
+    class ReauthorizationFixture(Fixture):
+        def __init__(self):
+            super().__init__()
+            self.live_video_enabled = True
+            self.authorizations = []
+            self.accepted_request = None
+            self.tasks[0].update(
+                status='failed', error_code='favorites_budget_exceeded',
+                retry_blocked_reason='favorites_budget_exceeded',
+                favorites_reauthorization={'authorized_cny': '4.05', 'required_cny': '4.12', 'available_cny': '5.0001'},
+            )
+            self.tasks[2].update(
+                status='failed', archived=False, error_code='favorites_budget_exceeded',
+                retry_blocked_reason='favorites_budget_exceeded',
+                favorites_reauthorization={'authorized_cny': '4.05', 'required_cny': None,
+                                           'blocked_reason': 'favorites_reauthorization_strategy_changed'},
+            )
+
+        def respond(self, route):
+            request = route.request
+            path = urlsplit(request.url).path.removeprefix('/api')
+            if request.method != 'POST' or path != '/tasks/task0/reauthorize-favorites':
+                return super().respond(route)
+            payload = request.post_data_json
+            self.authorizations.append(payload)
+            assert re.fullmatch(r'[0-9a-f-]{36}', payload['request_id'])
+            assert payload == {'allow_paid': True, 'amount_cny': '4.12', 'request_id': payload['request_id'],
+                               'expected_ceiling_cny': '4.05', 'expected_required_cny': '4.12'}
+            if len(self.authorizations) == 1:
+                return route.fulfill(status=409, json={'error': 'favorites_reauthorization_conflict'})
+            if len(self.authorizations) == 2:
+                self.accepted_request = payload
+                self.tasks[0].pop('favorites_reauthorization')
+                self.tasks[0].pop('retry_blocked_reason')
+                self.tasks[0].update(status='queued', error_code=None, dispatch={'state': 'pending'})
+                return route.abort('failed')
+            assert payload == self.accepted_request
+            return route.fulfill(json={'task_id': 'task0', 'dispatch_state': 'pending', 'duplicate': True})
+
+    fixture = ReauthorizationFixture()
+    page, errors = open_page(browser, address, fixture, width, height)
+    nav(page, '任务')
+    row = page.locator('.task-item').filter(has_text=fixture.sources[0]['title'])
+    blocked = page.locator('.task-item').filter(has_text=fixture.sources[2]['title'])
+    button = row.get_by_role('button', name='重新授权并重试', exact=True)
+    expect(blocked.get_by_role('button', name='重新授权并重试', exact=True)).to_have_count(0)
+    expect(blocked.get_by_role('button', name='查看预算', exact=True)).to_be_visible()
+    expect(row.get_by_role('button', name='查看预算', exact=True)).to_be_visible()
+    expect(button).to_be_enabled()
+    button.scroll_into_view_if_needed()
+    screenshot(page, output, 'task-reauthorize-entry')
+
+    dialog = page.get_by_role('dialog', name='确认重新授权')
+    submit = dialog.get_by_role('button', name='确认授权', exact=True)
+    amount = dialog.get_by_role('textbox', name='本次授权上限（元）')
+    consent = dialog.get_by_role('checkbox', name='我同意本次转换可能产生的模型费用')
+    button.click()
+    expect(page.locator('.budget-page')).to_have_count(0)
+    expect(dialog).to_contain_text('原授权 ¥4.05')
+    expect(dialog).to_contain_text('本次至少需预留 ¥4.12')
+    expect(amount).to_have_value('4.12')
+    expect(submit).to_be_disabled()
+    dialog.get_by_role('button', name='取消', exact=True).click()
+    expect(dialog).to_be_hidden()
+    expect(button).to_be_focused()
+    button.click()
+    page.keyboard.press('Escape')
+    expect(dialog).to_be_hidden()
+    expect(button).to_be_focused()
+    assert not fixture.authorizations
+
+    button.click()
+    consent.check()
+    for value in ('4.11', '5.01'):
+        amount.fill(value)
+        expect(submit).to_be_disabled()
+    amount.fill('4.12')
+    screenshot(page, output, 'task-reauthorize-dialog')
+    submit.click()
+    expect(dialog.get_by_role('alert')).to_contain_text('任务状态或预留金额已更新')
+    dialog.get_by_role('button', name='取消', exact=True).click()
+
+    button.click()
+    consent.check()
+    submit.click()
+    expect(dialog.get_by_role('alert')).to_be_visible()
+    expect(submit).to_be_enabled()
+    # Simulate two submissions before React can render the disabled button.
+    submit.evaluate('button => { button.form.requestSubmit(button); button.form.requestSubmit(button); }')
+    expect(dialog).to_be_hidden()
+    expect(row.get_by_text('已排队', exact=True)).to_be_visible()
+    expect(button).to_have_count(0)
+    assert len(fixture.authorizations) == 3
+    assert fixture.authorizations[0]['request_id'] != fixture.authorizations[1]['request_id']
+    assert fixture.authorizations[1] == fixture.authorizations[2]
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    print(f'{width}px task reauthorization, cancel and retry guards passed')
+    page.close()
+
+
 def verify_favorites_filters(browser, address, output, width, height):
     fixture = Fixture()
     page, errors = open_page(browser, address, fixture, width, height)
@@ -1041,6 +1142,7 @@ def main():
             verify_video_recovery(browser, address, args.screenshots, width, height)
             verify_budget(browser, address, args.screenshots, width, height)
             verify_favorites_budget(browser, address, args.screenshots, width, height)
+            verify_task_favorites_reauthorization(browser, address, args.screenshots, width, height)
             verify_library_version_gate(browser, address, width, height)
             verify_revision_editor(browser, address, args.screenshots, width, height)
             verify_favorites_filters(browser, address, args.screenshots, width, height)

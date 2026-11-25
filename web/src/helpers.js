@@ -18,7 +18,7 @@ export function errorText(status, code) {
   if (code==='invalid_budget_limit') return '请输入大于零、最多两位小数的预算金额。';
   if (code==='favorites_limits_conflict') return '收藏处理限制已在别处修改，请刷新预算后再确认。';
   if (code==='invalid_favorites_limits') return '请检查图片上限、每日条数及预算金额。金额最多两位小数。';
-  if (code==='favorites_reauthorization_conflict') return '任务状态或预留金额已更新，请刷新预算后重新确认。';
+  if (code==='favorites_reauthorization_conflict') return '任务状态或预留金额已更新，请刷新页面后重新确认。';
   if (code==='favorites_reauthorization_media_unavailable') return '缺少可用于报价的原视频或媒体清单。';
   if (code==='favorites_reauthorization_strategy_changed') return '无法用当前视频处理策略继续原任务，请核对策略配置。';
   if (code==='favorites_reauthorization_unavailable') return '这条任务当前无法从费用预检处重试。';

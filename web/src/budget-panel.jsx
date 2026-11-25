@@ -26,6 +26,10 @@ function validMoney(value) {
   return /^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value);
 }
 
+export function canReauthorize(quote) {
+  return !!quote && !quote.blocked_reason && validMoney(quote.required_cny) && Number(quote.required_cny)>0;
+}
+
 function canonicalMoney(value) {
   const [whole, fraction=''] = value.split('.');
   return [whole, fraction.padEnd(2, '0')].join('.');
@@ -49,11 +53,6 @@ export function BudgetPanel({api, disabled, titleProps, displayTimezone, onSaved
   const [videoBudget, setVideoBudget] = useState('');
   const [dailyBudget, setDailyBudget] = useState('');
   const [authorization, setAuthorization] = useState(null);
-  const [authAmount, setAuthAmount] = useState('');
-  const [consent, setConsent] = useState(false);
-  const requestId = useRef(null);
-  const authorizationDialog = useRef(null);
-  const [authorizationError, setAuthorizationError] = useState('');
   const [authorizationMessage, setAuthorizationMessage] = useState('');
   const [favoritesError, setFavoritesError] = useState('');
   const [favoritesMessage, setFavoritesMessage] = useState('');
@@ -137,48 +136,8 @@ export function BudgetPanel({api, disabled, titleProps, displayTimezone, onSaved
     }
   }
 
-  function openAuthorization(item) {
-    setAuthorization(item);
-    setAuthAmount(item.required_cny);
-    setConsent(false);
-    setAuthorizationError('');
-    setAuthorizationMessage('');
-    requestId.current = crypto.randomUUID();
-  }
-
-  function closeAuthorization() {
-    authorizationDialog.current?.close();
-    setAuthorization(null);
-    requestId.current = null;
-  }
-
-  const authorizationValid = authorization && validMoney(authAmount) &&
-    Number(authAmount)>=Number(authorization.required_cny) &&
-    (authorization.available_cny==null || Number(authAmount)<=Number(authorization.available_cny));
-
-  async function authorize(event) {
-    event.preventDefault();
-    if (disabled || !consent || !authorizationValid || busy) return;
-    setSaving('authorization');
-    setAuthorizationError('');
-    try {
-      const payload = {allow_paid:true, amount_cny:canonicalMoney(authAmount),
-        expected_ceiling_cny:authorization.authorized_cny, expected_required_cny:authorization.required_cny,
-        request_id:requestId.current};
-      await apiRef.current('/tasks/'+authorization.task_id+'/reauthorize-favorites', {
-        method:'POST', body:JSON.stringify(payload),
-      });
-      setData(previous=>({...previous, favorites_reauthorizations:previous.favorites_reauthorizations
-        .filter(item=>item.task_id!==authorization.task_id)}));
-      closeAuthorization();
-      setAuthorizationMessage('已重新授权，任务已排队。');
-      onSaved().catch(()=>{});
-    } catch (err) {
-      setAuthorizationError(err.message);
-    } finally {
-      setSaving(null);
-    }
-  }
+  function openAuthorization(item) { setAuthorization(item); setAuthorizationMessage(''); }
+  function closeAuthorization() { setAuthorization(null); }
   return <section className="budget-page">
     <div className="page-heading"><h1 {...titleProps}>预算</h1><button type="button" disabled={loading||busy} onClick={refresh}>刷新预算</button></div>
     {error && <p className="error" role="alert">{error}</p>}
@@ -231,34 +190,15 @@ export function BudgetPanel({api, disabled, titleProps, displayTimezone, onSaved
                 {item.blocked_reason&&<> · {errorText(400,item.blocked_reason)}</>}
               </div>
             </div>
-            <button type="button" disabled={disabled||busy||!!item.blocked_reason||item.required_cny==null}
+            <button type="button" disabled={disabled||busy||!canReauthorize(item)}
               onClick={()=>openAuthorization(item)}>重新授权</button>
           </li>)}
         </ul> : <p className="muted">暂无需要重新授权的任务。</p>}
       </section>}
-      {authorization&&<dialog ref={node=>{authorizationDialog.current=node; if(node&&!node.open) node.showModal();}}
-        aria-labelledby="reauthorize-title" className="favorites-dialog budget-authorization-dialog" onCancel={event=>{
-          event.preventDefault();
-          if (!busy) closeAuthorization();
-        }}>
-        <h2 id="reauthorize-title">确认重新授权</h2>
-        <p>{authorization.title || authorization.task_id}</p>
-        <p>原授权 {money(authorization.authorized_cny)} · 本次至少需预留 {money(authorization.required_cny)}</p>
-        <form onSubmit={authorize}>
-          <label>本次授权上限（元）<input inputMode="decimal" value={authAmount} disabled={busy} onChange={event=>{
-            setAuthAmount(event.target.value);
-            requestId.current=crypto.randomUUID();
-          }}/></label>
-          {authorization.available_cny!=null&&<p className="muted">当前最多可授权 {money(authorization.available_cny)}。</p>}
-          <label className="budget-authorization-consent"><input type="checkbox" checked={consent} disabled={busy}
-            onChange={event=>setConsent(event.target.checked)}/> 我同意本次转换可能产生的模型费用</label>
-          {authorizationError&&<p role="alert" className="error">{authorizationError}</p>}
-          <div className="budget-authorization-actions">
-            <button type="button" disabled={busy} onClick={closeAuthorization}>取消</button>
-            <button type="submit" className="primary" disabled={disabled||busy||!consent||!authorizationValid}>确认授权</button>
-          </div>
-        </form>
-      </dialog>}
+      {authorization&&<ReauthorizationDialog authorization={authorization} api={api} disabled={disabled||busy} onClose={closeAuthorization} onSuccess={(id,message)=>{
+        setData(previous=>({...previous,favorites_reauthorizations:previous.favorites_reauthorizations.filter(item=>item.task_id!==id)}));
+        setAuthorizationMessage(message); onSaved().catch(()=>{});
+      }}/>}
       <section className="budget-section"><h2>账本明细</h2>
         {data.entries.length ? <div className="budget-table-wrap"><table className="budget-table"><thead><tr><th>任务 / 请求</th><th>步骤</th><th>账本占用</th><th>消耗预估</th></tr></thead><tbody>
           {data.entries.map(entry=><tr key={entry.request_id}>
@@ -273,4 +213,69 @@ export function BudgetPanel({api, disabled, titleProps, displayTimezone, onSaved
       </section>
     </>}
   </section>;
+}
+
+export function ReauthorizationDialog({authorization, api, disabled, onClose, onSuccess}) {
+  const [authAmount,setAuthAmount]=useState(authorization.required_cny);
+  const [consent,setConsent]=useState(false);
+  const [authorizationError,setAuthorizationError]=useState('');
+  const [busy,setBusy]=useState(false);
+  const submitting=useRef(false);
+  const requestId=useRef(null);
+  const authorizationDialog=useRef(null);
+
+  function closeAuthorization() {
+    authorizationDialog.current?.close();
+    onClose();
+  }
+
+  const authorizationValid=validMoney(authAmount) && Number(authAmount)>=Number(authorization.required_cny) &&
+    (authorization.available_cny==null || Number(authAmount)<=Number(authorization.available_cny));
+
+  async function authorize(event) {
+    event.preventDefault();
+    if (disabled || !consent || !authorizationValid || submitting.current) return;
+    submitting.current=true;
+    setBusy(true);
+    setAuthorizationError('');
+    requestId.current ??= crypto.randomUUID();
+    const payload={allow_paid:true,amount_cny:canonicalMoney(authAmount),expected_ceiling_cny:authorization.authorized_cny,
+      expected_required_cny:authorization.required_cny,request_id:requestId.current};
+    try {
+      const result=await api('/tasks/'+authorization.task_id+'/reauthorize-favorites', {
+        method:'POST',keepSessionOnNetworkError:true,body:JSON.stringify(payload),
+      });
+      closeAuthorization();
+      const message=result.dispatch_state==='pending'?'已重新授权，任务已排队。':'已重新授权。';
+      onSuccess(authorization.task_id,message);
+    } catch (err) {
+      setAuthorizationError(err.message);
+    } finally {
+      submitting.current=false;
+      setBusy(false);
+    }
+  }
+  return <dialog ref={node=>{authorizationDialog.current=node; if(node&&!node.open) node.showModal();}}
+        aria-labelledby="reauthorize-title" className="favorites-dialog budget-authorization-dialog" onCancel={event=>{
+          event.preventDefault();
+          if (!submitting.current) closeAuthorization();
+        }}>
+        <h2 id="reauthorize-title">确认重新授权</h2>
+        <p>{authorization.title || authorization.task_id}</p>
+        <p>原授权 {money(authorization.authorized_cny)} · 本次至少需预留 {money(authorization.required_cny)}</p>
+        <form onSubmit={authorize}>
+          <label>本次授权上限（元）<input inputMode="decimal" value={authAmount} disabled={busy} onChange={event=>{
+            setAuthAmount(event.target.value);
+            requestId.current=null;
+          }}/></label>
+          {authorization.available_cny!=null&&<p className="muted">当前最多可授权 {money(authorization.available_cny)}。</p>}
+          <label className="budget-authorization-consent"><input type="checkbox" checked={consent} disabled={busy}
+            onChange={event=>setConsent(event.target.checked)}/> 我同意本次转换可能产生的模型费用</label>
+          {authorizationError&&<p role="alert" className="error">{authorizationError}</p>}
+          <div className="budget-authorization-actions">
+            <button type="button" disabled={busy} onClick={closeAuthorization}>取消</button>
+            <button type="submit" className="primary" disabled={disabled||busy||!consent||!authorizationValid}>确认授权</button>
+          </div>
+        </form>
+      </dialog>;
 }

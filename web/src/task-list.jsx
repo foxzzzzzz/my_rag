@@ -1,4 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {canReauthorize, ReauthorizationDialog} from './budget-panel';
 import {compareTime, TimeSortButton} from './time-sort';
 import {MediaTypeBadge} from './media-type-badge';
 import {errorText, formatDate, progressText, statusText, taskControls, taskActionLabel, uploadRecoveryText} from './helpers';
@@ -94,7 +95,7 @@ function RetryConsentHint({taskId,label='重试',prompt='重试前，请在「�
   </span>;
 }
 
-function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,expanded,toggle}) {
+function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,onReauthorize,expanded,toggle}) {
   const [recoveryAgreement,setRecoveryAgreement]=useState(null);
   const {mode,action:defaultAction,queuedForProcessing}=controls;
   const video=['video','mp4'].includes(item?.kind);
@@ -128,10 +129,12 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   const videoRecovery=!queuedForProcessing&&['visual-only','rebuild-media'].includes(task.video_recovery?.mode)?task.video_recovery:null;
   const visualOnly=videoRecovery?.mode==='visual-only';
   const recoveryAction=visualOnly?'仅按画面和原文继续':'重建缓存并重试';
+  const reauthorization=task.favorites_reauthorization;
+  const showReauthorization=task.status==='failed'&&video&&enabled&&!item.deleted&&!task.archived&&canReauthorize(reauthorization);
   const videoNextStep=albumTextRetry?null:videoRecovery?(visualOnly
     ? '可以用已提取的画面和来源原文生成待审核内容，语音栏会说明转录未完成。若原片应有人声，请先检查音轨。'
     : '确认后会保留原片及旧缓存，并重新提取可用画面。')
-    :task.favorites_reauthorization&&!task.favorites_reauthorization.blocked_reason?'请前往预算页确认这条视频的新授权金额。'
+    :showReauthorization?'请确认这条视频的新授权金额。'
     :task.retry_blocked_reason==='favorites_budget_exceeded'?null
     :task.retry_blocked_reason==='attempts_exhausted'?'已达到常规尝试上限，请根据当前原因检查原片或处理环境。'
     :task.retry_blocked_reason==='unknown_submission'?'先核对原模型请求的状态和费用预留。'
@@ -164,8 +167,10 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
     </div>
     <div className="task-actions">
       {recovery&&!expanded&&item&&!item.deleted&&!task.archived&&<button type="button" onClick={toggle}>{albumTextRetry?'仅重试文本汇总':'处理模型请求'}</button>}
-      {(task.conversion_wait||task.favorites_reauthorization)&&<button type="button" onClick={onBudget}>查看预算</button>}
-      {status==='attention'&&budgetBlocked&&!task.favorites_reauthorization&&<button type="button" onClick={onBudget}>查看预算</button>}
+      {showReauthorization&&<button type="button" disabled={busy}
+        onClick={()=>onReauthorize({...reauthorization,task_id:task.id,title})}>重新授权并重试</button>}
+      {(task.conversion_wait||reauthorization||(status==='attention'&&budgetBlocked))&&
+        <button type="button" onClick={onBudget}>查看预算</button>}
       {videoRecovery&&item&&!item.deleted&&!task.archived&&(enabled&&!paid
         ?<RetryConsentHint taskId={task.id} label={recoveryAction} prompt="继续处理前，请在「处理设置」勾选同意模型费用。"/>
         :<button type="button" disabled={busy||!enabled} onClick={()=>onAction(task.id,videoRecovery.mode,{allow_paid:true})}>{recoveryAction}</button>)}
@@ -221,7 +226,9 @@ function TaskRow({task,item,controls,config,busy,paid,open,onAction,onBudget,exp
   </article>;
 }
 
-export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,onBudget}) {
+export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,onBudget,api,onSaved}) {
+  const [authorization,setAuthorization]=useState(null);
+  const [authorizationMessage,setAuthorizationMessage]=useState('');
   const [archived,setArchived]=useState(false);
   const [timeDirection,setTimeDirection]=useState('desc');
   const [filters,setFilters]=useState(emptyFilters);
@@ -229,6 +236,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,
   const [htmlMode,setHtmlMode]=useState('preview');
   const [expandedId,setExpandedId]=useState(null);
   const listRef=useRef(null);
+  useEffect(()=>{if(!active)setAuthorization(null);},[active]);
   const sourcesById=useMemo(()=>new Map(sources.map(source=>[source.id,source])),[sources]);
   const query=filters.query.trim().toLocaleLowerCase();
   const filtered=useMemo(()=>tasks
@@ -257,7 +265,19 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,
     if(listRef.current)listRef.current.scrollTop=0;
   }
 
+  function openAuthorization(quote) {
+    setAuthorization(quote);
+    setAuthorizationMessage('');
+  }
+
+  function authorizationSucceeded(_,message) {
+    setAuthorizationMessage(message);
+    onSaved().catch(()=>setAuthorizationMessage(message+'暂时无法刷新列表，请稍后刷新。'));
+  }
+
   return <section className="list-page" hidden={!active}>
+    {active&&authorization&&<ReauthorizationDialog authorization={authorization} api={api} disabled={busy}
+      onClose={()=>setAuthorization(null)} onSuccess={authorizationSucceeded}/>}
     <div className="list-page-controls task-list-controls">
       <div className="page-heading">
         <h1 data-page-title tabIndex={-1}>任务</h1>
@@ -266,6 +286,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,
           <button type="button" aria-pressed={archived} onClick={()=>setArchived(true)}>已归档</button>
         </div>
       </div>
+      {authorizationMessage&&<p role="status">{authorizationMessage}</p>}
       <div className="task-filters">
         <label className="task-search">查找<input type="search" value={filters.query}
           onChange={event=>setFilter('query',event.target.value)} placeholder="资料标题、原文件名或任务 ID"/></label>
@@ -303,7 +324,7 @@ export function TaskList({active,loaded,tasks,sources,config,busy,open,onAction,
       </div>}
       {loaded&&!filtered.length&&<p>{filtering?'没有符合筛选条件的任务。':archived?'暂无已归档任务。':'暂无任务，可先导入资料。'}</p>}
       {filtered.map(({task,item,controls})=><TaskRow key={task.id} task={task} item={item} controls={controls}
-        config={config} busy={busy} paid={paid} open={open} onAction={onAction} onBudget={onBudget}
+        config={config} busy={busy} paid={paid} open={open} onAction={onAction} onBudget={onBudget} onReauthorize={openAuthorization}
         expanded={expandedId===task.id} toggle={()=>setExpandedId(id=>id===task.id?null:task.id)}/>)}
     </div>
   </section>;

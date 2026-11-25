@@ -88,14 +88,16 @@ function App() {
   }
   async function api(path, options={}) {
     const epoch=authEpoch.current;
+    const {keepSessionOnNetworkError, ...fetchOptions}=options;
     let response;
     try {
-      response = await fetch('/api'+path, {credentials:'same-origin', ...options, headers:{
+      response = await fetch('/api'+path, {credentials:'same-origin', ...fetchOptions, headers:{
         ...(options.body && !(options.body instanceof File) ? {'Content-Type':'application/json'} : {}),
         ...(options.method ? {'X-CSRF-Token':session?.csrf_token} : {}), ...options.headers}});
     } catch {
       if(epoch!==authEpoch.current) throw Error('LOGIN_REQUIRED');
-      setSession(null); setConnection('disconnected'); setStale(true); throw Error(errorText(0));
+      if(!keepSessionOnNetworkError) {setSession(null); setConnection('disconnected'); setStale(true);}
+      throw Error(errorText(0));
     }
     if(epoch!==authEpoch.current) throw Error('LOGIN_REQUIRED');
     if (!response.ok) {
@@ -352,7 +354,7 @@ function App() {
           <details><summary>上传Obsidian更新</summary><ObsidianPanel api={api} applied={id=>obsidianApplied(id,renderNavigation)} disabled={busy}/></details>
         </section></div><div className="import-dock" ref={setImportDock}/></>}
         {page==='budget'&&<BudgetPanel api={api} disabled={busy} titleProps={titleProps} displayTimezone={session.config.display_timezone} onSaved={refresh}/>}
-        <TaskList active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')}
+        <TaskList api={api} onSaved={refresh} active={tasksActive} loaded={dataLoaded} tasks={tasks} sources={sources} config={session.config} busy={busy} onBudget={()=>navigate('budget')}
           open={open} onAction={(id,action,body)=>run(async()=>{
             await api('/tasks/'+id+'/'+action,{method:'POST',body:JSON.stringify(body)});
             await refresh();
