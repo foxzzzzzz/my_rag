@@ -1,3 +1,4 @@
+import {latestReads, serialPoll} from './polling';
 import React, {useEffect, useId, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 import {albumQuoteErrors} from './helpers.js';
@@ -118,17 +119,20 @@ export function FavoritesPanel({api, pollInterval, disabled, dock}) {
   const [limitMessage,setLimitMessage]=useState('');
   const dialogTitle=useId();
   const limitsTitle=useId();
-  async function refresh(){const result=await api('/douyin/favorites/sync');setData(result);}
+  const reads=useRef(latestReads()), actionPending=useRef(false);
+  async function refresh(active=()=>true){
+    const current=reads.current.begin('favorites'), valid=()=>active()&&current();
+    try {const result=await api('/douyin/favorites/sync',{isCurrent:valid});if(valid())setData(result);}
+    catch(e){if(valid())throw e;}
+  }
   useEffect(()=>{
     if(!open)return;
-    let active=true;
-    const update=async()=>{try{const value=await api('/douyin/favorites/sync');if(active)setData(value);}catch(e){if(active)setMessage(e.message);}};
-    update();
-    const timer=setInterval(update,pollInterval);
-    return()=>{active=false;clearInterval(timer);};
+    const stop=serialPoll(async active=>{if(actionPending.current)return;try{await refresh(()=>active()&&!actionPending.current);}catch(e){if(active())setMessage(e.message);}},pollInterval);
+    return ()=>{stop();reads.current.invalidate('favorites');};
   },[open,pollInterval]);
   useEffect(()=>{setFilter('all');setSelected([]);setRights(false);setBatchMessage('');},[data?.active_account?.id]);
   async function action(path,body,success,report=setMessage){
+    actionPending.current=true;reads.current.invalidate('favorites');
     setBusy(true);report('');
     try{
       const result=await api(path,{method:'POST',body:JSON.stringify(body)});
@@ -136,7 +140,7 @@ export function FavoritesPanel({api, pollInterval, disabled, dock}) {
       try{await refresh();}catch{}
       return true;
     }catch(e){report(e.message);return false;}
-    finally{setBusy(false);}
+    finally{actionPending.current=false;setBusy(false);}
   }
   const items=data?.items||[];
   const groups={all:items,available:[],imported:[],other:[]};

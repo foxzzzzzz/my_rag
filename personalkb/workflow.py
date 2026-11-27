@@ -70,7 +70,7 @@ def make_store(config):
                          content_root=(root / config.get('content', {}).get('directory', 'knowledge')) if config.get('content', {}).get('enabled', False) else None, data_root=root)
 
 
-def import_file(config, path, rights_confirmed=False, *, commit_guard=None):
+def import_file(config, path, rights_confirmed=False, *, commit_guard=None, original_filename=None):
     from personalkb.workflow_store import WorkflowError
     if rights_confirmed is not True:
         raise WorkflowError('rights_required')
@@ -126,7 +126,7 @@ def import_file(config, path, rights_confirmed=False, *, commit_guard=None):
                     raise WorkflowError('source_integrity')
             else:
                 os.replace(temp, target)
-        return make_store(config).import_source(kind, digest, p.name, 'originals/' + digest,
+        return make_store(config).import_source(kind, digest, p.name if original_filename is None else original_filename, 'originals/' + digest,
                                                 commit_guard=commit_guard, install_blob=install_blob)
     finally:
         temp.unlink(missing_ok=True)

@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {RagPanel} from './rag';
 import {hasOlderSourceReviews} from './rag-state';
 import {guardedJson, logoutLocal, acquireWriter, releaseWriter, epochCurrent} from './auth-client';
+import {latestReads, serialPoll, waitForReads, affectsLibrary, mutationGuard} from './polling';
 import {ClassificationEditor, ObsidianPanel, DouyinPanel} from './management';
 import {FavoritesPanel} from './favorites-panel';
 import {CatalogManager} from './catalog-manager';
@@ -85,6 +86,8 @@ function App() {
   const [libraryFilters,setLibraryFilters]=useState(emptyLibraryFilters);
   const [dataLoaded,setDataLoaded] = useState(false);
   const [reviewEpoch,setReviewEpoch] = useState(0), [reviewPending,setReviewPending] = useState(false);
+  const [reviewFeedback,setReviewFeedback] = useState(null);
+  const reviewHeadingRef=useRef(null);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
   const [confirmation,setConfirmation] = useState(null);
   const dialogRef=useRef(null), dialogOpener=useRef(null);
@@ -96,7 +99,7 @@ function App() {
   const [files, setFiles] = useState([]), [rights, setRights] = useState(false), [uploads, setUploads] = useState([]);
   const draftRef = useRef(drafts), editRef = useRef(edits), detailRef = useRef(detail);
   const authEpoch=useRef(0), lastActivity=useRef(0);
-  const refreshOrder=useRef({issued:0,applied:0});
+  const reads=useRef(latestReads()), mutations=useRef(mutationGuard());
   const libraryScrollRef=useRef(null);
   const [importDock,setImportDock]=useState(null);
   const cache = useRef({}), openSequence = useRef(0), mainRef = useRef(null), videoRef = useRef(null), writing = useRef(null), lastSession = useRef(null);
@@ -114,19 +117,27 @@ function App() {
     draftRef.current[k].reviewer !== ui.default_reviewer || draftRef.current[k].decision !== 'approve');
 
   function clearPrivate() {
-    ++authEpoch.current; writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
+    ++authEpoch.current; mutations.current=mutationGuard(); writing.current=null; setBusy(false); ++openSequence.current; lastSession.current=null; cache.current={}; detailRef.current=null;
     lastActivity.current=0;
     setSession(null); setSources([]); setTasks([]); setTrash({items:[], retention_days:null}); setCatalog([]); setDetail(null); setSelectedVersion(null); setDrafts({}); setEdits({});setTitleEdits({});
     setDataLoaded(false); resetLibraryFilters(); setPage('library'); setFiles([]); setUploads([]); setRights(false);
     setSourcePaid(false); setConfirmation(null); setMessage('');
-    setReviewEpoch(v=>v+1); setReviewPending(false); setStale(false);
+    setReviewEpoch(v=>v+1); setReviewPending(false); setReviewFeedback(null); setStale(false);
   }
   async function login(event) {
     event.preventDefault(); setError(''); setBusy(true);
     try {
       const response=await fetch('/api/auth/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});
       setPassword('');
-      if(!response.ok) {setError(response.status===429?'尝试次数过多，请稍后再试。':'密码错误，请重试。'); return;}
+      if(!response.ok) {
+        const data=await response.json().catch(()=>null);
+        if(response.status===429)setError('尝试次数过多，请稍后再试。');
+        else if([400,401].includes(response.status)&&data?.error==='invalid_credentials')setError('密码错误，请重试。');
+        else if(response.status===413)setError('登录请求过大，请检查输入后重试。');
+        else if(response.status>=500)setError('登录服务暂时不可用，请稍后重试。');
+        else setError('登录请求未能完成，请刷新页面后重试。');
+        return;
+      }
       setAuthEnabled(true); setLoginRequired(false); await bootstrap();
     } catch {setConnection('disconnected');setError('无法连接服务。');} finally {setBusy(false);}
   }
@@ -137,27 +148,36 @@ function App() {
     catch {setError('退出请求未确认，请重新登录。');}
   }
   async function api(path, options={}) {
+    const done=affectsLibrary(path,options.method)?mutations.current.begin():null;
+    try {return await apiRequest(path,options);} finally {done?.();}
+  }
+  async function apiRequest(path, options={}) {
     const epoch=authEpoch.current;
-    const {keepSessionOnNetworkError, ...fetchOptions}=options;
+    const {keepSessionOnNetworkError, isCurrent=()=>true, ...fetchOptions}=options;
+    const valid=()=>epoch===authEpoch.current&&isCurrent();
     let response;
     try {
       response = await fetch('/api'+path, {credentials:'same-origin', ...fetchOptions, headers:{
         ...(options.body && !(options.body instanceof File) ? {'Content-Type':'application/json'} : {}),
         ...(options.method ? {'X-CSRF-Token':session?.csrf_token} : {}), ...options.headers}});
     } catch {
-      if(epoch!==authEpoch.current) throw Error('LOGIN_REQUIRED');
+      if(epoch!==authEpoch.current)throw Error('LOGIN_REQUIRED');
+      if(!valid()) throw Error('STALE_READ');
       if(!keepSessionOnNetworkError) {setSession(null); setConnection('disconnected'); setStale(true);}
       throw Error(errorText(0));
     }
-    if(epoch!==authEpoch.current) throw Error('LOGIN_REQUIRED');
+    if(!valid()) throw Error('STALE_READ');
     if (!response.ok) {
-      const data = await guardedJson(response,epoch,()=>authEpoch.current,requireLogin);
+      const data = await guardedJson(response,epoch,()=>valid()?epoch:NaN,()=>{if(valid())requireLogin();});
+      if(!valid()) throw Error('STALE_READ');
       if(response.status === 401) {setSession(null); setConnection('disconnected'); setStale(true);}
       const error = Error(data.error==='login_required'?'LOGIN_REQUIRED':errorText(response.status, data.error));
       error.code = data.error;
       throw error;
     }
-    return guardedJson(response,epoch,()=>authEpoch.current,requireLogin);
+    const result=await guardedJson(response,epoch,()=>valid()?epoch:NaN,()=>{if(valid())requireLogin();});
+    if(!valid()) throw Error('STALE_READ');
+    return result;
   }
   useEffect(()=>{
     const interval=session?.config.session_activity_interval_ms;
@@ -182,20 +202,31 @@ function App() {
     document.addEventListener('input',activity);document.addEventListener('change',activity);
     return ()=>{clearTimeout(timer);document.removeEventListener('input',activity);document.removeEventListener('change',activity);};
   },[session]);
-  async function refresh() {
-    const epoch=authEpoch.current;
-    const order=++refreshOrder.current.issued;
-    const lastApplied=refreshOrder.current.applied;
-    const [s,t,c] = await Promise.all([api('/sources'), api('/tasks'), api('/classifications')]);
-    if(epoch!==authEpoch.current||order<refreshOrder.current.applied) return;
-    const overlapped=lastApplied!==refreshOrder.current.applied;
-    refreshOrder.current.applied=order;
-    setSources(previous=>overlapped&&hasOlderSourceReviews(previous,s.items)?previous:s.items);
-    setTasks(t.items); setCatalog(c.items);setDataLoaded(true);
+  async function refresh(options={}) {
+    const epoch=authEpoch.current, current=reads.current.begin('library'), unchanged=mutations.current.current();
+    const valid=()=>epoch===authEpoch.current&&unchanged()&&current()&&(options.isCurrent?.() ?? true);
+    try {
+      const [s,t,c] = await waitForReads(['/sources','/tasks','/classifications'].map(path=>api(path,{...options,isCurrent:valid})));
+      if(!valid())return;
+      setSources(previous=>hasOlderSourceReviews(previous,s.items)?previous:s.items);
+      setTasks(t.items); setCatalog(c.items);setDataLoaded(true);
+    } catch(e) {if(valid())throw e;}
+  }
+  function invalidateDetail(id) {reads.current.invalidate('detail:'+id);}
+  async function readDetail(id, versionId=null, options={}) {
+    const epoch=authEpoch.current, current=reads.current.begin('detail:'+id), unchanged=mutations.current.current();
+    const valid=()=>epoch===authEpoch.current&&unchanged()&&current()&&(options.isCurrent?.() ?? true);
+    try {
+      const value=await api(detailPath(id,versionId),{...options,isCurrent:valid});
+      if(!valid())return null;
+      return value;
+    } catch(e) {if(valid())throw e;return null;}
   }
   async function run(action) {
     const owner=acquireWriter(writing), epoch=authEpoch.current;
     if (!owner) return;
+    reads.current.invalidate('library');
+    if(detailRef.current?.source.id)invalidateDetail(detailRef.current.source.id);
     setBusy(true); setError(''); setMessage('');
     try {await action();} catch (e) {if(epochCurrent(epoch,authEpoch)&&e.message!=='LOGIN_REQUIRED')setError(e.message);} finally {if(releaseWriter(writing,owner))setBusy(false);}
   }
@@ -216,10 +247,10 @@ function App() {
     const discard=options===true, versionId=options?.versionId||null;
     const sequence=++openSequence.current;
     setBusy(true);setError('');setMessage('');
+    const prior=cache.current[id];
     try {
-      const value=await api(detailPath(id,versionId),options?.background?{}:{headers:{'X-PKB-Activity':'user'}});
-      if (sequence!==openSequence.current) return;
-      const prior=cache.current[id];
+      const value=await readDetail(id,versionId,{...(options?.background?{}:{headers:{'X-PKB-Activity':'user'}}),isCurrent:()=>sequence===openSequence.current});
+      if (!value||sequence!==openSequence.current) return;
       const conflict=!discard && !versionId && prior?.current?.id!==value.current?.id && hasWork(draftKey(id,prior?.current?.id));
       if(page!=='detail'||detailRef.current?.source.id!==id)setSourceManagementOpen(false);
       showDetail(conflict?prior:value);setSelectedVersion(versionId);setStale(!!conflict);setTab('summary');setSourcePaid(false);setPage('detail');
@@ -248,8 +279,8 @@ function App() {
     const previous=detailRef.current, sequence=openSequence.current;
     await refresh();
     if(previous&&sequence===openSequence.current){
-      const value=await api(detailPath(previous.source.id,selectedVersion));
-      if(sequence===openSequence.current)syncDetail(value);
+      const value=await readDetail(previous.source.id,selectedVersion,{isCurrent:()=>sequence===openSequence.current});
+      if(value&&sequence===openSequence.current)syncDetail(value);
     }
   }
   const videoReprocessBusy = ['queued','running','needs_attention'].includes(detail?.task?.status)
@@ -258,9 +289,15 @@ function App() {
     await refresh();
     if(!id)return;
     if(originNavigation===openSequence.current)await open(id,{background:true});
-    else cache.current[id]=await api('/sources/'+id);
+    else {
+      const fresh=await readDetail(id);
+      if(fresh)cache.current[id]=fresh;
+    }
   }
-  function patchDraft(patch) {setDrafts(previous=>({...previous,[key]:updateReviewDraft(previous[key]||inputDraft(),patch)}));}
+  function patchDraft(patch) {
+    setReviewFeedback(null);
+    setDrafts(previous=>({...previous,[key]:updateReviewDraft(previous[key]||inputDraft(),patch)}));
+  }
   function setEdit(value) {setEdits(previous=>({...previous,[key]:value}));}
   function clearTitleEdit() {setTitleEdits(previous=>{const next={...previous};delete next[source.id];return next;});}
   function editTitle(value) {
@@ -294,17 +331,27 @@ function App() {
   async function submitReview() {
     if (!canSubmitReview(draft,session.config.quality_target) || stale || edit) return;
     const epoch=authEpoch.current, sequence=openSequence.current, sourceId=source.id;
+    function feedback(text,error=false) {
+      if(epochCurrent(epoch,authEpoch)&&sequence===openSequence.current)setReviewFeedback({key,text,error});
+    }
     const reviewId=draft.reviewId||crypto.randomUUID();patchDraft({reviewId});
     setReviewPending(true);setReviewEpoch(value=>value+1);
     try {
-      await api('/sources/'+source.id+'/reviews',{method:'POST',body:JSON.stringify({
+      invalidateDetail(sourceId);
+      await api('/sources/'+sourceId+'/reviews',{method:'POST',keepSessionOnNetworkError:true,body:JSON.stringify({
         version_id:current.id,content_sha256:current.content_sha256,score:Number(draft.score),decision:draft.decision,
         reviewer:draft.reviewer,review_id:reviewId,note:draft.note,tags:[],...titlePayload})});
       clearTitleEdit();
       setDrafts(previous=>{const next={...previous};delete next[key];return next;});
-      const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
-      if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId)showDetail(fresh);
-      await refresh();setMessage('审核已提交。');
+      const [detailResult,listResult]=await Promise.allSettled([
+        readDetail(sourceId,null,{keepSessionOnNetworkError:true,isCurrent:()=>sequence===openSequence.current}),
+        refresh({keepSessionOnNetworkError:true})
+      ]);
+      const fresh=detailResult.value;
+      if(fresh&&sequence===openSequence.current&&detailRef.current?.source.id===sourceId)showDetail(fresh);
+      feedback(fresh&&listResult.status==='fulfilled'?'审核已提交。':'审核已提交，页面状态暂未刷新。');
+    } catch(e) {
+      if(e.message!=='LOGIN_REQUIRED')feedback(e.message===errorText(0)?'审核提交结果未确认。请先核对审核记录。':e.message,true);
     } finally {
       // The response may be lost after the server committed; never retain pre-submit references.
       if(epochCurrent(epoch,authEpoch)){setReviewEpoch(value=>value+1);setReviewPending(false);}
@@ -330,15 +377,16 @@ function App() {
   useEffect(()=>{bootstrap();},[]);
   useEffect(()=>{
     if(!session)return;
-    let alive=true;refresh().catch(e=>{if(alive)setError(e.message);});
-    const timer=setInterval(()=>refresh().catch(e=>{if(alive)if(e.message!=='LOGIN_REQUIRED')setError(e.message);}),session.config.poll_interval_ms);
-    return()=>{alive=false;clearInterval(timer);};
+    return serialPoll(async active=>{if(writing.current||mutations.current.active())return;try{await refresh({isCurrent:()=>active()&&!writing.current});}catch(e){if(active()&&e.message!=='LOGIN_REQUIRED'&&e.message!=='STALE_READ')setError(e.message);}},session.config.poll_interval_ms);
   },[session]);
   useEffect(()=>{
     if(page!=='detail'||!session||!source?.id)return;
-    let alive=true;const path=detailPath(source.id,selectedVersion), sequence=openSequence.current;
-    const timer=setInterval(async()=>{try{const value=await api(path);if(alive&&sequence===openSequence.current)syncDetail(value);}catch(e){if(alive&&sequence===openSequence.current&&e.message!=='LOGIN_REQUIRED')setError(e.message);}},session.config.poll_interval_ms);
-    return()=>{alive=false;clearInterval(timer);};
+    const id=source.id, sequence=openSequence.current;
+    return serialPoll(async active=>{
+      if(writing.current||mutations.current.active())return;
+      try {const value=await readDetail(id,selectedVersion,{isCurrent:()=>active()&&!writing.current&&sequence===openSequence.current});if(value)syncDetail(value);}
+      catch(e){if(active()&&sequence===openSequence.current&&e.message!=='LOGIN_REQUIRED'&&e.message!=='STALE_READ')setError(e.message);}
+    },session.config.poll_interval_ms,false);
   },[page,session,source?.id,selectedVersion,renderNavigation]);
   useEffect(()=>{
     [...(mainRef.current?.querySelectorAll('[data-page-title]')||[])].find(element=>!element.closest('[hidden]'))?.focus({preventScroll:true});
@@ -438,6 +486,10 @@ function App() {
               <MediaTypeBadge kind={source.kind} includeWeb/> · {current?(!detail.viewing_history&&detail.eligible?'已批准，可用于知识库':detail.review?statusText(detail.review.decision):'待审核'):'待处理'}
               {detail.review&&` · ${detail.review.score} 分`} · {source.original_name}
             </p>
+            {current&&<button type="button" className="review-jump" aria-controls="source-review-heading" onClick={()=>{
+              reviewHeadingRef.current?.scrollIntoView({block:'start'});
+              reviewHeadingRef.current?.focus({preventScroll:true});
+            }}>{detail.viewing_history?'查看审核记录':'前往审核'}</button>}
             {source.original_title && source.original_title!==source.title && source.original_title!==source.original_name &&
               <p className="muted">原标题 {source.original_title}</p>}
             {current&&detail.versions?.length>1&&<label>查看版本 <select disabled={busy} value={detail.viewing_history?current.id:''} onChange={event=>open(source.id,{versionId:event.target.value||null})}><option value="">当前版本</option>{detail.versions.filter(version=>version.id!==source.current_version_id).slice().reverse().map(version=><option key={version.id} value={version.id}>{formatDate(version.created_at,session.config.display_timezone)} · {version.output_kind==='human_edited'?'人工修订':'处理结果'}{version.content_pruned_at?' · 内容已清理':''}</option>)}</select></label>}
@@ -455,9 +507,10 @@ function App() {
                   {Object.keys(fields).filter(name=>isVideo(source.kind)||!['transcript','visual'].includes(name)).map(name=><label className="edit-field" key={name}>{fields[name]}<textarea disabled={busy} value={edit[name]} onChange={event=>setEdit({...edit,[name]:event.target.value})}/></label>)}
                   <button className="primary" disabled={busy||stale} onClick={()=>run(async()=>{
                     const sequence=openSequence.current,sourceId=source.id;
+                    invalidateDetail(sourceId);
                     await api('/sources/'+sourceId+'/revisions',{method:'POST',body:JSON.stringify({expected_version_id:current.id,...edit})});setEdit(null);
-                    const fresh=await api('/sources/'+sourceId);cache.current[sourceId]=fresh;
-                    if(sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setSelectedVersion(null);setStale(false);setTab('summary');}
+                    const fresh=await readDetail(sourceId,null,{isCurrent:()=>sequence===openSequence.current});
+                    if(fresh&&sequence===openSequence.current&&detailRef.current?.source.id===sourceId){showDetail(fresh);setSelectedVersion(null);setStale(false);setTab('summary');}
                     await refresh();setMessage('已生成新版本，请重新审核。');
                   })}>保存新版本</button>
                   <button disabled={busy} onClick={()=>confirmAction('放弃修订','此版本尚未保存的人工修订将被放弃。',()=>setEdit(null))}>放弃修订</button>
@@ -527,7 +580,7 @@ function App() {
               {result.warnings&&<p className="notice">提示：{Array.isArray(result.warnings)?result.warnings.join('；'):textValue(result.warnings)}</p>}
               </>}
             </div>
-            <aside className="review-panel" aria-label={detail.viewing_history?'历史版本审核记录':'审核当前版本'}><h2>{detail.viewing_history?'审核记录':'审核'}</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
+            <aside className="review-panel" aria-label={detail.viewing_history?'历史版本审核记录':'审核当前版本'}><h2 id="source-review-heading" ref={reviewHeadingRef} tabIndex={-1}>{detail.viewing_history?'审核记录':'审核'}</h2><p>{detail.review?`${statusText(detail.review.decision)} · ${detail.review.score} 分`:'尚未审核'}</p>
               {!current?.content_pruned_at&&detail.media?.status==='removed'&&<p className="muted">原视频已超过保留期并清理，整理内容和证据仍可查看。</p>}
               {detail.review&&<><p className="muted">{detail.review.reviewer} · {formatDate(detail.review.created_at,session.config.display_timezone)}</p><p>审核意见：{detail.review.note||'无'}</p></>}
               {!detail.viewing_history&&<><p className="muted">批准门槛 {session.config.quality_target} 分。修改内容生成新版本后须重新审核。</p>
@@ -537,9 +590,10 @@ function App() {
               <label>审核人<input disabled={busy} value={draft.reviewer} onChange={event=>patchDraft({reviewer:event.target.value})}/></label><label>评分<input disabled={busy} type="number" min="0" max="100" step={ui.review_score_step} value={draft.score} onChange={event=>patchDraft({score:event.target.value})}/></label>
               <label>决定<select disabled={busy} value={draft.decision} onChange={event=>patchDraft({decision:event.target.value})}><option value="approve">批准</option><option value="rework">返工</option><option value="reject">拒绝</option></select></label><label>审核意见<textarea disabled={busy} value={draft.note} onChange={event=>patchDraft({note:event.target.value})}/></label>
               <p className="muted">草稿仅保留在当前打开的页面，刷新会丢失；保存草稿不会批准资料。</p><div className="actions">
-                <button disabled={busy||stale||!!edit||!validReview(draft.score,'rework',session.config.quality_target,draft.reviewer)} onClick={()=>{setDrafts(previous=>({...previous,[key]:saveReviewDraft(previous[key]||inputDraft())}));setMessage('评分草稿已保存，尚未提交审核。');}}>保存评分草稿</button>
+                <button disabled={busy||stale||!!edit||!validReview(draft.score,'rework',session.config.quality_target,draft.reviewer)} onClick={()=>{setDrafts(previous=>({...previous,[key]:saveReviewDraft(previous[key]||inputDraft())}));setReviewFeedback(null);}}>保存评分草稿</button>
                 <button className="primary" disabled={busy||stale||!!edit||!canSubmitReview(draft,session.config.quality_target)} onClick={()=>run(submitReview)}>{titleEdit?'保存标题并提交':'提交'}{statusText(draft.decision)}</button></div>
-              <p className="muted" role="status">{edit?'人工修订尚未提交，请先保存新版本或放弃修订。':reviewDraftSaved(draft)?'评分草稿已保存，请核对后明确提交。':'评分或意见尚未保存。'}</p></>}
+              {reviewFeedback?.key===key?<p className={reviewFeedback.error?'error':'notice'} role={reviewFeedback.error?'alert':'status'}>{reviewFeedback.text}</p>
+                :<p className="muted" role="status">{edit?'人工修订尚未提交，请先保存新版本或放弃修订。':reviewDraftSaved(draft)?'评分草稿已保存，请核对后明确提交。':'评分或意见尚未保存。'}</p>}</>}
             </aside></div>
           </>}
         </>}

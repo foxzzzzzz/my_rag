@@ -1,3 +1,4 @@
+import {latestReads, serialPoll, waitForReads} from './polling';
 import React, {useEffect, useRef, useState} from 'react';
 import {filterSources, labelIds, douyinErrorText, suggestionSelection, suggestionError} from './management-helpers';
 import {classificationTopicRequired} from './helpers';
@@ -77,18 +78,23 @@ export function ObsidianPanel({sourceId,api,applied,disabled}) {
 export function DouyinPanel({api,opened,pollInterval,disabled}) {
   const [status,S]=useState(null),[jobs,J]=useState([]),[text,T]=useState(''),[rights,R]=useState(false),[message,M]=useState(''),[working,W]=useState(false);
   const [checkResult,setCheckResult]=useState('');
-  const configCheck=useRef({running:false,revision:0});
-  async function refresh(){
-    const {running,revision}=configCheck.current;
-    const [s,j]=await Promise.all([running?null:api('/douyin/status'),api('/douyin/jobs')]);
-    if(s&&revision===configCheck.current.revision){
-      S(s);
-      setCheckResult(previous=>previous==='failed'?'':previous);
-    }
-    J(j.items);
+  const configCheck=useRef({running:false,revision:0}), reads=useRef(latestReads()), actionPending=useRef(false);
+  async function refresh(active=()=>true){
+    const current=reads.current.begin('jobs'), valid=()=>active()&&current();
+    try {
+      const {running,revision}=configCheck.current;
+      const [s,j]=await waitForReads([running?null:api('/douyin/status',{isCurrent:valid}),api('/douyin/jobs',{isCurrent:valid})]);
+      if(!valid())return;
+      if(s&&revision===configCheck.current.revision){
+        S(s);
+        setCheckResult(previous=>previous==='failed'?'':previous);
+      }
+      J(j.items);
+    } catch(e) {if(valid())throw e;}
   }
   async function checkDownloadConfig(){
     if(configCheck.current.running)return;
+    reads.current.invalidate('jobs');
     configCheck.current={running:true,revision:configCheck.current.revision+1};
     setCheckResult('checking');
     try{
@@ -100,8 +106,8 @@ export function DouyinPanel({api,opened,pollInterval,disabled}) {
       configCheck.current.running=false;
     }
   }
-  useEffect(()=>{let alive=true;const update=async()=>{try{if(alive)await refresh()}catch(e){if(alive)M(e.message)}};update();let id=setInterval(update,pollInterval);return()=>{alive=false;clearInterval(id)}},[pollInterval]);
-  async function submit(){W(true);M('');try{await api('/douyin/import',{method:'POST',body:JSON.stringify({share_text:text,rights_confirmed:rights})});T('');await refresh();M('下载任务已排队，完成后仍需在任务页明确启动模型处理。')}catch(e){M(e.message)}finally{W(false)}}
+  useEffect(()=>{const stop=serialPoll(async active=>{if(actionPending.current)return;try{await refresh(()=>active()&&!actionPending.current)}catch(e){if(active())M(e.message)}},pollInterval);return()=>{stop();reads.current.invalidate('jobs')}},[pollInterval]);
+  async function submit(){actionPending.current=true;reads.current.invalidate('jobs');W(true);M('');try{await api('/douyin/import',{method:'POST',body:JSON.stringify({share_text:text,rights_confirmed:rights})});T('');await refresh();M('下载任务已排队，完成后仍需在任务页明确启动模型处理。')}catch(e){M(e.message)}finally{actionPending.current=false;W(false)}}
   const ready=status&&status.enabled&&status.cookie_configured&&status.resolver_configured;
   const configStatus=!status?'检查中':!status.enabled?'尚未启用':!status.cookie_configured?'缺少私密 Cookie 配置':!status.resolver_configured?'缺少独立解析环境':'配置存在，Cookie 有效性待实际下载验证';
   const checkMessage=checkResult==='checking'?'正在检查下载配置…'
@@ -112,6 +118,6 @@ export function DouyinPanel({api,opened,pollInterval,disabled}) {
     <button type="button" disabled={checkResult==='checking'} onClick={checkDownloadConfig}>重新检查下载配置</button>
     <label>抖音分享文本<textarea value={text} onChange={e=>T(e.target.value)} placeholder="https://v.douyin.com/.../"/></label><label><input type="checkbox" checked={rights} onChange={e=>R(e.target.checked)}/> 我确认有权处理此作品，并仅下载平台允许的内容</label>
     <button disabled={disabled||working||!ready||!rights||!text.trim()} onClick={submit}>创建下载任务</button><p>请在运行知识库服务的机器上配置私密 Cookie。下载后需手动启动模型处理。</p>
-    {message&&<p role="status">{message}</p>}{jobs.map(j=><article key={j.id}><strong>下载任务 {j.work_id||j.id}</strong><p>{({queued:'排队中',running:'下载中',succeeded:'已导入，待启动处理',failed:'下载失败',needs_attention:'需要确认恢复'})[j.status]||j.status}</p>{j.error_code&&<p>{douyinErrorText(j.error_code)}；可上传 MP4 兜底。</p>}{['failed','needs_attention'].includes(j.status)&&<button disabled={working||!ready} onClick={async()=>{try{await api('/douyin/jobs/'+j.id+'/retry',{method:'POST',body:'{}'});await refresh()}catch(e){M(e.message)}}}>重试下载</button>}{j.source_id&&<button onClick={()=>opened(j.source_id)}>查看导入资料</button>}</article>)}
+    {message&&<p role="status">{message}</p>}{jobs.map(j=><article key={j.id}><strong>下载任务 {j.work_id||j.id}</strong><p>{({queued:'排队中',running:'下载中',succeeded:'已导入，待启动处理',failed:'下载失败',needs_attention:'需要确认恢复'})[j.status]||j.status}</p>{j.error_code&&<p>{douyinErrorText(j.error_code)}；可上传 MP4 兜底。</p>}{['failed','needs_attention'].includes(j.status)&&<button disabled={working||!ready} onClick={async()=>{if(actionPending.current)return;actionPending.current=true;W(true);reads.current.invalidate('jobs');try{await api('/douyin/jobs/'+j.id+'/retry',{method:'POST',body:'{}'});await refresh()}catch(e){M(e.message)}finally{actionPending.current=false;W(false)}}}>重试下载</button>}{j.source_id&&<button onClick={()=>opened(j.source_id)}>查看导入资料</button>}</article>)}
   </div>;
 }

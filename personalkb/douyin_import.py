@@ -146,10 +146,8 @@ class DouyinImporter:
                 download_cfg=dict(self.cfg); download_cfg['min_free_bytes']=max(self.cfg['min_free_bytes'],self.wc['min_free_bytes'])
                 self.downloader(data['media_url'],target,download_cfg)
                 if lost.is_set() or not self._heartbeat(id,token): raise WorkflowError('douyin_lease_expired')
-                imported=workflow.import_file(self.wc,target,rights_confirmed=True,commit_guard=fence)
+                imported=workflow.import_file(self.wc,target,rights_confirmed=True,commit_guard=fence,original_filename=f'douyin-{work}.mp4')
                 source_id=imported['source']['id']
-                if not imported.get('duplicate',False):
-                    with self.store._tx() as c: c.execute('UPDATE sources SET original_name=? WHERE id=?',(f'douyin-{work}.mp4',source_id))
         except Exception as exc:
             allowed={'invalid_share','douyin_unsafe_url','douyin_timeout','douyin_http_failed','douyin_redirect_limit','douyin_size_limit','disk_low','douyin_download_failed','douyin_resolver_failed','media_tool_missing','download_denied','download_permission_unknown','douyin_lease_expired'}
             error=exc.code if isinstance(exc,WorkflowError) and exc.code in allowed else 'douyin_import_failed'

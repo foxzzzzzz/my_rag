@@ -10,6 +10,7 @@
  --sidebar-width:216px; /* 桌面侧栏宽度 */
  --review-width:280px; --column-gap:36px; /* 阅读和审核列 */
  --radius:5px; --control-height:36px; /* 常用控件圆角及高度 */
+ --mobile-touch-height:44px; /* 手机主要操作及选择区域的最小触控尺寸 */
  --ui-size:14px; --body-size:16px; --heading-size:28px; --mobile-heading-size:22px; /* 界面、正文及页标题字号 */
  --sidebar-meta-size:13px; /* 侧栏状态和主题标题字号 */
  --connection-online:#285d46; /* 连接正常时的状态点颜色 */

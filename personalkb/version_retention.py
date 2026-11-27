@@ -17,10 +17,12 @@ def _candidates(db, source, policy, quality_target):
         LEFT JOIN reviews r ON r.seq = (SELECT MAX(seq) FROM reviews WHERE version_id=v.id)
         WHERE v.source_id=? AND v.id<>? AND v.content_pruned_at IS NULL
         ORDER BY v.created_at DESC, v.rowid DESC''', (source['id'], source['current_version_id'])).fetchall()
-    approved = [v['id'] for v in history if v['decision']=='approve' and v['score']>=quality_target]
-    keep_approved = set(approved[:policy['approved_history']])
-    others = [v for v in history if v['id'] not in keep_approved]
-    return others[policy['other_history']:]
+    approved = [v for v in history if v['decision'] == 'approve' and v['score'] is not None and v['score'] >= quality_target]
+    if not approved:
+        return history[policy['approved_history'] + policy['other_history']:]
+    approved_ids = {v['id'] for v in approved}
+    others = [v for v in history if v['id'] not in approved_ids]
+    return approved[policy['approved_history']:] + others[policy['other_history']:]
 
 
 def prune(store, policy, *, retry_only=False):

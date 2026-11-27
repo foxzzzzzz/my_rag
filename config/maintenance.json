@@ -35,9 +35,9 @@
     "enabled": true,
     "enabled说明": "定期冷备完成校验并发布后自动清理超限历史内容",
     "approved_history": 1,
-    "approved_history说明": "保留最近通过审核的历史版本份数",
+    "approved_history说明": "保留最新审核为批准且评分达标的历史版本份数；与其他名额独立，没有达标批准旧版时合并名额",
     "other_history": 1,
-    "other_history说明": "在已保留的当前版和批准旧版之外，按时间保留的历史版本份数"
+    "other_history说明": "存在达标批准旧版时，保留其余类别中最新的历史版本份数；两类剩余名额不互补"
   },
   "rag_config": null,
   "rag_config说明": "冷备识别活动索引所用的 RAG 配置路径。默认读取工作流配置同目录的 web.json，再回退到 config/rag.json。仅在 Web 使用其他配置路径时显式指定"

@@ -324,9 +324,11 @@
   }
 }
 @media (max-width:700px) {
+  .library-view { --library-check-target:var(--mobile-touch-height); }
   .library-view .list-page-controls { padding-block-end:10px }
   .library-view .page-heading .actions { margin-block:0 }
   .library-view .library-filters { margin-block-start:10px }
   .library-view .library-list-head { padding-inline:10px; column-gap:8px }
+  .library-view .library-list-head > label,.library-view .choices > label { min-height:var(--mobile-touch-height); }
   .library-view .library-list-columns { padding-inline:9px; column-gap:8px }
 }

@@ -137,10 +137,10 @@ def test_retry_preserves_pre_prune_snapshot_until_next_normal_rotation(library, 
 
     monkeypatch.setattr(version_retention, '_remove_files', original)
     result = maintenance.create_and_prune_version_history(config)
-    assert result['version_history_retention'] == {'pruned': 0, 'cleaned': 3, 'skipped': []}
+    assert result['version_history_retention'] == {'pruned': 0, 'cleaned': 2, 'skipped': []}
     assert result['version_history_recovery_snapshot'] == pre_prune
     assert not checkpoint.exists()
-    assert [v['id'] for v in store.list_versions(sid) if not v['content_pruned_at']] == [v['id'] for v in versions[-2:]]
+    assert [v['id'] for v in store.list_versions(sid) if not v['content_pruned_at']] == [v['id'] for v in versions[-3:]]
     assert not unique_frame.exists()
     assert store.assert_synced(sid)
 
@@ -174,3 +174,33 @@ def test_cleanup_skips_a_source_with_corrupt_content(library):
     }
     assert all(not v['content_pruned_at'] for v in store.list_versions(sid))
     assert old_file.read_bytes() == b'broken'
+
+
+@pytest.mark.parametrize(('decisions', 'quotas', 'kept'), [
+    (['rework', 'approve', 'approve', 'approve'], (1, 1), {'v0', 'v3'}),
+    (['approve', 'approve', 'approve', 'rework'], (1, 1), {'v3', 'v2'}),
+    (['approve', 'approve', 'approve', 'approve'], (1, 1), {'v3'}),
+    (['rework', None, 'rework', None], (1, 1), {'v3', 'v2'}),
+    (['rework', 'approve', 'approve', 'low'], (1, 1), {'v2', 'v3'}),
+    (['rework', 'approve', 'approve', 'rework'], (0, 1), {'v3'}),
+    (['rework', 'rework', 'rework', 'rework'], (0, 1), {'v3'}),
+])
+def test_independent_history_quotas_and_latest_review(decisions, quotas, kept):
+    db = sqlite3.connect(':memory:')
+    db.row_factory = sqlite3.Row
+    db.executescript("CREATE TABLE versions (id TEXT, source_id TEXT, created_at TEXT, content_pruned_at TEXT);"
+                     "CREATE TABLE reviews (seq INTEGER PRIMARY KEY, version_id TEXT, decision TEXT, score INTEGER);")
+    for i, decision in enumerate(decisions):
+        vid = f'v{i}'
+        db.execute('INSERT INTO versions VALUES (?, ?, ?, NULL)', (vid, 's', str(i)))
+        if decision:
+            db.execute('INSERT INTO reviews(version_id,decision,score) VALUES (?, ?, ?)',
+                       (vid, 'approve' if decision == 'low' else decision, 97 if decision == 'low' else 99))
+    # Latest review supersedes an earlier approval.
+    if decisions[0] == 'rework':
+        db.execute('INSERT INTO reviews(version_id,decision,score) VALUES (?, ?, 99)', ('v0', 'approve'))
+        db.execute('INSERT INTO reviews(version_id,decision,score) VALUES (?, ?, 90)', ('v0', 'rework'))
+    db.execute("INSERT INTO versions VALUES ('current', 's', '9', NULL)")
+    candidates = version_retention._candidates(db, {'id': 's', 'current_version_id': 'current'},
+        {'approved_history': quotas[0], 'other_history': quotas[1]}, 98)
+    assert {f'v{i}' for i in range(4)} - {row['id'] for row in candidates} == kept

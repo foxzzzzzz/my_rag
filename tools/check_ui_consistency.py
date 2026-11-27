@@ -382,9 +382,15 @@ def verify_detail(page, fixture, output):
     expect(page.locator(".library-source-row")).to_have_count(6)
 
 
-def verify_ask(page, output):
+def verify_ask(page, output, *, baseline=False):
     nav(page, "问答")
-    expect(page.get_by_text("索引可用", exact=True)).to_be_visible()
+    if baseline:
+        expect(page.get_by_text("索引可用", exact=True)).to_be_visible()
+    else:
+        settings = page.locator(".rag-settings")
+        expect(settings.locator("summary")).to_contain_text("全部已批准资料")
+        expect(page.get_by_role("radio", name="自定义范围")).to_be_hidden()
+        settings.locator("summary").press("Enter")
     page.get_by_role("radio", name="自定义范围").check()
     page.get_by_role("searchbox", name="搜索资料标题").fill("OpenManus")
     page.get_by_role("button", name="全选搜索结果").click()
@@ -396,7 +402,121 @@ def verify_ask(page, output):
     submit.click()
     page.get_by_role("button", name="查看引用 ①").first.click()
     expect(page.get_by_text("离线复核证据。")).to_be_visible()
+    if not baseline:
+        expect(page.get_by_role("checkbox", name="我同意本次操作可能产生模型费用")).not_to_be_checked()
+        expect(submit).to_be_disabled()
+        settings.locator("summary").click()
+        expect(settings.locator("summary")).to_contain_text("本地关键词")
     screenshot(page, output, "ask")
+
+
+def verify_mobile_review_feedback(browser, address, output, width):
+    fixture = Fixture()
+    fixture.sources[5]["current_version_id"] = None
+    fixture.tasks[5]["status"] = "queued"
+    height = 844
+    page, errors = open_page(browser, address, fixture, width, height)
+    outcome = "conflict"
+    versions = [{"id": "v-old", "created_at": "2026-11-17T02:00:00Z", "output_kind": "human_edited"},
+                {"id": "v0", "created_at": "2026-11-19T02:00:00Z"}]
+
+    def detail_route(route):
+        is_history = "version_id=v-old" in route.request.url
+        if outcome == "refresh_failure" and fixture.review and not is_history:
+            return route.abort("failed")
+        route.fulfill(json={"source": fixture.sources[0], "eligible": False,
+                            "current": {"id": "v-old" if is_history else "v0", "content_sha256": "b" * 64,
+                                        "result": {"notes": "\n\n".join(["核对长篇正文中的来源证据。"] * 48)}},
+                            "versions": versions, "viewing_history": is_history, "review": fixture.review})
+
+    def review_route(route):
+        if outcome == "conflict":
+            return route.fulfill(status=409, json={"error": "version_conflict"})
+        fixture.respond(route)
+
+    page.route(re.compile(r"/api/sources/s0(?:\?[^/]+)?$"), detail_route)
+    page.route(re.compile(r"/api/sources/s0/reviews$"), review_route)
+    nav_button = page.get_by_role("button", name="问答", exact=True)
+    assert nav_button.bounding_box()["height"] >= 44
+    row_target = page.locator(".library-row-select").first
+    assert all(row_target.bounding_box()[dimension] >= 44 for dimension in ("width", "height"))
+    row_target.click(position={"x": 3, "y": 3})
+    expect(row_target.locator("input")).to_be_checked()
+    page.locator(".library-source-row .source").first.click()
+    notes = page.get_by_role("button", name="笔记", exact=True)
+    assert notes.bounding_box()["height"] >= 44
+    notes.click()
+    page.get_by_role("combobox", name="查看版本").select_option("v-old")
+    history_jump = page.get_by_role("button", name="查看审核记录", exact=True)
+    expect(history_jump).to_be_visible()
+    history_jump.press("Enter")
+    expect(page.get_by_role("heading", name="审核记录", exact=True)).to_be_focused()
+    expect(page.get_by_role("button", name="提交批准")).to_have_count(0)
+    page.get_by_role("combobox", name="查看版本").select_option("")
+    notes.click()
+    heading = page.get_by_role("heading", name="审核", exact=True)
+    assert heading.bounding_box()["y"] > height
+    page.get_by_role("button", name="前往审核").press("Enter")
+    expect(heading).to_be_focused()
+    expect(heading).to_be_in_viewport()
+    score = page.get_by_role("spinbutton", name="评分")
+    score.fill("98")
+    page.get_by_role("button", name="保存评分草稿").click()
+    expect(page.locator(".review-panel").get_by_role("status")).to_contain_text("评分草稿已保存")
+    submit = page.get_by_role("button", name="提交批准")
+    assert submit.bounding_box()["height"] >= 44
+    submit.click()
+    local = page.locator(".review-panel").get_by_role("alert")
+    expect(local).to_contain_text("资料版本已更新")
+    expect(local).to_be_in_viewport()
+    expect(score).to_have_value("98")
+    expect(page.locator(".app-feedback.error")).to_have_count(0)
+    screenshot(page, output, "review-local-error")
+    outcome = "refresh_failure"
+    submit.click()
+    expect(page.locator(".review-panel").get_by_role("status")).to_have_text("审核已提交，页面状态暂未刷新。")
+    expect(submit).to_be_disabled()
+    assert len([write for write in fixture.writes if write[1].endswith("/reviews")]) == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    nav(page, "任务")
+    pending = page.locator(".task-item").filter(has_text=fixture.sources[5]["title"])
+    pending.get_by_role("button", name="查看资料", exact=True).click()
+    expect(page.get_by_text("尚未生成可审核内容。")).to_be_visible()
+    expect(page.locator(".review-jump")).to_have_count(0)
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    page.close()
+
+
+def verify_login_errors(browser, address):
+    fixture = Fixture()
+    fixture.logged_in = False
+    page, errors = open_page(browser, address, fixture, 390, 844)
+    for status, code, message in (
+        (401, "invalid_credentials", "密码错误，请重试。"),
+        (429, "rate_limited", "尝试次数过多，请稍后再试。"),
+        (403, "csrf_invalid", "登录请求未能完成，请刷新页面后重试。"),
+        (413, "body_too_large", "登录请求过大，请检查输入后重试。"),
+        (503, "internal_error", "登录服务暂时不可用，请稍后重试。"),
+        (502, None, "登录服务暂时不可用，请稍后重试。"),
+        (0, None, "无法连接服务。"),
+    ):
+        def handle(route):
+            if status == 0:
+                route.abort("failed")
+            elif code:
+                route.fulfill(status=status, json={"error": code})
+            else:
+                route.fulfill(status=status, content_type="text/html", body="Bad gateway")
+        page.route("**/api/auth/login", handle)
+        page.locator("input[type=password]").fill("mock-password")
+        page.get_by_role("button", name="登录", exact=True).click()
+        expect(page.locator(".app-feedback.error")).to_have_text(message)
+        page.unroute("**/api/auth/login", handle)
+    page.locator("input[type=password]").fill("mock-password")
+    page.get_by_role("button", name="登录", exact=True).click()
+    expect(page.locator(".library-source-row")).to_have_count(6)
+    assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
+    page.close()
 
 
 def verify_revision_editor(browser, address, output, width, height):
@@ -1107,7 +1227,7 @@ def snapshot_baseline(browser, address, output):
         screenshot(page, output, "library")
         if width in (1440, 390):
             verify_detail(page, fixture, output)
-            verify_ask(page, output)
+            verify_ask(page, output, baseline=True)
             verify_management(page, output)
         assert not fixture.unexpected and not errors, (fixture.unexpected, errors)
         page.close()
@@ -1136,6 +1256,9 @@ def main():
             page.close()
             verify_retry_consent(browser, address, args.screenshots, width, height)
         verify_connection(browser, address, args.screenshots)
+        verify_login_errors(browser, address)
+        for width in (390, 320):
+            verify_mobile_review_feedback(browser, address, args.screenshots, width)
         verify_scroll(browser, address)
         verify_task_failure_priority(browser, address, args.screenshots)
         for width, height in ((1440, 900), (390, 844)):

@@ -25,7 +25,7 @@ class DouyinImportTests(unittest.TestCase):
         self.assertEqual(self.calls,['resolve','download'])
         with self.worker.store._tx() as c: self.assertIsNone(c.execute('SELECT * FROM video_maintenance').fetchone())
     def test_platform_title_is_stored_separately(self):
-        source=self.worker.store.import_source('video','d'*64,'v.mp4','originals/'+('d'*64))['source']
+        source=self.worker.store.import_source('video','d'*64,'douyin-123.mp4','originals/'+('d'*64))['source']
         self.worker.resolver=lambda *args: {'title':'作品标题\n第二行','media_url':'https://secret.example/media'}
         with patch('personalkb.douyin_import.workflow.import_file',return_value={'source':source}):
             self.worker.enqueue('https://www.douyin.com/video/123',True)
@@ -88,6 +88,34 @@ class DouyinImportTests(unittest.TestCase):
         with self.worker.store._tx() as c:
             self.assertEqual(c.execute('SELECT count(*) FROM sources').fetchone()[0],0)
             self.assertEqual(c.execute('SELECT count(*) FROM tasks').fetchone()[0],0)
+
+    def test_real_import_writes_filename_atomically_and_preserves_duplicate(self):
+        from personalkb.workflow_store import WorkflowStore
+        blob=b'\x00\x00\x00\x10ftypmp42'
+        self.worker.downloader=lambda url,target,cfg: target.write_bytes(blob)
+        original=WorkflowStore.import_source
+        observed=[]
+        def capture(store,kind,digest,name,blob_relpath,**kwargs):
+            observed.append((name, callable(kwargs.get('commit_guard'))))
+            return original(store,kind,digest,name,blob_relpath,**kwargs)
+        class Probe: stderr=b'Stream Video:'
+        self.worker.enqueue('https://www.douyin.com/video/123',True)
+        with patch.object(WorkflowStore,'import_source',capture), patch('personalkb.workflow.shutil.which',return_value='ffmpeg'), patch('personalkb.workflow.subprocess.run',return_value=Probe()):
+            result=self.worker.process_next()
+        self.assertEqual(result['status'],'succeeded')
+        self.assertEqual(observed, [('douyin-123.mp4', True)])
+        self.assertEqual(self.worker.store.get_source(result['source_id'])['original_name'], 'douyin-123.mp4')
+
+        # A different work with identical bytes must keep the original source and name.
+        self.worker.share_resolver=lambda url,cfg:'456'
+        self.worker.enqueue('https://www.douyin.com/video/456',True)
+        with patch.object(WorkflowStore,'import_source',capture), patch('personalkb.workflow.shutil.which',return_value='ffmpeg'), patch('personalkb.workflow.subprocess.run',return_value=Probe()):
+            duplicate=self.worker.process_next()
+        self.assertEqual(duplicate['status'],'succeeded')
+        self.assertEqual(duplicate['source_id'],result['source_id'])
+        self.assertEqual(observed[-1], ('douyin-456.mp4', True))
+        self.assertEqual(self.worker.store.get_source(result['source_id'])['original_name'], 'douyin-123.mp4')
+        self.assertEqual(len(self.worker.store.list_tasks()), 1)
 
     def test_disabled_and_rights(self):
         self.cfg['enabled']=False

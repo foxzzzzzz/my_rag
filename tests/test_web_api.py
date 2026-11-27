@@ -71,6 +71,31 @@ class WebApiTests(unittest.TestCase):
         assert 'sandbox' in original.headers['content-security-policy']
         assert client.get('/api/sources').json()['items'][0]['original_name']=='hello.html'
 
+    def test_upload_transaction_failure_and_retry(self):
+        from unittest.mock import patch
+        import sqlite3
+        from personalkb.workflow_store import WorkflowStore
+
+        url='/api/imports?filename=original.html&rights_confirmed=true'
+        payload=b'<html><body>atomic upload</body></html>'
+        original=WorkflowStore._tx
+        from contextlib import contextmanager
+        @contextmanager
+        def fail_after_write(store):
+            with original(store) as db:
+                yield db
+                if db.execute("SELECT COUNT(*) FROM sources").fetchone()[0]:
+                    raise sqlite3.OperationalError('injected failure')
+        with patch.object(WorkflowStore, '_tx', fail_after_write):
+            assert self.client.put(url,content=payload,headers=self.h).status_code == 503
+        assert self.service.store.list_sources()==[]
+        response=self.client.put(url,content=payload,headers=self.h)
+        assert response.status_code==200 and response.json()['name']=='original.html'
+        duplicate=self.client.put(url.replace('original.html','other.html'),content=payload,headers=self.h).json()
+        assert duplicate['duplicate'] and duplicate['name']=='original.html'
+        assert duplicate['source_id']==response.json()['source_id']
+        assert duplicate['task_id']==response.json()['task_id']
+
     def test_saved_upload_caps_apply_independently(self):
         mib = 1024 * 1024
         url = '/api/imports?filename=upload.html&rights_confirmed=true'

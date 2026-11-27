@@ -157,12 +157,11 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
             while login_attempts and login_attempts[0]<=now-auth['login_window_seconds']: login_attempts.popleft()
             if len(login_attempts)>=auth['login_limit']: return JSONResponse({'error':'rate_limited'},429)
             login_attempts.append(now)
-        try:
-            payload=await read_object(req)
-            password=payload.get('password')
-            if not isinstance(password,str) or len(password)>1024: raise ValueError()
-            valid=await run_in_threadpool(verify_password,password,auth['password_hash'])
-        except (ValueError,WorkflowError): return JSONResponse({'error':'invalid_credentials'},400)
+        payload=await read_object(req)
+        password=payload.get('password')
+        if not isinstance(password,str) or len(password)>1024: raise WorkflowError('invalid_request')
+        try: valid=await run_in_threadpool(verify_password,password,auth['password_hash'])
+        except UnicodeEncodeError: raise WorkflowError('invalid_request') from None
         if not valid: return JSONResponse({'error':'invalid_credentials'},401)
         with session_lock:
             sessions.pop(req.cookies.get('pkb_session'),None)
@@ -291,11 +290,9 @@ def create_app(workflow_config=None,pipeline_config=None,web_config=None,service
                     if size>limit: return JSONResponse({'error':'too_large'},413)
                     f.write(chunk)
             upload_config = {**wc, 'max_upload_bytes': limit, 'max_html_bytes': html_size}
-            result=await run_in_threadpool(workflow.import_file,upload_config,path,rights_confirmed=True)
+            result=await run_in_threadpool(workflow.import_file,upload_config,path,rights_confirmed=True,original_filename=filename)
             source=result['source']; task=result['task']
-            if not result['duplicate']:
-                with service.store._tx() as db: db.execute('UPDATE sources SET original_name=? WHERE id=?',(filename,source['id']))
-            return {'source_id':source['id'],'task_id':task['id'],'duplicate':result['duplicate'],'name':source['original_name'] if result['duplicate'] else filename,'kind':source['kind']}
+            return {'source_id':source['id'],'task_id':task['id'],'duplicate':result['duplicate'],'name':source['original_name'],'kind':source['kind']}
         finally: path.unlink(missing_ok=True)
     async def read_object(req):
         try:

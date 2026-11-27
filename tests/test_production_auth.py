@@ -49,6 +49,27 @@ def test_public_and_login_flow(setup):
         assert client.post('/api/auth/logout',headers={**h,'x-csrf-token':token}).status_code==200
         assert client.get('/api/sources').status_code==401
 
+def test_login_request_errors_are_distinct(setup):
+    c, wc = setup
+    c['max_json_bytes'] = 1100
+    with TestClient(create_app(wc,None,c,Fake()),base_url='https://testserver') as client:
+        h={'origin':'https://testserver'}
+        for payload, status, error in [
+            ('{', 400, 'invalid_json'),
+            (json.dumps({'password': 123}), 400, 'invalid_request'),
+            (json.dumps({'password': 'x' * 1025}), 400, 'invalid_request'),
+            ('x' * 1101, 413, 'body_too_large'),
+            (json.dumps({'password': 'bad'}), 401, 'invalid_credentials'),
+        ]:
+            result=client.post('/api/auth/login',content=payload,headers=h)
+            assert (result.status_code,result.json()['error']) == (status,error)
+
+def test_login_lone_surrogate_is_invalid_request(setup):
+    c, wc = setup
+    with TestClient(create_app(wc,None,c,Fake()),base_url='https://testserver') as client:
+        result=client.post('/api/auth/login',content=r'{"password":"\ud800"}',headers={'origin':'https://testserver'})
+        assert (result.status_code,result.json()['error']) == (400,'invalid_request')
+
 def test_limit_and_restart(setup):
     c,wc=setup; app=create_app(wc,None,c,Fake()); h={'origin':'https://testserver'}
     with TestClient(app,base_url='https://testserver') as client:

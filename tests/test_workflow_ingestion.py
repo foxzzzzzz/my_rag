@@ -19,6 +19,7 @@ class IngestionTests(unittest.TestCase):
 
     def test_import_worker_export(self):
         source = import_file(self.config, self.html, True)
+        self.assertEqual(source['source']['original_name'], self.html.name)
         self.assertTrue(import_file(self.config, self.html, True)['duplicate'])
         v = run_once(self.config)
         self.assertIn('body', v['result']['body'])
